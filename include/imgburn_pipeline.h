@@ -1,0 +1,99 @@
+/**
+ * @file imgburn_pipeline.h
+ * @brief ImgBurn Core C - Burn & Verify Streaming Pipelines
+ *
+ * Implements the asynchronous burning and verification pipeline,
+ * linking Image/Audio input -> Ring Buffer -> MMC SCSI writer thread,
+ * with real-time transfer stats (rate, buffer levels, ETA).
+ */
+
+#ifndef IMGBURN_PIPELINE_H
+#define IMGBURN_PIPELINE_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "imgburn_spti.h"
+#include "imgburn_mmc.h"
+#include "imgburn_ringbuffer.h"
+#include <stdint.h>
+#include <stdbool.h>
+
+typedef enum {
+    PIPELINE_STATE_IDLE = 0,
+    PIPELINE_STATE_INITIALIZING,
+    PIPELINE_STATE_WRITING,
+    PIPELINE_STATE_FLUSHING_CACHE,
+    PIPELINE_STATE_CLOSING_SESSION,
+    PIPELINE_STATE_VERIFYING,
+    PIPELINE_STATE_COMPLETED,
+    PIPELINE_STATE_ABORTED,
+    PIPELINE_STATE_FAILED
+} PipelineState;
+
+/**
+ * @brief Real-time burn/verify telemetry stats
+ */
+typedef struct {
+    PipelineState state;
+    uint32_t currentLba;
+    uint32_t totalSectors;
+    int progressPercent;            /* 0 .. 100 */
+
+    uint32_t hostBufferPercent;     /* 0 .. 100 (Ring buffer level) */
+    uint32_t deviceBufferPercent;   /* 0 .. 100 (Hardware drive FIFO level) */
+
+    double currentSpeedKBps;        /* Write / read rate */
+    double speedMultiplier;         /* e.g. 4.0x, 8.0x, 16.0x */
+
+    uint32_t elapsedTimeSec;
+    uint32_t remainingTimeSec;
+
+    uint32_t miscomparesCount;      /* For Verify mode */
+    uint32_t retriesCount;
+    char statusMessage[128];
+} PipelineStats;
+
+typedef void (*PipelineProgressCallback)(const PipelineStats* stats, void* userData);
+
+/**
+ * @brief Burn Pipeline Configuration
+ */
+typedef struct {
+    OpticalDrive* drive;
+    const wchar_t* imagePath;       /* Path to .iso, .bin */
+    uint16_t writeSpeedKbps;        /* 0xFFFF = MAX */
+    bool testMode;                  /* 设备测试写入协议尚未实现，启用时明确失败。 */
+    bool verifyAfterWrite;
+    bool ejectWhenDone;
+    size_t ringBufferBytes;         /* e.g. 32 MB or 64 MB */
+} BurnConfig;
+
+/**
+ * @brief Execute Write Mode: burn an image file to optical disc
+ *
+ * 同步执行，内部使用源读取线程；调用者可自行在工作线程运行并接收进度回调。
+ *
+ * @param config Burn parameters
+ * @param callback Progress notification function
+ * @param userData Context passed to callback
+ * @return True if burn (and verify if enabled) completed successfully
+ */
+bool pipeline_burn_image(const BurnConfig* config,
+                         PipelineProgressCallback callback,
+                         void* userData);
+
+/**
+ * @brief Execute Verify Mode: verify optical disc against an image file
+ */
+bool pipeline_verify_disc(OpticalDrive* drive,
+                          const wchar_t* sourceImagePath,
+                          PipelineProgressCallback callback,
+                          void* userData);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* IMGBURN_PIPELINE_H */

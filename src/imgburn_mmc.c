@@ -1,0 +1,238 @@
+/**
+ * @file imgburn_mmc.c
+ * @brief ImgBurn Core C - SCSI Multimedia Commands (MMC) Implementation
+ */
+
+#include "imgburn_mmc.h"
+#include <string.h>
+
+/* Endian helpers for SCSI CDB (SCSI uses Big-Endian) */
+static inline void write_be16(uint8_t* p, uint16_t v) {
+    p[0] = (uint8_t)(v >> 8);
+    p[1] = (uint8_t)(v & 0xFF);
+}
+
+static inline void write_be32(uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)((v >> 16) & 0xFF);
+    p[2] = (uint8_t)((v >> 8) & 0xFF);
+    p[3] = (uint8_t)(v & 0xFF);
+}
+
+static inline uint16_t read_be16(const uint8_t* p) {
+    return (uint16_t)((p[0] << 8) | p[1]);
+}
+
+static inline uint32_t read_be32(const uint8_t* p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+bool mmc_test_unit_ready(OpticalDrive* drive) {
+    uint8_t cdb[6] = { 0x00, 0, 0, 0, 0, 0 };
+    return spti_send_cdb(drive, cdb, 6, NULL, 0, true, 5);
+}
+
+bool mmc_inquiry(OpticalDrive* drive, uint8_t* outBuffer, uint32_t bufSize) {
+    if (!outBuffer || bufSize < 36) return false;
+    uint8_t cdb[6] = { 0x12, 0, 0, 0, (uint8_t)bufSize, 0 };
+    return spti_send_cdb(drive, cdb, 6, outBuffer, bufSize, true, 5);
+}
+
+MmcProfile mmc_get_current_profile(OpticalDrive* drive) {
+    uint8_t cdb[10] = { 0 };
+    cdb[0] = 0x46; /* GET CONFIGURATION */
+    cdb[1] = 0x01; /* RT = 01b (Query current profile) */
+    cdb[8] = 8;    /* Allocation length: header is 8 bytes */
+
+    uint8_t buffer[8] = { 0 };
+    if (!spti_send_cdb(drive, cdb, 10, buffer, 8, true, 5)) {
+        return MMC_PROFILE_UNKNOWN;
+    }
+
+    uint16_t profile = read_be16(&buffer[6]);
+    return (MmcProfile)profile;
+}
+
+const char* mmc_get_profile_name(MmcProfile profile) {
+    switch (profile) {
+        case MMC_PROFILE_NONE:            return "No Profile (Empty Drive)";
+        case MMC_PROFILE_CD_ROM:          return "CD-ROM";
+        case MMC_PROFILE_CD_R:            return "CD-R";
+        case MMC_PROFILE_CD_RW:           return "CD-RW";
+        case MMC_PROFILE_DVD_ROM:         return "DVD-ROM";
+        case MMC_PROFILE_DVD_R_SEQ:       return "DVD-R Sequential";
+        case MMC_PROFILE_DVD_RAM:         return "DVD-RAM";
+        case MMC_PROFILE_DVD_RW_RO:       return "DVD-RW Restricted Overwrite";
+        case MMC_PROFILE_DVD_RW_SEQ:      return "DVD-RW Sequential";
+        case MMC_PROFILE_DVD_R_DL_SEQ:    return "DVD-R Dual Layer Sequential";
+        case MMC_PROFILE_DVD_R_DL_JUMP:   return "DVD-R Dual Layer Layer Jump";
+        case MMC_PROFILE_DVD_RW_DL:       return "DVD-RW Dual Layer";
+        case MMC_PROFILE_DVD_PLUS_RW:     return "DVD+RW";
+        case MMC_PROFILE_DVD_PLUS_R:      return "DVD+R";
+        case MMC_PROFILE_DVD_PLUS_RW_DL:  return "DVD+RW Dual Layer";
+        case MMC_PROFILE_DVD_PLUS_R_DL:   return "DVD+R Dual Layer";
+        case MMC_PROFILE_BD_ROM:          return "BD-ROM";
+        case MMC_PROFILE_BD_R_SRM:        return "BD-R Sequential (SRM)";
+        case MMC_PROFILE_BD_R_RRM:        return "BD-R Random (RRM)";
+        case MMC_PROFILE_BD_RE:           return "BD-RE";
+        default:                          return "Unknown Optical Media";
+    }
+}
+
+bool mmc_read_capacity(OpticalDrive* drive, uint32_t* outLastLba, uint32_t* outBlockSize) {
+    uint8_t cdb[10] = { 0 };
+    cdb[0] = 0x25; /* READ CAPACITY */
+
+    uint8_t buffer[8] = { 0 };
+    if (!spti_send_cdb(drive, cdb, 10, buffer, 8, true, 10)) {
+        return false;
+    }
+
+    if (outLastLba) *outLastLba = read_be32(&buffer[0]);
+    if (outBlockSize) *outBlockSize = read_be32(&buffer[4]);
+    return true;
+}
+
+bool mmc_read_disc_information(OpticalDrive* drive, MmcDiscInfo* outInfo) {
+    if (!outInfo) return false;
+    memset(outInfo, 0, sizeof(*outInfo));
+
+    uint8_t cdb[10] = { 0 };
+    cdb[0] = 0x51; /* READ DISC INFORMATION */
+    cdb[8] = 34;   /* Standard disc information length */
+
+    uint8_t buffer[34] = { 0 };
+    if (!spti_send_cdb(drive, cdb, 10, buffer, sizeof(buffer), true, 10)) {
+        return false;
+    }
+
+    /* Byte 2: Status bits */
+    uint8_t discStatusBits = buffer[2] & 0x03;
+    outInfo->discStatus = (MmcDiscStatus)discStatusBits;
+    outInfo->isErasable = (buffer[2] & 0x10) != 0;
+
+    outInfo->firstTrack = buffer[3];
+    outInfo->numSessions = buffer[4];
+    outInfo->lastTrack = buffer[6];
+
+    /* Byte 16-19: Lead-in LBA */
+    outInfo->leadInLba = read_be32(&buffer[16]);
+    /* Byte 20-23: Last possible Lead-out LBA */
+    outInfo->leadOutLba = read_be32(&buffer[20]);
+
+    outInfo->currentProfile = mmc_get_current_profile(drive);
+    outInfo->profileName = mmc_get_profile_name(outInfo->currentProfile);
+
+    return true;
+}
+
+bool mmc_read_track_information(OpticalDrive* drive, uint32_t lbaOrTrack, bool isLba, MmcTrackInfo* outInfo) {
+    if (!outInfo) return false;
+    memset(outInfo, 0, sizeof(*outInfo));
+
+    uint8_t cdb[10] = { 0 };
+    cdb[0] = 0x52; /* READ TRACK INFORMATION */
+    cdb[1] = isLba ? 0x00 : 0x01; /* Address type: 0 = LBA, 1 = Track Number */
+    write_be32(&cdb[2], lbaOrTrack);
+    cdb[8] = 36; /* Track information length */
+
+    uint8_t buffer[36] = { 0 };
+    if (!spti_send_cdb(drive, cdb, 10, buffer, sizeof(buffer), true, 10)) {
+        return false;
+    }
+
+    outInfo->trackNumber = buffer[2];
+    outInfo->sessionNumber = buffer[3];
+    outInfo->isDamage = (buffer[5] & 0x20) != 0;
+    outInfo->isCopy = (buffer[5] & 0x10) != 0;
+    outInfo->isPacket = (buffer[6] & 0x01) != 0;
+    outInfo->isBlank = (buffer[6] & 0x40) != 0;
+
+    outInfo->trackStartLba = read_be32(&buffer[8]);
+    outInfo->nextWritableAddress = read_be32(&buffer[12]);
+    outInfo->freeBlocks = read_be32(&buffer[16]);
+    outInfo->trackSize = read_be32(&buffer[24]);
+
+    return true;
+}
+
+bool mmc_set_speed(OpticalDrive* drive, uint16_t readSpeedKbps, uint16_t writeSpeedKbps) {
+    uint8_t cdb[12] = { 0 };
+    cdb[0] = 0xBB; /* SET CD SPEED */
+    write_be16(&cdb[2], readSpeedKbps);
+    write_be16(&cdb[4], writeSpeedKbps);
+
+    return spti_send_cdb(drive, cdb, 12, NULL, 0, true, 10);
+}
+
+bool mmc_synchronize_cache(OpticalDrive* drive) {
+    uint8_t cdb[10] = { 0 };
+    cdb[0] = 0x35; /* SYNCHRONIZE CACHE */
+    return spti_send_cdb(drive, cdb, 10, NULL, 0, true, 60);
+}
+
+bool mmc_close_track_session(OpticalDrive* drive, uint8_t closeType, uint16_t trackNumber) {
+    uint8_t cdb[10] = { 0 };
+    cdb[0] = 0x5B; /* CLOSE TRACK SESSION */
+    /* Function field:
+     * 001b = Close Track
+     * 010b = Close Session / Finalize
+     */
+    cdb[2] = closeType & 0x07;
+    write_be16(&cdb[4], trackNumber);
+
+    /* Closing track/session can take up to 2-3 minutes */
+    return spti_send_cdb(drive, cdb, 10, NULL, 0, true, 180);
+}
+
+bool mmc_blank_disc(OpticalDrive* drive, uint8_t blankType) {
+    uint8_t cdb[12] = { 0 };
+    cdb[0] = 0xA1; /* BLANK */
+    cdb[1] = blankType & 0x07; /* 0 = Entire disc, 1 = Minimal */
+
+    /* Erasing a full disc can take 15+ minutes */
+    return spti_send_cdb(drive, cdb, 12, NULL, 0, true, 900);
+}
+
+bool mmc_load_eject(OpticalDrive* drive, bool eject) {
+    uint8_t cdb[6] = { 0 };
+    cdb[0] = 0x1B; /* START STOP UNIT */
+    /* LoEj bit: 0x02 = Load/Eject operation
+     * Start bit: 0x00 = Eject/Stop, 0x01 = Load/Start
+     */
+    cdb[4] = eject ? 0x02 : 0x03;
+
+    return spti_send_cdb(drive, cdb, 6, NULL, 0, true, 15);
+}
+
+bool mmc_reserve_track(OpticalDrive* drive, uint32_t reservationSizeLba) {
+    uint8_t cdb[10] = { 0 };
+    cdb[0] = 0x53; /* RESERVE TRACK */
+    write_be32(&cdb[5], reservationSizeLba);
+
+    return spti_send_cdb(drive, cdb, 10, NULL, 0, true, 15);
+}
+
+bool mmc_write_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, const void* buffer) {
+    if (!buffer || blockCount == 0) return false;
+
+    uint8_t cdb[10] = { 0 };
+    cdb[0] = 0x2A; /* WRITE (10) */
+    write_be32(&cdb[2], startLba);
+    write_be16(&cdb[7], blockCount);
+
+    uint32_t transferBytes = blockCount * 2048; /* Standard optical block size = 2048 */
+    return spti_send_cdb(drive, cdb, 10, (void*)buffer, transferBytes, false, 30);
+}
+
+bool mmc_read_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, void* buffer) {
+    if (!buffer || blockCount == 0) return false;
+
+    uint8_t cdb[10] = { 0 };
+    cdb[0] = 0x28; /* READ (10) */
+    write_be32(&cdb[2], startLba);
+    write_be16(&cdb[7], blockCount);
+
+    uint32_t transferBytes = blockCount * 2048;
+    return spti_send_cdb(drive, cdb, 10, buffer, transferBytes, true, 30);
+}

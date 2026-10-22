@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32"><Configuration>Debug</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{DF9A490D-6451-4D70-842B-D591C97FCE7E}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>ImgBurn</RootNamespace>
+    <ProjectName>ImgBurn</ProjectName>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(MSBuildProjectDirectory)\out\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(OutDir)obj\</IntDir>
+    <TargetName>ImgBurn</TargetName>
+    <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <CompileAs>CompileAsC</CompileAs>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <Optimization Condition="'$(Configuration)'=='Debug'">Disabled</Optimization>
+      <Optimization Condition="'$(Configuration)'=='Release'">MaxSpeed</Optimization>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\imgburn_audio.c" />
+    <ClCompile Include="src\imgburn_changer.c" />
+    <ClCompile Include="src\imgburn_cli.c" />
+    <ClCompile Include="src\imgburn_fs.c" />
+    <ClCompile Include="src\imgburn_image.c" />
+    <ClCompile Include="src\imgburn_mmc.c" />
+    <ClCompile Include="src\imgburn_pipeline.c" />
+    <ClCompile Include="src\imgburn_ringbuffer.c" />
+    <ClCompile Include="src\imgburn_spti.c" />
+    <ClCompile Include="src\imgburn_udf.c" />
+    <ClCompile Include="src\imgburn_vendor.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="include\imgburn_audio.h" />
+    <ClInclude Include="include\imgburn_changer.h" />
+    <ClInclude Include="include\imgburn_fs.h" />
+    <ClInclude Include="include\imgburn_image.h" />
+    <ClInclude Include="include\imgburn_mmc.h" />
+    <ClInclude Include="include\imgburn_pipeline.h" />
+    <ClInclude Include="include\imgburn_ringbuffer.h" />
+    <ClInclude Include="include\imgburn_spti.h" />
+    <ClInclude Include="include\imgburn_udf.h" />
+    <ClInclude Include="include\imgburn_vendor.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
