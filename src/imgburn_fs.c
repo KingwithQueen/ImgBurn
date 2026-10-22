@@ -417,14 +417,10 @@ static bool write_all_files_data(ImageBuilder* b, HANDLE output, ImageProgressFn
     return success;
 }
 
-bool image_builder_create_iso(ImageBuilder* b,
-                              const wchar_t* outputIsoPath,
-                              ImageProgressFn progressCallback,
-                              void* userData) {
-    if (!b || !b->rootDir || !outputIsoPath || b->config.totalImageSectors == 0) return false;
-
-    wchar_t destination[MAX_PATH], temporary[MAX_PATH];
-    DWORD length = GetFullPathNameW(outputIsoPath, MAX_PATH, destination, NULL);
+bool image_builder_check_destination(const ImageBuilder* b, const wchar_t* path) {
+    if (!b || !b->rootDir || !path) return false;
+    wchar_t destination[MAX_PATH];
+    DWORD length = GetFullPathNameW(path, MAX_PATH, destination, NULL);
     if (length == 0 || length >= MAX_PATH) return false;
     FsFileNode** sources = NULL;
     int sourceCount = 0, sourceCapacity = 0;
@@ -443,6 +439,17 @@ bool image_builder_create_iso(ImageBuilder* b,
             info.nFileIndexHigh == targetInfo.nFileIndexHigh && info.nFileIndexLow == targetInfo.nFileIndexLow)) { free(sources); return false; }
     }
     free(sources);
+    return true;
+}
+
+bool image_builder_create_iso(ImageBuilder* b,
+                              const wchar_t* outputIsoPath,
+                              ImageProgressFn progressCallback,
+                              void* userData) {
+    if (!b || !b->rootDir || !outputIsoPath || b->config.totalImageSectors == 0 || !image_builder_check_destination(b, outputIsoPath)) return false;
+    wchar_t destination[MAX_PATH], temporary[MAX_PATH];
+    DWORD length = GetFullPathNameW(outputIsoPath, MAX_PATH, destination, NULL);
+    if (length == 0 || length >= MAX_PATH) return false;
     static volatile LONG sequence = 0;
     HANDLE hOut = INVALID_HANDLE_VALUE;
     for (int attempt = 0; attempt < 16; attempt++) {

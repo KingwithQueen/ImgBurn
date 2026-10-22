@@ -44,12 +44,12 @@ msbuild ImgBurn.sln /m /p:Configuration=Release /p:Platform=x64
 | --- | --- |
 | Read | 缺少从光盘读取完整镜像的应用流程 |
 | Build | 已实现 ISO/Joliet 双字节序路径表、目录扇区填充、名称冲突处理、多 extent 大文件及 UDF 1.02/2.50 文件树。UDF 使用 64 位文件长度和 AED 分配表续接，2.50 使用 EFE、元数据分区与副本。支持纯 ISO、ISO/Joliet、纯 UDF 或桥接镜像；保留输入一致性和目标文件保护 |
-| DVD-Video / Blu-ray 布局 | DVD 使用 ISO+UDF 1.02，补建 AUDIO_TS、过滤 VIDEO_TS、按视频文件顺序排列、32 KiB 对齐、分隔 IFO/BUP，并在输出中修正 IFO/BUP 与标题集的扇区地址。Blu-ray 使用纯 UDF 2.50、EFE、元数据副本、64 KiB 文件对齐、分离的主备描述区及 BDMV/BDAV 目录补齐。输入需要已经制作好的视频目录；完整导航、播放及介质验收仍待完成 |
+| DVD-Video / Blu-ray 布局 | DVD 使用 ISO+UDF 1.02，补建 AUDIO_TS、过滤 VIDEO_TS、按视频文件顺序排列，并保证 IFO 末尾与 BUP 开头至少间隔 32 KiB。在输出中修正 IFO/BUP 与标题集地址；标题导航交叉检查 PGC、PTT、Cell 地址、VOBU 表和 NAV 包，支持从实际布局选取 OTP 层切换单元、加入填充、更新 SPLIP 并生成 MDS。Blu-ray 使用纯 UDF 2.50、EFE、元数据副本、64 KiB 文件对齐、分离的主备描述区及 BDMV/BDAV 目录补齐。输入需要已经制作好的视频目录；完整菜单导航、播放及介质验收仍待完成 |
 | Write | 已修正输入、写入、收尾及写后校验错误传播；测试写入明确返回尚未实现，介质准备协议与真实刻录未验收 |
 | Verify | 已修正空输入、非扇区对齐输入、读取错误及失配结果；真实设备与完整原版流程尚未验收 |
 | Discovery | 尚未实现 |
 | 桌面界面、设置、任务队列 | 尚未实现 |
-| 音频、CUE、MDS、层切换点 | CUE 支持 UTF-8、UTF-16 LE/BE、本机 ANSI、BINARY/MOTOROLA、混合扇区尺寸、INDEX 00–99、FLAGS、SONGWRITER、CDTEXTFILE 和多会话；WAVE、AIFF、MP3 等音频按解码后的实际 PCM 计数。MDS 支持 1.x 多会话 CD、DVD、多轨道、非零数据偏移及分卷引用，提供 DVD 分卷描述文件生成接口。DVD 层切换候选尚需接入 PGC；CD 多会话写入、完整格式兼容和刻录集成仍待完成 |
+| 音频、CUE、MDS、层切换点 | CUE 支持 UTF-8、UTF-16 LE/BE、本机 ANSI、BINARY/MOTOROLA、混合扇区尺寸、INDEX 00–99、FLAGS、SONGWRITER、CDTEXTFILE 和多会话；下一会话前要求 LEAD-OUT，导出器保留该声明。WAVE、AIFF、MP3 等音频按解码后的实际 PCM 计数。MDS 支持 1.x 多会话 CD、DVD、多轨道、非零数据偏移及分卷引用，提供 OTP/PTP DVD 描述生成接口，PTP 可保留 L1 大于 L0 的布局。CD 多会话写入、完整格式兼容和刻录集成仍待完成 |
 | 厂商控制与换盘设备 | 有部分命令封装；参数覆盖及真实硬件行为未验收 |
 | 原版命令行接口 | 当前使用子命令，尚不兼容原版 `/MODE` 等接口 |
 
@@ -57,9 +57,11 @@ msbuild ImgBurn.sln /m /p:Configuration=Release /p:Platform=x64
 
 本机审计记录、原始基线、复现脚本及结果保存在被忽略的 `.local/` 下，不属于公开发布内容。尚未执行真实光盘写入、擦除、设备设置修改或原版逐项人工对照验收。
 
-第二阶段已通过 Win32/x64 离线回归：合计 190 项原生断言及 89 项独立检查。合成样本包含 191 个文件、192 个目录，覆盖多扇区路径表、目录边界、空目录、中文、长名称别名、CRC32 碰撞及重复内容。使用独立读取器提取并核对文件名称、目录集合和 SHA-256，另检查 UDF 标签 CRC、分区地址、主备描述序列及元数据副本。x64 解析回归另经 AddressSanitizer 检查；两个架构的 MSVC 静态分析未报告警告。此结果属于离线验证，不等同于原版逐项对照、完整格式认证或真实设备验收。
+第二阶段已通过 Win32/x64 离线回归：合计 190 项原生断言及 89 项独立检查。合成样本包含 191 个文件、192 个目录，覆盖多扇区路径表、目录边界、空目录、中文、长名称别名、CRC32 碰撞及重复内容。使用独立读取器提取并核对文件名称、目录集合和 SHA-256，另检查 UDF 标签 CRC、分区地址、主备描述序列及元数据副本。x64 解析回归另经 AddressSanitizer 检查；两个架构已运行 MSVC 静态分析，原始诊断保存在本机。此结果属于离线验证，不等同于原版逐项对照、完整格式认证或真实设备验收。
 
 第三阶段已用 Win32/x64 完整构建并独立提取一个 4 GiB+32773 字节的文件，通过 ISO、Joliet、UDF 的长度与 SHA-256 比对；另验证 Blu-ray UDF 2.50 中的大文件内容。128 GiB 和 512 GiB 稀疏样本只验证元数据、AED 续接链、标签 CRC、地址边界及独立读取器的边界读取，不计作完整内容验收。DVD/Blu-ray 使用合成目录验证文件集合、输出补丁、对齐和提取哈希，不能据此认定已通过播放器或格式认证。
+
+第四阶段加入原版 2.5.8.0 的实际导出对照，修正 DVD MDS 的轨道模式、会话头、物理格式字段和 IFO/BUP 间距。使用独立制作工具生成含四章的小型视频和含 105 章、约 5.24 GB 的双层视频目录，再分别由原版和本程序生成镜像。两个独立读取器完整读取各镜像的文件并核对 SHA-256；双层样本的全部 VOB 内容与标题集 IFO/BUP 导航补丁一致，所选单元起点与各自 MDS 的 L0 长度一致。文件系统元数据及其占用不同，因此两份完整 ISO 的物理地址和整体哈希不要求相同。此结果仍属于文件镜像对照，不等同于播放器或实际双层刻录验收。
 
 独立验证使用 pycdlib、7-Zip、libudfread 及单独编写的结构检查器。读取器存在各自限制：pycdlib 1.14 对桥接大文件可能复用首段 ISO 的短长度记录，且不支持 2.50 元数据分区；7-Zip 23.01 不跟随 AED 续接链。因此大文件内容和续接链分别交叉使用不同读取器，未将读取器错误算作通过。相关依赖与详细结果全部保留在本机忽略目录。
 
@@ -67,8 +69,12 @@ msbuild ImgBurn.sln /m /p:Configuration=Release /p:Platform=x64
 
 ```bat
 ImgBurn.exe build dvd.iso authored-dvd --dvd-video
+ImgBurn.exe dvd-layers authored-dvd
+ImgBurn.exe build dvd-dl.iso authored-dvd --dvd-video --dvd-break 1:1:54
 ImgBurn.exe build bluray.iso authored-bluray --bluray
 ```
+
+`--dvd-break` 的三个数字为候选列表中的标题集、PGC 和 Cell，必须使用当前目录实际列出的候选。默认按 DVD+R DL 的 OTP 容量约束计算；可用 `--l0-min`、`--l0-max`、`--capacity` 在支持的容量范围内指定边界。`--seamless` 保留该单元的无缝标志；前一单元含执行命令时会拒绝此选择。镜像补丁不修改源 IFO/BUP。DVD 构建同时生成 MDS，超过单层容量时需要明确选择可用单元。
 
 标准 44.1 kHz、16 位双声道 PCM WAVE 使用原生读取；其他音频格式和重采样依赖可用的 FFmpeg，支持范围取决于其解码器。本工程不附带 FFmpeg，缺少解码器或解码失败时会返回错误。
 
@@ -76,4 +82,4 @@ ImgBurn.exe build bluray.iso authored-bluray --bluray
 
 单 BIN 多会话目前按文件中不存储会话间隔的布局计算；实际保存填充间隔的变体、特殊会话声明及更完整的原版导出样本仍需继续核对，不能据当前合成样本认定所有 CUE/MDS 变体兼容。
 
-后续继续用原版样本完善格式兼容、DVD 导航与层切换，再开展 GUI、Read、Discovery 等功能。原版缺陷修复与额外改进仍在复刻完成后讨论。
+DVD 层切换目前覆盖普通标题单元，角度块、交错单元、菜单语言单元、预览和原版星级评定仍待补齐；PTP 解析与描述文件生成不代表可按 PTP 写入可录双层介质。后续继续用原版样本完善格式兼容与这些导航功能，再开展 GUI、Read、Discovery 等功能。原版缺陷修复与额外改进仍在复刻完成后讨论。

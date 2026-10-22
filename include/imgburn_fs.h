@@ -3,7 +3,7 @@
  * @brief C17光盘文件树与镜像生成接口。
  *
  * 提供ISO9660桥、Joliet、UDF 1.02/2.50及逐字节确认的文件去重。
- * 引导镜像、DVD-Video与Blu-ray合规模式尚未接入，启用时明确失败。
+ * 支持DVD-Video与Blu-ray文件布局；引导镜像尚未实现。
  */
 
 #ifndef IMGBURN_FS_H
@@ -133,6 +133,12 @@ typedef struct {
     bool dvdVideoCompliance;        /* Auto 32KB padding between IFO and BUP */
     bool blurayCompliance;          /* Strict Blu-ray UDF 2.50 check */
 
+    /* 层切换选择以标题集、PGC和单元标识保存；填充只加入输出布局。 */
+    uint16_t dvdBreakTitleSet, dvdBreakPgc, dvdBreakCell;
+    bool dvdBreakSeamless;
+    uint32_t dvdBreakPadding, dvdLayerBreakLba;
+    uint32_t dvdMinimumL0, dvdMaximumL0, dvdMediaCapacity;
+
     BootOptions boot;
 
     /* Compilation statistics */
@@ -196,6 +202,9 @@ bool image_builder_add_folder(ImageBuilder* b,
  * @return Total sectors of the resulting image
  */
 uint32_t image_builder_calculate_layout(ImageBuilder* b);
+
+/* 检查源文件快照及目标别名，供ISO和伴随描述文件共用。 */
+bool image_builder_check_destination(const ImageBuilder* b, const wchar_t* path);
 
 /**
  * @brief Write the complete generated image to an output ISO file

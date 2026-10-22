@@ -4,7 +4,7 @@
  *
  * CUE支持多编码、混合轨道、多会话及音频解码后的精确计数。
  * MDS支持1.x多会话CD、DVD与分卷数据引用，分层使用真实PFI字段。
- * DVD-Video候选计算尚需接入镜像布局与PGC，不返回推测位置。
+ * DVD-Video导航通过PGC、PTT、单元地址及NAV包交叉检查后关联实际布局。
  */
 
 #ifndef IMGBURN_IMAGE_H
@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include "imgburn_fs.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -171,6 +172,8 @@ typedef struct {
     uint16_t mediumType;
     uint32_t totalSectors;
     uint32_t layerBreakLba;  /* L0 sector count for dual-layer DVD, 0 if single layer */
+    unsigned layerCount;
+    bool oppositeTrackPath; /* 两层PTP允许L1大于L0；不可据此直接按OTP刻录。 */
     int trackCount;
     unsigned sessionCount, dataFileCount;
     MdsSessionBlock sessions[MAX_MDS_SESSIONS];
@@ -181,6 +184,7 @@ typedef struct {
 
 /* 分卷DVD的所有数据文件均按逻辑顺序列出；原单文件入口由此实现。 */
 bool imgburn_mds_create_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba);
+bool imgburn_mds_create_files_ex(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath);
 
 /* -------------------------------------------------------------------------
  * DVD-Video Layer Break Candidate Structure
@@ -191,9 +195,28 @@ typedef struct {
     uint16_t cellId;         /* DVD Cell ID */
     bool isSeamless;         /* Seamless playback bit (0 = non-seamless, ideal for LB) */
     bool isChapterStart;     /* Cell coincides with Chapter / PTT start */
-    int suitabilityRating;   /* 0..100 (ImgBurn stars rating: 100=optimal chapter non-seamless) */
+    int suitabilityRating;   /* 暂未复刻原版星级，0表示未评级。 */
     char description[64];    /* e.g. "VTS_01, Cell 14 (Chapter 8)" */
+    uint16_t titleSet, pgc, cell, program, title, chapter;
+    uint32_t vobSector, paddingSectors, imageSectors;
+    bool seamlessAllowed;
 } DvdLayerBreakCandidate;
+
+typedef struct {
+    uint16_t titleSet, pgc, cell, program, title, chapter, vobId, cellId;
+    uint32_t firstSector, lastSector, lastVobuSector, lba, category, ifoOffset;
+    bool chapterStart, previousCellCommand;
+} DvdNavigationCell;
+
+typedef struct { DvdNavigationCell* cells; size_t cellCount; } DvdNavigation;
+typedef struct { uint32_t minimumL0, maximumL0, mediaCapacity; } DvdMediaProfile;
+
+/* 输入必须已完成DVD-Video布局；返回的LBA为当前镜像物理地址。 */
+bool imgburn_dvd_read_navigation(const ImageBuilder* builder, DvdNavigation* navigation);
+void imgburn_dvd_free_navigation(DvdNavigation* navigation);
+bool imgburn_dvd_layer_break_candidates(const ImageBuilder* builder, const DvdMediaProfile* profile, DvdLayerBreakCandidate* candidates, size_t capacity, size_t* count);
+/* 选择后需重新计算布局；无效、过期的选择会在重新计算时失败。 */
+bool imgburn_dvd_select_layer_break(ImageBuilder* builder, const DvdMediaProfile* profile, const DvdLayerBreakCandidate* candidate, bool seamless);
 
 /* -------------------------------------------------------------------------
  * Image Engine APIs
@@ -234,7 +257,8 @@ bool imgburn_mds_create(const wchar_t *mdsFilePath,
                         uint32_t layerBreakLba);
 
 /**
- * @brief 层切换候选尚未接入实际镜像布局，当前返回ERROR_NOT_SUPPORTED。
+ * @brief 旧目录接口不能确定调用者的镜像布局，继续返回ERROR_NOT_SUPPORTED。
+ * 请使用接收ImageBuilder的imgburn_dvd_layer_break_candidates接口。
  * @param videoTsPath Path to folder containing VIDEO_TS.IFO and VTS_*.IFO
  * @param totalImageSectors Total image sectors of DVD
  * @param outCandidates Array to receive candidate entries

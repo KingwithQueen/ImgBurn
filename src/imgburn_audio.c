@@ -353,7 +353,14 @@ bool cue_sheet_generate(const AudioCompilation* comp, const wchar_t* outCuePath)
         unsigned currentSession = track->sessionNumber ? track->sessionNumber : 1;
         if (currentSession != session) {
             if (currentSession != session + 1 || currentSession > 99) { ok = false; break; }
-            ok = cue_append(text, capacity, &used, "REM SESSION %u\n", currentSession); session = currentSession;
+            if (session) {
+                uint32_t end = comp->sessionEndLba[session - 1];
+                if (!end || end >= 100 * 60 * 75) { ok = false; break; }
+                MsfTime leadOut = lba_to_msf(end);
+                /* 原版在下一会话前要求显式LEAD-OUT，不能只输出SESSION。 */
+                ok = cue_append(text, capacity, &used, "REM LEAD-OUT %02u:%02u:%02u\n", leadOut.minute, leadOut.second, leadOut.frame);
+            }
+            if (ok) ok = cue_append(text, capacity, &used, "REM SESSION %u\n", currentSession); session = currentSession;
             if (currentSession > 1 && comp->sessionLeadIn[currentSession - 1] >= 100 * 60 * 75) ok = false;
             if (ok && currentSession > 1 && comp->sessionLeadIn[currentSession - 1]) { MsfTime lead = lba_to_msf(comp->sessionLeadIn[currentSession - 1]); ok = cue_append(text, capacity, &used, "REM LEAD-IN %02u:%02u:%02u\n", lead.minute, lead.second, lead.frame); }
         }

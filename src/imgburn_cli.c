@@ -60,9 +60,13 @@ static void print_usage(void) {
     printf("Authoring & Image Commands:\n");
     printf("  build <out.iso> <folder> [--label <vol>] [--udf <1.02|2.50>]\n");
     printf("        [--dvd-video | --bluray]  Build DVD-Video or Blu-ray layout\n");
+    printf("        [--dvd-break <VTS:PGC:Cell>] [--seamless]\n");
+    printf("        [--l0-min <sectors>] [--l0-max <sectors>] [--capacity <sectors>]\n");
     printf("                                 Build ISO9660 + Joliet + UDF disc image\n");
     printf("  cue <file.cue>                 Parse and display CUE sheet tracks & CD-Text\n");
     printf("  mds <file.mds>                 Parse and display MDS metadata & Layer Break\n\n");
+    printf("  dvd-layers <folder> [--l0-min <n>] [--l0-max <n>] [--capacity <n>]\n");
+    printf("                                 Inspect DVD navigation and layer break cells\n\n");
     printf("Burning & Verification Commands:\n");
     printf("  burn <drive> <image> [--speed <Nx>] [--test] [--verify]\n");
     printf("                                 Burn disc image with real-time telemetry\n");
@@ -236,6 +240,40 @@ static void on_cli_build_progress(int percent, uint32_t currentLba, uint32_t tot
     fflush(stdout);
 }
 
+static bool dvd_profile_option(const char* option, const char* value, DvdMediaProfile* profile) {
+    if (!value || !value[0] || strspn(value, "0123456789") != strlen(value) || strlen(value) > 8) return false;
+    unsigned long number = strtoul(value, NULL, 10); if (number > 4173824 || (!number && _stricmp(option, "--l0-min"))) return false;
+    if (!_stricmp(option, "--l0-min")) profile->minimumL0 = (uint32_t)number;
+    else if (!_stricmp(option, "--l0-max")) profile->maximumL0 = (uint32_t)number;
+    else if (!_stricmp(option, "--capacity")) profile->mediaCapacity = (uint32_t)number;
+    else return false;
+    return true;
+}
+
+static DvdLayerBreakCandidate* dvd_candidates(ImageBuilder* builder, const DvdMediaProfile* profile, size_t* count) {
+    if (!imgburn_dvd_layer_break_candidates(builder, profile, NULL, 0, count) && GetLastError() != ERROR_INSUFFICIENT_BUFFER) return NULL;
+    if (!*count || *count > SIZE_MAX / sizeof(DvdLayerBreakCandidate)) return NULL;
+    DvdLayerBreakCandidate* candidates = (DvdLayerBreakCandidate*)calloc(*count, sizeof(*candidates));
+    if (candidates && !imgburn_dvd_layer_break_candidates(builder, profile, candidates, *count, count)) { free(candidates); return NULL; }
+    return candidates;
+}
+
+static int cmd_dvd_layers(int argc, char** argv) {
+    DvdMediaProfile profile = {0,2086912,4173824}; wchar_t folder[MAX_PATH];
+    if (argc < 3 || !utf8_path(argv[2], folder, MAX_PATH)) return 1;
+    for (int i = 3; i < argc; i += 2) if (i + 1 == argc || !dvd_profile_option(argv[i], argv[i + 1], &profile)) { printf("Error: Invalid DVD media profile.\n"); return 1; }
+    ImageBuilder b; if (!image_builder_init(&b, "DVD_NAVIGATION")) return 1;
+    b.config.dvdVideoCompliance = true; b.config.fsTypes = FS_TYPE_ISO_UDF;
+    bool ok = image_builder_add_folder(&b, folder, L"") && image_builder_calculate_layout(&b); size_t count = 0;
+    DvdLayerBreakCandidate* candidates = ok ? dvd_candidates(&b, &profile, &count) : NULL;
+    if (candidates) {
+        printf("DVD image sectors: %u; candidates: %zu\n", b.config.totalImageSectors, count);
+        printf("VTS:PGC:Cell  VOB:Cell  VOB-sector  L0-sectors  Padding  Total  Chapter  SPLIP\n");
+        for (size_t i = 0; i < count; i++) { const DvdLayerBreakCandidate* c = &candidates[i]; printf("%u:%u:%u  %u:%u  %u  %u  %u  %u  %u:%u  %s\n", c->titleSet, c->pgc, c->cell, c->vobId, c->cellId, c->vobSector, c->lba, c->paddingSectors, c->imageSectors, c->title, c->chapter, c->isSeamless ? "Yes" : "No"); }
+    } else printf("Error: Invalid DVD navigation, media profile or no usable layer break cells.\n");
+    bool success = candidates != NULL; free(candidates); image_builder_destroy(&b); return success ? 0 : 1;
+}
+
 static int cmd_build(int argc, char **argv) {
     if (argc < 4) {
         printf("Usage: imgburn build <out.iso> <folder> [--label <vol>] [--udf <1.02|2.50>] [--dvd-video | --bluray]\n");
@@ -246,7 +284,8 @@ static int cmd_build(int argc, char **argv) {
     const char *folderA = argv[3];
     const char *labelA = "IMGBURN_DISC";
     UdfRevision udfRev = UDF_REV_102;
-    bool dvdVideo = false, bluray = false;
+    bool dvdVideo = false, bluray = false, seamless = false;
+    const char* breakCell = NULL; DvdMediaProfile profile = {0,2086912,4173824};
 
     for (int i = 4; i < argc; i++) {
         if (_stricmp(argv[i], "--label") == 0 && i + 1 < argc) {
@@ -257,14 +296,18 @@ static int cmd_build(int argc, char **argv) {
             else if (strcmp(ver, "1.02") != 0) { printf("Error: Unsupported UDF revision.\n"); return 1; }
         } else if (!_stricmp(argv[i], "--dvd-video")) dvdVideo = true;
         else if (!_stricmp(argv[i], "--bluray")) bluray = true;
+        else if (!_stricmp(argv[i], "--dvd-break") && i + 1 < argc) breakCell = argv[++i];
+        else if (!_stricmp(argv[i], "--seamless")) seamless = true;
+        else if ((!_stricmp(argv[i], "--l0-min") || !_stricmp(argv[i], "--l0-max") || !_stricmp(argv[i], "--capacity")) && i + 1 < argc) { if (!dvd_profile_option(argv[i], argv[i + 1], &profile)) return 1; i++; }
         else {
             printf("Error: Unknown or incomplete build option: %s\n", argv[i]);
             return 1;
         }
     }
     if (dvdVideo && bluray) { printf("Error: Choose one video layout.\n"); return 1; }
+    if ((breakCell && !dvdVideo) || (seamless && !breakCell)) { printf("Error: A DVD-Video layer break cell is required.\n"); return 1; }
 
-    wchar_t outIsoW[MAX_PATH], folderW[MAX_PATH];
+    wchar_t outIsoW[MAX_PATH], folderW[MAX_PATH], mdsPath[MAX_PATH] = L"";
     if (!utf8_path(outIsoA, outIsoW, MAX_PATH) || !utf8_path(folderA, folderW, MAX_PATH)) return 1;
 
     printf("Initializing ImageBuilder with Volume Label: '%s'\n", labelA);
@@ -288,6 +331,26 @@ static int cmd_build(int argc, char **argv) {
     printf("Calculating filesystem layout and deduplication...\n");
     uint32_t sectors = image_builder_calculate_layout(&b);
     if (sectors == 0) { printf("Error: Cannot calculate image layout.\n"); image_builder_destroy(&b); return 1; }
+    if (breakCell) {
+        unsigned vts, pgc, cell; char trailing; size_t count = 0; bool selected = false;
+        if (sscanf(breakCell, "%3u:%4u:%3u%c", &vts, &pgc, &cell, &trailing) != 3 || vts > 99 || pgc > 999 || cell > 255) { printf("Error: Invalid DVD layer break cell.\n"); image_builder_destroy(&b); return 1; }
+        DvdLayerBreakCandidate* candidates = dvd_candidates(&b, &profile, &count);
+        for (size_t i = 0; candidates && i < count; i++) if (candidates[i].titleSet == vts && candidates[i].pgc == pgc && candidates[i].cell == cell) selected = imgburn_dvd_select_layer_break(&b, &profile, &candidates[i], seamless);
+        free(candidates);
+        if (!selected || !(sectors = image_builder_calculate_layout(&b))) { printf("Error: The selected DVD cell cannot be used with this layout and media profile.\n"); image_builder_destroy(&b); return 1; }
+        printf("  Layer Break:             %u (padding %u sectors)\n", b.config.dvdLayerBreakLba, b.config.dvdBreakPadding);
+    }
+    if (dvdVideo && !breakCell && sectors > 2295104) { printf("Error: Select a DVD layer break cell before building this double layer image.\n"); image_builder_destroy(&b); return 1; }
+    if (dvdVideo) {
+        DWORD chars = GetFullPathNameW(outIsoW, MAX_PATH, mdsPath, NULL);
+        if (!chars || chars >= MAX_PATH) { image_builder_destroy(&b); return 1; }
+        wchar_t* dot = wcsrchr(mdsPath, L'.'); wchar_t* slash = wcsrchr(mdsPath, L'\\');
+        if (!dot || (slash && dot < slash)) dot = mdsPath + wcslen(mdsPath);
+        if ((size_t)(dot - mdsPath) + 4 >= MAX_PATH) { image_builder_destroy(&b); return 1; }
+        bool samePath = !_wcsicmp(dot, L".mds"); wcscpy(dot, L".mds");
+        /* 自动生成的MDS也必须在写入ISO之前接受源文件保护检查。 */
+        if (samePath || !image_builder_check_destination(&b, mdsPath)) { printf("Error: The MDS destination conflicts with an input file.\n"); image_builder_destroy(&b); return 1; }
+    }
     printf("  Total Files:             %u\n", b.config.totalFiles);
     printf("  Total Directories:       %u\n", b.config.totalDirectories);
     printf("  Source Data Size:        %.2f MB (%llu bytes)\n",
@@ -300,6 +363,12 @@ static int cmd_build(int argc, char **argv) {
     wprintf(L"Writing ISO image to: %ls\n", outIsoW);
     bool ok = image_builder_create_iso(&b, outIsoW, on_cli_build_progress, NULL);
     printf("\n");
+
+    if (ok && dvdVideo) {
+        wchar_t full[MAX_PATH]; DWORD chars = GetFullPathNameW(outIsoW, MAX_PATH, full, NULL);
+        ok = chars && chars < MAX_PATH && image_builder_check_destination(&b, mdsPath) && imgburn_mds_create(mdsPath, full, sectors, b.config.dvdLayerBreakLba);
+        if (!ok) printf("Error: The ISO was created but its MDS descriptor could not be written.\n");
+    }
 
     image_builder_destroy(&b);
 
@@ -612,6 +681,7 @@ static int cmd_mds(const char* mdsFile) {
     if (!imgburn_mds_parse(path, mds)) { printf("Error: Failed to parse MDS file '%s'\n", mdsFile); free(mds); return 1; }
     const char* medium = mds->mediumType >= 0x10 ? (mds->layerBreakLba ? "DVD-DL" : "DVD") : mds->mediumType == 2 ? "CD-RW" : mds->mediumType == 1 ? "CD-R" : "CD-ROM";
     printf("MDS Sheet Metadata:\n  Medium Type: %s (%u)\n  Total Sectors: %u\n  Sessions: %u\n  Tracks: %d\n  Data File References: %u\n  Layer Break: %u\n", medium, mds->mediumType, mds->totalSectors, mds->sessionCount, mds->trackCount, mds->dataFileCount, mds->layerBreakLba);
+    if (mds->layerCount) printf("  Layers: %u | Track Path: %s\n", mds->layerCount, mds->oppositeTrackPath ? "OTP" : "PTP");
     for (int i = 0; i < mds->trackCount; i++) {
         const MdsTrack* t = &mds->tracks[i];
         printf("  Session %u Track %u: LBA %d | Sectors %u | Sector Size %u | Pregap %u | Files %u\n", t->sessionNumber, t->trackNumber, t->startLba, t->sectorCount, t->sectorSize, t->pregapSectors, t->fileCount);
@@ -653,6 +723,8 @@ static int run_cli(int argc, char **argv) {
         return cmd_cue(argv[2]);
     } else if (_stricmp(cmd, "mds") == 0 && argc >= 3) {
         return cmd_mds(argv[2]);
+    } else if (_stricmp(cmd, "dvd-layers") == 0) {
+        return cmd_dvd_layers(argc, argv);
     } else if (_stricmp(cmd, "help") == 0 || _stricmp(cmd, "--help") == 0 || _stricmp(cmd, "-h") == 0) {
         print_usage();
         return 0;
