@@ -71,10 +71,14 @@ msbuild ImgBurn.sln /m /p:Configuration=Release /p:Platform=x64
 ImgBurn.exe build dvd.iso authored-dvd --dvd-video
 ImgBurn.exe dvd-layers authored-dvd
 ImgBurn.exe build dvd-dl.iso authored-dvd --dvd-video --dvd-break 1:1:54
+ImgBurn.exe build dvd-menu.iso authored-dvd --dvd-video --dvd-menu-break 2:2:1:1
+ImgBurn.exe dvd-layers authored-dvd --show-interleaved
 ImgBurn.exe build bluray.iso authored-bluray --bluray
 ```
 
-`--dvd-break` 的三个数字为候选列表中的标题集、PGC 和 Cell，必须使用当前目录实际列出的候选。默认按 DVD+R DL 的 OTP 容量约束计算；可用 `--l0-min`、`--l0-max`、`--capacity` 在支持的容量范围内指定边界。`--seamless` 保留该单元的无缝标志；前一单元含执行命令时会拒绝此选择。镜像补丁不修改源 IFO/BUP。DVD 构建同时生成 MDS，超过单层容量时需要明确选择可用单元。
+`--dvd-break` 的三个数字为候选列表中的标题集、PGC 和 Cell，必须使用当前目录实际列出的候选。菜单使用 `--dvd-menu-break VTS:LU:PGC:Cell`，其中 VTS 为 0 时表示 VMGM，LU 为从 1 开始的菜单语言单元。默认按 DVD+R DL 的 OTP 容量约束计算；可用 `--l0-min`、`--l0-max`、`--capacity` 在支持的容量范围内指定边界。`--seamless` 保留该单元的无缝标志；受影响单元的前一单元含执行命令时会拒绝此选择。镜像补丁不修改源 IFO/BUP。DVD 构建同时生成 MDS，超过单层容量时需要明确选择可用单元。
+
+`dvd-layers` 与 `build` 可用 `--show-interleaved` 显示和选择交错单元，对应原版的 Show Interleaved Cells 选项。角度块只列首角度的单元；选择后同步更新块内全部角度及同一物理单元的其他 PGC 引用。菜单选择也同步处理其他语言单元中的相同物理引用。程序核对菜单 LU/PGC 表边界、角度块首末关系以及首个 ILVU 的 IFO/NAV 地址，仍不包含菜单播放或 DVD 虚拟机执行。
 
 标准 44.1 kHz、16 位双声道 PCM WAVE 使用原生读取；其他音频格式和重采样依赖可用的 FFmpeg，支持范围取决于其解码器。本工程不附带 FFmpeg，缺少解码器或解码失败时会返回错误。
 
@@ -82,4 +86,6 @@ ImgBurn.exe build bluray.iso authored-bluray --bluray
 
 单 BIN 多会话目前按文件中不存储会话间隔的布局计算；实际保存填充间隔的变体、特殊会话声明及更完整的原版导出样本仍需继续核对，不能据当前合成样本认定所有 CUE/MDS 变体兼容。
 
-DVD 层切换目前覆盖普通标题单元，角度块、交错单元、菜单语言单元、预览和原版星级评定仍待补齐；PTP 解析与描述文件生成不代表可按 PTP 写入可录双层介质。后续继续用原版样本完善格式兼容与这些导航功能，再开展 GUI、Read、Discovery 等功能。原版缺陷修复与额外改进仍在复刻完成后讨论。
+第五阶段补齐 VMGM/VTSM 多语言菜单单元的解析与层切换，检查相邻 LU、PGC 及命令表边界，并加入角度块和交错单元的候选与整块 SPLIP 更新。使用两个标题集、英法双语菜单及约 5.25 GB 的自制视频目录，由原版与两个架构分别生成镜像；全部 VOB 内容和 VTS IFO/BUP 补丁一致。另用受控结构样本将 160 个 VOBU 重排为两角度交错单元，与原版对照候选和两个角度的补丁，并独立核对完整文件哈希、NAV 地址及重排前后的音视频载荷。该交错样本用于结构验证，尚未经过播放器或格式认证。
+
+CUE 按原版拒绝 CDG 轨道，REM PREGAP 仍作为注释处理；完整特殊格式兼容尚未完成。MDS 的多会话、多轨道元数据解析不能视作原版应用载入或写入支持：原版应用限定单会话、单轨道，写入流程仍需按这一边界集成。菜单播放、DVD 虚拟机、预览、原版星级评定、更多实际多角度/多故事样本及介质验收仍待补齐；PTP 解析与描述文件生成不代表可按 PTP 写入可录双层介质。后续继续用原版样本完善这些功能与剩余 CUE/MDS 兼容，再开展 GUI、Read、Discovery 等功能。原版缺陷修复与额外改进仍在复刻完成后讨论。

@@ -200,21 +200,32 @@ typedef struct {
     uint16_t titleSet, pgc, cell, program, title, chapter;
     uint32_t vobSector, paddingSectors, imageSectors;
     bool seamlessAllowed;
+    DvdNavigationDomain domain;
+    uint16_t languageUnit, languageCode;
+    uint8_t menuType;
+    bool isInterleaved, isAngleBlock;
 } DvdLayerBreakCandidate;
 
 typedef struct {
     uint16_t titleSet, pgc, cell, program, title, chapter, vobId, cellId;
     uint32_t firstSector, lastSector, lastVobuSector, lba, category, ifoOffset;
     bool chapterStart, previousCellCommand;
+    DvdNavigationDomain domain;
+    uint16_t languageUnit, languageCode;
+    uint8_t menuType;
+    uint32_t firstIlvuEndSector;
+    uint16_t angleBlockFirstCell;
 } DvdNavigationCell;
 
 typedef struct { DvdNavigationCell* cells; size_t cellCount; } DvdNavigation;
 typedef struct { uint32_t minimumL0, maximumL0, mediaCapacity; } DvdMediaProfile;
+enum { DVD_LAYER_SHOW_INTERLEAVED = 1 };
 
 /* 输入必须已完成DVD-Video布局；返回的LBA为当前镜像物理地址。 */
 bool imgburn_dvd_read_navigation(const ImageBuilder* builder, DvdNavigation* navigation);
 void imgburn_dvd_free_navigation(DvdNavigation* navigation);
 bool imgburn_dvd_layer_break_candidates(const ImageBuilder* builder, const DvdMediaProfile* profile, DvdLayerBreakCandidate* candidates, size_t capacity, size_t* count);
+bool imgburn_dvd_layer_break_candidates_ex(const ImageBuilder* builder, const DvdMediaProfile* profile, unsigned options, DvdLayerBreakCandidate* candidates, size_t capacity, size_t* count);
 /* 选择后需重新计算布局；无效、过期的选择会在重新计算时失败。 */
 bool imgburn_dvd_select_layer_break(ImageBuilder* builder, const DvdMediaProfile* profile, const DvdLayerBreakCandidate* candidate, bool seamless);
 

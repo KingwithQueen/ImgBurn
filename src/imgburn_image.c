@@ -265,7 +265,8 @@ bool imgburn_cue_parse(const wchar_t* cueFilePath, CueSheet* outCue) {
             else if (!_stricmp(second, "MODE2/2324")) track->mode = TRACK_MODE_MODE2_2324;
             else if (!_stricmp(second, "CDI/2336")) track->mode = TRACK_MODE_CDI_2336;
             else if (!_stricmp(second, "CDI/2352")) track->mode = TRACK_MODE_CDI_2352;
-            else if (!_stricmp(second, "CDG")) track->mode = TRACK_MODE_CDG_2448;
+            /* 原版2.5.8.0明确拒绝CUE的CDG轨道，不能仅凭2448字节长度宣称支持。 */
+            else if (!_stricmp(second, "CDG")) { SetLastError(ERROR_NOT_SUPPORTED); goto done; }
             else goto done;
             track->sectorSize = cue_sector_size(track->mode);
             if (type >= CUE_FILE_WAVE && track->mode != TRACK_MODE_AUDIO) goto done;

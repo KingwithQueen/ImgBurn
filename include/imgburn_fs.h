@@ -118,6 +118,8 @@ typedef struct FsDirectoryNode {
     bool excluded;
 } FsDirectoryNode;
 
+typedef enum { DVD_DOMAIN_TITLE, DVD_DOMAIN_VTS_MENU, DVD_DOMAIN_VMG_MENU } DvdNavigationDomain;
+
 /**
  * @brief Image Build Configuration & Stats
  */
@@ -133,9 +135,11 @@ typedef struct {
     bool dvdVideoCompliance;        /* Auto 32KB padding between IFO and BUP */
     bool blurayCompliance;          /* Strict Blu-ray UDF 2.50 check */
 
-    /* 层切换选择以标题集、PGC和单元标识保存；填充只加入输出布局。 */
+    /* 菜单还需保存语言单元，VMGM的标题集编号为0；PGC非0表示已选择。 */
     uint16_t dvdBreakTitleSet, dvdBreakPgc, dvdBreakCell;
-    bool dvdBreakSeamless;
+    uint16_t dvdBreakLanguageUnit;
+    DvdNavigationDomain dvdBreakDomain;
+    bool dvdBreakSeamless, dvdBreakInterleaved;
     uint32_t dvdBreakPadding, dvdLayerBreakLba;
     uint32_t dvdMinimumL0, dvdMaximumL0, dvdMediaCapacity;
 
