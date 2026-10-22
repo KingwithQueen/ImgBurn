@@ -46,9 +46,14 @@ typedef struct {
     wchar_t filePath[MAX_PATH];     /* Path to source audio file */
     char title[128];                /* CD-Text Title */
     char performer[128];            /* CD-Text Performer / Artist */
+    char isrc[16];                  /* 曲目标识码。 */
     uint32_t startLba;              /* Starting LBA on disc */
     uint32_t sectorCount;           /* Total 2352-byte sectors */
     uint32_t pregapSectors;         /* Pregap (default 150 = 2 seconds) */
+    uint32_t postgapSectors;        /* POSTGAP产生的静音扇区。 */
+    bool sourceIsWave;
+    bool hasIndex00;
+    MsfTime index00;
     MsfTime startTime;
     MsfTime duration;
 } AudioTrack;
@@ -59,6 +64,7 @@ typedef struct {
 typedef struct {
     char cdTitle[128];
     char cdPerformer[128];
+    char catalogNumber[16];         /* 光盘目录号。 */
     int trackCount;
     AudioTrack tracks[MAX_AUDIO_TRACKS];
     uint32_t totalSectors;          /* Total sectors including lead-in pregap */

@@ -1,10 +1,9 @@
 /**
  * @file imgburn_fs.h
- * @brief ImgBurn Core C - Optical Disc Filesystem Generator
+ * @brief C17光盘文件树与镜像生成接口。
  *
- * Implements ISO9660 (Level 1/2/X), Joliet (UCS-2), UDF (1.02/2.50),
- * El Torito bootable disc support, isolinux.bin boot table patching,
- * DVD-Video 32KB IFO/BUP ECC padding, and file deduplication.
+ * 提供ISO9660桥、Joliet、UDF 1.02/2.50及逐字节确认的文件去重。
+ * 引导镜像、DVD-Video与Blu-ray合规模式尚未接入，启用时明确失败。
  */
 
 #ifndef IMGBURN_FS_H
@@ -69,6 +68,9 @@ struct FsDirectoryNode;
 typedef struct FsFileNode {
     char nameA[128];                /* Standard 8.3 / ISO9660 name */
     wchar_t nameW[128];             /* Full Joliet / UDF Unicode name */
+    wchar_t jolietNameW[65];        /* Joliet标准名称；原始Unicode名称供UDF保留。 */
+    uint32_t udfIcb;
+    uint64_t udfUniqueId;
     wchar_t sourceDiskPath[MAX_PATH];/* Actual source file on host disk */
     uint64_t fileSize;
     FILETIME modTime;
@@ -89,6 +91,7 @@ typedef struct FsFileNode {
 typedef struct FsDirectoryNode {
     char nameA[128];
     wchar_t nameW[128];
+    wchar_t jolietNameW[65];
     struct FsDirectoryNode* parent;
 
     struct FsFileNode* firstFile;
@@ -100,6 +103,11 @@ typedef struct FsDirectoryNode {
     uint32_t sectorCountIso;
     uint32_t sectorCountJoliet;
     uint16_t dirIndex;              /* 1-based index in Path Table */
+    uint16_t dirIndexJoliet;
+    uint32_t udfIcb;
+    uint32_t udfData;
+    uint32_t udfBytes;
+    uint64_t udfUniqueId;
 } FsDirectoryNode;
 
 /**
@@ -148,6 +156,7 @@ typedef struct {
     uint32_t bootImageLba;
 
     uint32_t dataStartLba;
+    void* layout;                   /* 内部布局计划，由销毁函数回收。 */
 } ImageBuilder;
 
 /**

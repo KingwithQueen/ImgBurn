@@ -1,9 +1,8 @@
 /**
  * @file imgburn_udf.h
- * @brief ImgBurn Core C - ECMA-167 / OSTA UDF (1.02 & 2.50) Specification Engine
+ * @brief UDF 1.02/2.50使用的描述符与编码基础接口。
  *
- * Implements complete UDF structures, Tag Checksums, CRC-CCITT, OSTA compressed
- * unicode strings, AVDP, VDS, FSD, ICB File Entries, and File Identifier Descriptors.
+ * 完整卷布局由文件树布局模块统一生成，避免单独生成的描述符地址不一致。
  */
 
 #ifndef IMGBURN_UDF_H
@@ -296,6 +295,13 @@ uint16_t udf_crc16(const uint8_t* data, size_t length);
  */
 void udf_finalize_tag(UdfDescriptorTag* tag, uint16_t tagId, uint32_t lba, uint16_t fullDescSize);
 
+/* 按实际修订号选择描述符版本，卷内地址使用所在分区的逻辑块号。 */
+void udf_finalize_tag_revision(UdfDescriptorTag* tag, uint16_t tagId, uint32_t block, uint16_t bytes, uint16_t revision);
+
+/* 固定长dstring与FID的变长CS0名称分别编码，避免混用长度尾字节。 */
+uint8_t udf_encode_name(const wchar_t* src, uint8_t* dst, size_t capacity);
+void udf_set_charset(uint8_t* charset);
+
 /**
  * @brief Convert Win32 FILETIME to UDF Timestamp
  */
@@ -321,35 +327,6 @@ uint8_t udf_encode_dstring(const wchar_t* src, uint8_t* dst, size_t maxDstLen);
  * @param isUdf250 True for NSR03 (UDF 2.50+), false for NSR02 (UDF 1.02)
  */
 void udf_build_vrs(uint8_t* outBuffer, bool isUdf250);
-
-/**
- * @brief Build Anchor Volume Descriptor Pointer (AVDP) sector
- */
-void udf_build_avdp(uint8_t* outSector, uint32_t avdpLba, uint32_t mvdsLba, uint32_t mvdsSectors);
-
-/**
- * @brief Build Main Volume Descriptor Sequence (PVD, PD, LVD, TD)
- *
- * @param outBuffer Buffer of at least 4 * 2048 bytes
- * @param startLba Starting LBA of MVDS
- * @param volumeLabel Label string
- * @param partitionStartLba Start LBA of partition
- * @param partitionSectorCount Total sectors of partition
- * @param fsdLba LBA of File Set Descriptor
- * @param isUdf250 True for UDF 2.50
- */
-void udf_build_mvds(uint8_t* outBuffer,
-                    uint32_t startLba,
-                    const wchar_t* volumeLabel,
-                    uint32_t partitionStartLba,
-                    uint32_t partitionSectorCount,
-                    uint32_t fsdLba,
-                    bool isUdf250);
-
-/**
- * @brief Build File Set Descriptor (FSD) sector
- */
-void udf_build_fsd(uint8_t* outSector, uint32_t fsdLba, uint32_t rootDirFeLba);
 
 #ifdef __cplusplus
 }

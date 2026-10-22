@@ -1,14 +1,10 @@
 /**
  * @file imgburn_image.h
- * @brief Optical Disc Image Parsers & Generators (CUE, BIN, MDS, ISO, DVD-Video IFO)
+ * @brief C17镜像识别、CUE与MDS元数据接口。
  *
- * Implements:
- * - Image format auto-detection (.iso, .bin, .cue, .mds, .img, .nrg)
- * - CUE Sheet Parser & Validator (Multi-track, CD-DA, Mixed Mode, Pregap/Postgap, CD-Text)
- * - Media Descriptor Sheet (.mds) Parser & Generator (Dual-layer Layer Break L0 size)
- * - DVD-Video .IFO Parser & Layer Break Candidate Analyzer (Cell boundaries, seamless flags)
- *
- * Pure C99/C11, Win32 API. No external dependencies.
+ * CUE支持UTF-8、BINARY及原生PCM WAVE，校验引用和扇区边界。
+ * MDS当前只支持1.x单会话、单文件DVD，分层使用真实PFI字段。
+ * DVD-Video候选计算尚需接入镜像布局与PGC，不返回推测位置。
  */
 
 #ifndef IMGBURN_IMAGE_H
@@ -23,7 +19,7 @@ extern "C" {
 #endif
 
 #define MAX_CUE_TRACKS       99
-#define MAX_CUE_INDICES      10
+#define MAX_CUE_INDICES      100
 #define MAX_MDS_TRACKS       100
 #define MAX_DVD_LAYER_BREAKS 64
 
@@ -55,7 +51,7 @@ typedef enum {
  * ------------------------------------------------------------------------- */
 typedef struct {
     int indexNumber;         /* 0 = Pre-gap, 1 = Track start, 2..9 = Sub-indices */
-    uint32_t lba;            /* Absolute LBA on disc */
+    uint32_t lba;            /* CUE的INDEX地址相对于当前FILE，不是光盘绝对地址。 */
     char msfStr[10];         /* "MM:SS:FF" string */
 } CueIndex;
 
@@ -63,6 +59,7 @@ typedef struct {
     int trackNumber;         /* 1..99 */
     TrackDataMode mode;
     wchar_t sourceFilePath[MAX_PATH]; /* Associated audio/data file */
+    bool sourceIsWave;       /* FILE声明的类型，不能由扩展名猜测。 */
     char title[128];         /* CD-Text Title */
     char performer[128];     /* CD-Text Performer */
     char isrc[16];           /* ISRC code */
@@ -95,7 +92,7 @@ typedef struct {
 typedef struct {
     char signature[16];      /* "MEDIA DESCRIPTOR" */
     uint8_t version[2];      /* e.g. 0x01, 0x03 */
-    uint16_t mediumType;     /* 0=CD, 1=DVD, 2=DVD-DL */
+    uint16_t mediumType;     /* 0x00/01/02为CD；0x10/12为DVD。 */
     uint16_t sessionCount;
     uint16_t dummy1[2];
     uint16_t bcaLength;
@@ -105,7 +102,7 @@ typedef struct {
     uint32_t discStructuresOffset;
     uint32_t dummy4[3];
     uint32_t sessionsOffset;
-    uint32_t tracksOffset;
+    uint32_t dpmOffset;
 } MdsHeader;
 
 typedef struct {
@@ -117,18 +114,24 @@ typedef struct {
     uint16_t firstTrack;
     uint16_t lastTrack;
     uint32_t dummy;
+    uint32_t tracksOffset;
 } MdsSessionBlock;
 
 typedef struct {
-    uint8_t trackMode;       /* 0xA9 = Mode1, 0xAA = Mode2, 0xAB = Audio */
+    uint8_t trackMode;       /* 0xA9为音频；0xAA为Mode 1。 */
     uint8_t subChannel;
+    uint8_t adrControl;
     uint8_t trackNumber;
-    uint8_t dummy1;
-    uint32_t sectorSize;     /* 2048, 2352, etc. */
-    uint32_t dummy2;
+    uint8_t point;
+    uint8_t time[7];
+    uint32_t extraOffset;
+    uint16_t sectorSize;
+    uint8_t reserved[18];
     uint32_t startLba;
     uint64_t startByteOffset;
-    uint32_t dummy3[6];
+    uint32_t fileCount;
+    uint32_t footerOffset;
+    uint8_t reserved2[24];
 } MdsTrackBlock;
 #pragma pack(pop)
 
@@ -193,7 +196,7 @@ bool imgburn_mds_create(const wchar_t *mdsFilePath,
                         uint32_t layerBreakLba);
 
 /**
- * @brief Scan a DVD-Video folder (VIDEO_TS) and find all valid Layer Break candidate LBAs
+ * @brief 层切换候选尚未接入实际镜像布局，当前返回ERROR_NOT_SUPPORTED。
  * @param videoTsPath Path to folder containing VIDEO_TS.IFO and VTS_*.IFO
  * @param totalImageSectors Total image sectors of DVD
  * @param outCandidates Array to receive candidate entries

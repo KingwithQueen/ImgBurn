@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 /* Standard CRC-CCITT (polynomial 0x1021) lookup table */
 static uint16_t s_crc16_table[256];
@@ -38,7 +39,7 @@ void udf_finalize_tag(UdfDescriptorTag* tag, uint16_t tagId, uint32_t lba, uint1
     if (!tag) return;
 
     tag->tagId = tagId;
-    tag->descVersion = (tagId >= 0x0100) ? 3 : 2;
+    tag->descVersion = 2;
     tag->reserved = 0;
     tag->tagSerial = 1;
     tag->tagLocation = lba;
@@ -64,9 +65,9 @@ void udf_filetime_to_timestamp(const FILETIME* ft, UdfTimestamp* outTs) {
     if (!outTs) return;
     memset(outTs, 0, sizeof(*outTs));
 
-    SYSTEMTIME st;
+    SYSTEMTIME st = {0};
     if (ft && (ft->dwLowDateTime || ft->dwHighDateTime)) {
-        FileTimeToSystemTime(ft, &st);
+        if (!FileTimeToSystemTime(ft, &st)) GetSystemTime(&st);
     } else {
         GetSystemTime(&st);
     }
@@ -81,34 +82,53 @@ void udf_filetime_to_timestamp(const FILETIME* ft, UdfTimestamp* outTs) {
     outTs->centiseconds = (uint8_t)(st.wMilliseconds / 10);
 }
 
-uint8_t udf_encode_dstring(const wchar_t* src, uint8_t* dst, size_t maxDstLen) {
-    if (!src || !dst || maxDstLen < 2) return 0;
+void udf_finalize_tag_revision(UdfDescriptorTag* tag, uint16_t tagId, uint32_t block, uint16_t bytes, uint16_t revision) {
+    udf_finalize_tag(tag, tagId, block, bytes);
+    tag->descVersion = revision >= 0x0200 ? 3 : 2;
+    tag->tagChecksum = 0;
+    const uint8_t* data = (const uint8_t*)tag;
+    for (int i = 0; i < 16; i++) if (i != 4) tag->tagChecksum = (uint8_t)(tag->tagChecksum + data[i]);
+}
 
-    size_t len = wcslen(src);
-    bool use8Bit = true;
-    for (size_t i = 0; i < len; i++) {
-        if ((uint16_t)src[i] > 0xFF) {
-            use8Bit = false;
-            break;
-        }
-    }
+void udf_set_charset(uint8_t* charset) {
+    memset(charset, 0, 64);
+    memcpy(charset + 1, "OSTA Compressed Unicode", 23);
+}
 
-    if (use8Bit) {
-        if (len + 1 > maxDstLen) len = maxDstLen - 1;
-        dst[0] = 0x08; /* 8-bit compression ID */
-        for (size_t i = 0; i < len; i++) {
-            dst[1 + i] = (uint8_t)src[i];
-        }
-        return (uint8_t)(len + 1);
-    } else {
-        if (len * 2 + 1 > maxDstLen) len = (maxDstLen - 1) / 2;
-        dst[0] = 0x10; /* 16-bit compression ID */
-        for (size_t i = 0; i < len; i++) {
-            dst[1 + i * 2] = (uint8_t)(src[i] >> 8);
-            dst[1 + i * 2 + 1] = (uint8_t)(src[i] & 0xFF);
-        }
-        return (uint8_t)(len * 2 + 1);
+uint8_t udf_encode_name(const wchar_t* src, uint8_t* dst, size_t capacity) {
+    if (!src || !dst || capacity < 1) return 0;
+    size_t count = wcslen(src);
+    bool narrow = true;
+    for (size_t i = 0; i < count; i++) {
+        uint16_t value = (uint16_t)src[i];
+        if (value == 0xFFFE || value == 0xFEFF || (value >= 0xD800 && value <= 0xDFFF)) return 0;
+        if (value > 255) narrow = false;
     }
+    size_t bytes = 1 + count * (narrow ? 1 : 2);
+    if (bytes > capacity || bytes > 255) return 0;
+    dst[0] = narrow ? 8 : 16;
+    for (size_t i = 0; i < count; i++) {
+        if (narrow) dst[1 + i] = (uint8_t)src[i];
+        else { dst[1 + 2 * i] = (uint8_t)(src[i] >> 8); dst[2 + 2 * i] = (uint8_t)src[i]; }
+    }
+    return (uint8_t)bytes;
+}
+
+uint8_t udf_encode_dstring(const wchar_t* src, uint8_t* dst, size_t capacity) {
+    if (!src || !dst || capacity < 2 || capacity > 256) return 0;
+    memset(dst, 0, capacity);
+    if (!src[0]) return 0;
+    wchar_t clipped[128] = {0};
+    size_t count = wcslen(src), limit = capacity - 2;
+    bool narrow = true;
+    for (size_t i = 0; i < count; i++) if ((uint16_t)src[i] > 255) narrow = false;
+    if (!narrow) limit /= 2;
+    if (count > limit) count = limit;
+    if (count > 127) count = 127;
+    wmemcpy(clipped, src, count);
+    uint8_t bytes = udf_encode_name(clipped, dst, capacity - 1);
+    dst[capacity - 1] = bytes;
+    return bytes;
 }
 
 void udf_build_vrs(uint8_t* outBuffer, bool isUdf250) {
@@ -130,136 +150,4 @@ void udf_build_vrs(uint8_t* outBuffer, bool isUdf250) {
     uint8_t* s2 = outBuffer + 2 * UDF_SECTOR_SIZE;
     s2[0] = 0x00;
     memcpy(&s2[1], "TEA01\x01", 6);
-}
-
-void udf_build_avdp(uint8_t* outSector, uint32_t avdpLba, uint32_t mvdsLba, uint32_t mvdsSectors) {
-    if (!outSector) return;
-    memset(outSector, 0, UDF_SECTOR_SIZE);
-
-    UdfAnchorVolDescPtr* avdp = (UdfAnchorVolDescPtr*)outSector;
-
-    avdp->mainVdsExtent.location = mvdsLba;
-    avdp->mainVdsExtent.length = mvdsSectors * UDF_SECTOR_SIZE;
-
-    /* Reserve VDS (can point to identical extent or backup) */
-    avdp->reserveVdsExtent = avdp->mainVdsExtent;
-
-    udf_finalize_tag(&avdp->descTag, UDF_TAG_AVDP, avdpLba, 512);
-}
-
-void udf_build_mvds(uint8_t* outBuffer,
-                    uint32_t startLba,
-                    const wchar_t* volumeLabel,
-                    uint32_t partitionStartLba,
-                    uint32_t partitionSectorCount,
-                    uint32_t fsdLba,
-                    bool isUdf250) {
-    if (!outBuffer) return;
-    memset(outBuffer, 0, 4 * UDF_SECTOR_SIZE);
-
-    /* --- Sector 0: Primary Volume Descriptor (PVD) --- */
-    UdfPrimaryVolDesc* pvd = (UdfPrimaryVolDesc*)outBuffer;
-    pvd->vdsNum = 1;
-    pvd->pvdNum = 0;
-    udf_encode_dstring(volumeLabel ? volumeLabel : L"UDF_VOLUME", (uint8_t*)pvd->volumeIdent, 32);
-    pvd->volumeSeqNum = 1;
-    pvd->maxVolumeSeqNum = 1;
-    pvd->interchangeLevel = 2;
-    pvd->maxInterchangeLevel = 2;
-    pvd->charSetList = 1;
-    pvd->maxCharSetList = 1;
-    udf_encode_dstring(volumeLabel ? volumeLabel : L"UDF_VOLSET", (uint8_t*)pvd->volumeSetIdent, 128);
-
-    /* CS0 charset */
-    pvd->descriptorCharSet[0] = 0; /* CS0 */
-    memcpy(&pvd->descriptorCharSet[1], "+OSTA/CS0", 9);
-
-    /* Application ID & Impl ID */
-    pvd->applicationIdent.flags = 0;
-    memcpy(pvd->applicationIdent.ident, "*LIGHTNING UK! ImgBurn", 22);
-
-    pvd->implementationIdent.flags = 0;
-    memcpy(pvd->implementationIdent.ident, "*LIGHTNING UK! ImgBurn", 22);
-
-    udf_filetime_to_timestamp(NULL, &pvd->recordingDateAndTime);
-    udf_finalize_tag(&pvd->descTag, UDF_TAG_PVD, startLba, 512);
-
-    /* --- Sector 1: Partition Descriptor (PD) --- */
-    UdfPartitionDesc* pd = (UdfPartitionDesc*)(outBuffer + UDF_SECTOR_SIZE);
-    pd->vdsNum = 1;
-    pd->partitionFlags = 1; /* Allocated */
-    pd->partitionNum = 0;
-    pd->partitionContents.flags = 0;
-    memcpy(pd->partitionContents.ident, isUdf250 ? "+NSR03" : "+NSR02", 6);
-    pd->accessType = 1; /* Read-only */
-    pd->partitionStart = partitionStartLba;
-    pd->partitionLen = partitionSectorCount;
-    pd->implementationIdent.flags = 0;
-    memcpy(pd->implementationIdent.ident, "*LIGHTNING UK! ImgBurn", 22);
-    udf_finalize_tag(&pd->descTag, UDF_TAG_PD, startLba + 1, 512);
-
-    /* --- Sector 2: Logical Volume Descriptor (LVD) --- */
-    UdfLogicalVolDesc* lvd = (UdfLogicalVolDesc*)(outBuffer + 2 * UDF_SECTOR_SIZE);
-    lvd->vdsNum = 1;
-    lvd->descriptorCharSet[0] = 0;
-    memcpy(&lvd->descriptorCharSet[1], "+OSTA/CS0", 9);
-    udf_encode_dstring(volumeLabel ? volumeLabel : L"UDF_VOLUME", (uint8_t*)lvd->logicalVolumeIdent, 128);
-    lvd->logicalBlockSize = UDF_SECTOR_SIZE;
-
-    lvd->domainIdent.flags = 0;
-    memcpy(lvd->domainIdent.ident, "*OSTA UDF Compliant", 19);
-    lvd->domainIdent.identSuffix[0] = isUdf250 ? 0x50 : 0x02; /* UDF 2.50 or UDF 1.02 */
-    lvd->domainIdent.identSuffix[1] = isUdf250 ? 0x02 : 0x01;
-
-    /* LongAd to File Set Descriptor (FSD) in LogicalVolumeContentsUse */
-    UdfLongAd* fsdAd = (UdfLongAd*)lvd->logicalVolumeContentsUse;
-    fsdAd->length = UDF_SECTOR_SIZE;
-    fsdAd->logicalBlockNum = fsdLba - partitionStartLba; /* Relative to partition */
-    fsdAd->partitionRefNum = 0;
-
-    /* Type 1 Partition Map (ECMA-167 3/10.7.2): 6 bytes */
-    lvd->mapTableLength = 6;
-    lvd->numPartitionMaps = 1;
-    uint8_t* pmap = lvd->partitionMaps;
-    pmap[0] = 1; /* Map type = 1 */
-    pmap[1] = 6; /* Map length = 6 */
-    *(uint16_t*)&pmap[2] = 1; /* Volume Seq Num = 1 */
-    *(uint16_t*)&pmap[4] = 0; /* Partition Num = 0 */
-
-    lvd->implementationIdent.flags = 0;
-    memcpy(lvd->implementationIdent.ident, "*LIGHTNING UK! ImgBurn", 22);
-    udf_finalize_tag(&lvd->descTag, UDF_TAG_LVD, startLba + 2, 512);
-
-    /* --- Sector 3: Terminating Descriptor (TD) --- */
-    UdfTerminatingDesc* td = (UdfTerminatingDesc*)(outBuffer + 3 * UDF_SECTOR_SIZE);
-    udf_finalize_tag((UdfDescriptorTag*)td, UDF_TAG_TD, startLba + 3, 512);
-}
-
-void udf_build_fsd(uint8_t* outSector, uint32_t fsdLba, uint32_t rootDirFeLba) {
-    if (!outSector) return;
-    memset(outSector, 0, UDF_SECTOR_SIZE);
-
-    UdfFileSetDesc* fsd = (UdfFileSetDesc*)outSector;
-    udf_filetime_to_timestamp(NULL, &fsd->recordingDateAndTime);
-    fsd->interchangeLevel = 3;
-    fsd->maxInterchangeLevel = 3;
-    fsd->charSetList = 1;
-    fsd->maxCharSetList = 1;
-    fsd->fileSetNum = 0;
-    fsd->fileSetDescNum = 0;
-
-    fsd->logicalVolumeIdentCharSet[0] = 0;
-    memcpy(&fsd->logicalVolumeIdentCharSet[1], "+OSTA/CS0", 9);
-    fsd->fileSetCharSet[0] = 0;
-    memcpy(&fsd->fileSetCharSet[1], "+OSTA/CS0", 9);
-
-    /* Root directory ICB (LongAd) */
-    fsd->rootDirectoryIcb.length = UDF_SECTOR_SIZE;
-    fsd->rootDirectoryIcb.logicalBlockNum = rootDirFeLba;
-    fsd->rootDirectoryIcb.partitionRefNum = 0;
-
-    fsd->domainIdent.flags = 0;
-    memcpy(fsd->domainIdent.ident, "*OSTA UDF Compliant", 19);
-
-    udf_finalize_tag(&fsd->descTag, UDF_TAG_FSD, fsdLba, 512);
 }

@@ -6,6 +6,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "imgburn_fs.h"
 #include "imgburn_udf.h"
+#include "imgburn_fs_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,25 +91,6 @@ static bool write_bytes(HANDLE file, const void* buffer, DWORD bytes) {
     return true;
 }
 
-/* Helpers for ISO9660 multi-byte integers (Little-Endian & Big-Endian together) */
-static inline void set_both_endian_16(uint8_t* p, uint16_t v) {
-    p[0] = (uint8_t)(v & 0xFF);
-    p[1] = (uint8_t)(v >> 8);
-    p[2] = (uint8_t)(v >> 8);
-    p[3] = (uint8_t)(v & 0xFF);
-}
-
-static inline void set_both_endian_32(uint8_t* p, uint32_t v) {
-    p[0] = (uint8_t)(v & 0xFF);
-    p[1] = (uint8_t)((v >> 8) & 0xFF);
-    p[2] = (uint8_t)((v >> 16) & 0xFF);
-    p[3] = (uint8_t)(v >> 24);
-    p[4] = (uint8_t)(v >> 24);
-    p[5] = (uint8_t)((v >> 16) & 0xFF);
-    p[6] = (uint8_t)((v >> 8) & 0xFF);
-    p[7] = (uint8_t)(v & 0xFF);
-}
-
 static void convert_to_iso_name(const wchar_t* src, char* dst, size_t maxLen, bool isDir) {
     char temp[MAX_PATH];
     WideCharToMultiByte(CP_ACP, 0, src, -1, temp, sizeof(temp), NULL, NULL);
@@ -129,14 +111,6 @@ static void convert_to_iso_name(const wchar_t* src, char* dst, size_t maxLen, bo
     }
     if (!isDir) {
         strncat(dst, ";1", maxLen - strlen(dst) - 1);
-    }
-}
-
-static void utf16_to_be(const wchar_t* src, uint8_t* dst, size_t lenChars) {
-    for (size_t i = 0; i < lenChars; i++) {
-        uint16_t w = (uint16_t)src[i];
-        dst[i * 2] = (uint8_t)(w >> 8);
-        dst[i * 2 + 1] = (uint8_t)(w & 0xFF);
     }
 }
 
@@ -182,6 +156,15 @@ bool image_builder_init(ImageBuilder* b, const char* volumeLabel) {
     wchar_t* wideLabel = (wchar_t*)calloc((size_t)count, sizeof(wchar_t));
     if (!wideLabel) return false;
     if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, label, -1, wideLabel, count)) { free(wideLabel); return false; }
+    for (int i = 0; i < count - 1; i++) {
+        uint16_t value = (uint16_t)wideLabel[i];
+        if (value == 0xFFFE || value == 0xFEFF || (value >= 0xD800 && value <= 0xDFFF)) { free(wideLabel); return false; }
+        if (i < 32) {
+            if (value >= 'a' && value <= 'z') value -= 'a' - 'A';
+            b->config.volumeLabelIso[i] = (char)((value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9') || value == '_' ? value : '_');
+        }
+    }
+    b->config.volumeLabelIso[count - 1 < 32 ? count - 1 : 32] = 0;
     wcsncpy(b->config.volumeLabelJoliet, wideLabel, 16);
     wcsncpy(b->config.volumeLabelUdf, wideLabel, 126);
     free(wideLabel);
@@ -189,7 +172,7 @@ bool image_builder_init(ImageBuilder* b, const char* volumeLabel) {
     b->config.fsTypes = FS_TYPE_ALL;
     b->config.udfRev = UDF_REV_102;
     b->config.optimizeDuplicateFiles = true;
-    b->config.dvdVideoCompliance = true;
+    b->config.dvdVideoCompliance = false;
 
     b->rootDir = create_dir_node("", L"", NULL);
     return b->rootDir != NULL;
@@ -197,6 +180,7 @@ bool image_builder_init(ImageBuilder* b, const char* volumeLabel) {
 
 void image_builder_destroy(ImageBuilder* b) {
     if (!b) return;
+    fs_layout_free(b);
     if (b->rootDir) {
         free_dir_node(b->rootDir);
         b->rootDir = NULL;
@@ -204,6 +188,7 @@ void image_builder_destroy(ImageBuilder* b) {
 }
 
 static FsDirectoryNode* get_or_create_dir(ImageBuilder* b, const wchar_t* relDirPath) {
+    fs_layout_free(b);
     FsDirectoryNode* root = b->rootDir;
     if (relDirPath && wcslen(relDirPath) >= MAX_PATH) return NULL;
     if (!relDirPath || !relDirPath[0] || wcscmp(relDirPath, L"\\") == 0 || wcscmp(relDirPath, L"/") == 0) {
@@ -217,7 +202,7 @@ static FsDirectoryNode* get_or_create_dir(ImageBuilder* b, const wchar_t* relDir
     wchar_t* context = NULL;
     wchar_t* token = wcstok(pathCopy, L"\\/", &context);
     while (token) {
-        if (wcslen(token) > 110 || wcscmp(token, L".") == 0 || wcscmp(token, L"..") == 0) return NULL;
+        if (wcslen(token) > 127 || wcscmp(token, L".") == 0 || wcscmp(token, L"..") == 0) return NULL;
         /* Search child dirs */
         FsDirectoryNode* found = NULL;
         FsDirectoryNode* c = curr->firstChildDir;
@@ -230,6 +215,7 @@ static FsDirectoryNode* get_or_create_dir(ImageBuilder* b, const wchar_t* relDir
         }
 
         if (!found) {
+            for (FsFileNode* file = curr->firstFile; file; file = file->next) if (_wcsicmp(file->nameW, token) == 0) return NULL;
             char nameA[128];
             convert_to_iso_name(token, nameA, sizeof(nameA), true);
             found = create_dir_node(nameA, token, curr);
@@ -256,7 +242,9 @@ bool image_builder_add_file(ImageBuilder* b,
         return false;
     }
 
-    if (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return false;
+    if (fad.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) return false;
+    uint64_t fileSize = ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+    if (fileSize > UINT32_MAX) return false;
     /* Extract directory and filename from discRelativePath */
     wchar_t dirPart[MAX_PATH] = { 0 };
     wchar_t filePart[MAX_PATH] = { 0 };
@@ -272,10 +260,12 @@ bool image_builder_add_file(ImageBuilder* b,
         wcscpy(filePart, discRelativePath);
     }
 
-    if (!filePart[0] || wcslen(filePart) > 110) return false;
+    if (!filePart[0] || wcslen(filePart) > 127) return false;
     FsDirectoryNode* dir = get_or_create_dir(b, dirPart);
     if (!dir) return false;
 
+    for (FsFileNode* existing = dir->firstFile; existing; existing = existing->next) if (_wcsicmp(existing->nameW, filePart) == 0) return false;
+    for (FsDirectoryNode* child = dir->firstChildDir; child; child = child->nextSibling) if (_wcsicmp(child->nameW, filePart) == 0) return false;
     FsFileNode* f = (FsFileNode*)calloc(1, sizeof(FsFileNode));
     if (!f) return false;
 
@@ -381,284 +371,10 @@ static bool deduplicate_files(ImageBuilder* b) {
     return true;
 }
 
-/* Calculate directory record size in bytes */
-static uint32_t calculate_dir_extent_size(FsDirectoryNode* dir, bool isJoliet) {
-    /* Dot (.) and DotDot (..) entries */
-    uint32_t size = 34 + 34;
-
-    /* Child directories */
-    FsDirectoryNode* c = dir->firstChildDir;
-    while (c) {
-        uint32_t nameLen = isJoliet ? (uint32_t)(wcslen(c->nameW) * 2) : (uint32_t)strlen(c->nameA);
-        uint32_t recLen = 33 + nameLen;
-        if (recLen % 2 != 0) recLen++;
-        size += recLen;
-        c = c->nextSibling;
-    }
-
-    /* Files */
-    FsFileNode* f = dir->firstFile;
-    while (f) {
-        uint32_t nameLen = isJoliet ? (uint32_t)(wcslen(f->nameW) * 2) : (uint32_t)strlen(f->nameA);
-        uint32_t recLen = 33 + nameLen;
-        if (recLen % 2 != 0) recLen++;
-        size += recLen;
-        f = f->next;
-    }
-
-    return (size + FS_SECTOR_SIZE - 1) & ~(FS_SECTOR_SIZE - 1);
-}
-
-/* Assign directory LBAs */
-static void allocate_dir_lbas(FsDirectoryNode* dir, uint32_t* currentLba, bool isJoliet) {
-    uint32_t extentBytes = calculate_dir_extent_size(dir, isJoliet);
-    uint32_t sectors = extentBytes / FS_SECTOR_SIZE;
-
-    if (isJoliet) {
-        dir->allocatedLbaJoliet = *currentLba;
-        dir->sectorCountJoliet = sectors;
-    } else {
-        dir->allocatedLbaIso = *currentLba;
-        dir->sectorCountIso = sectors;
-    }
-    *currentLba += sectors;
-
-    FsDirectoryNode* c = dir->firstChildDir;
-    while (c) {
-        allocate_dir_lbas(c, currentLba, isJoliet);
-        c = c->nextSibling;
-    }
-}
-
-/* Assign file data LBAs */
-static void allocate_file_lbas(FsDirectoryNode* dir, uint32_t* currentLba, bool dvdPadding) {
-    /* DVD-Video: Check if this is VIDEO_TS and pad IFO/BUP */
-    bool isVideoTs = (_stricmp(dir->nameA, "VIDEO_TS") == 0 || _wcsicmp(dir->nameW, L"VIDEO_TS") == 0);
-
-    FsFileNode* f = dir->firstFile;
-    while (f) {
-        if (f->isDuplicate) {
-            f->allocatedLba = f->duplicateOf->allocatedLba;
-        } else {
-            /* DVD-Video: If this is a .BUP file, ensure >= 16 sectors from its .IFO */
-            if (dvdPadding && isVideoTs && strstr(f->nameA, ".BUP")) {
-                char ifoName[128];
-                strncpy(ifoName, f->nameA, sizeof(ifoName) - 1);
-                char* bupExt = strstr(ifoName, ".BUP");
-                if (bupExt) memcpy(bupExt, ".IFO", 4);
-
-                /* Search matching IFO in dir */
-                FsFileNode* ifo = dir->firstFile;
-                while (ifo) {
-                    if (strcmp(ifo->nameA, ifoName) == 0) {
-                        if (*currentLba - ifo->allocatedLba < 16) {
-                            /* Pad to at least 16 sectors (32 KB ECC block) */
-                            *currentLba = ifo->allocatedLba + 16;
-                        }
-                        break;
-                    }
-                    ifo = ifo->next;
-                }
-            }
-
-            f->allocatedLba = *currentLba;
-            *currentLba += f->sectorCount;
-        }
-        f = f->next;
-    }
-
-    FsDirectoryNode* c = dir->firstChildDir;
-    while (c) {
-        allocate_file_lbas(c, currentLba, dvdPadding);
-        c = c->nextSibling;
-    }
-}
-
 uint32_t image_builder_calculate_layout(ImageBuilder* b) {
     if (!b || !b->rootDir) return 0;
-
-    /* 1. File deduplication */
-    if (!deduplicate_files(b)) { b->config.totalImageSectors = 0; return 0; }
-
-    /* 2. System area: LBA 0..15 (32 KB reserved) */
-    uint32_t lba = 16;
-    b->pvdLba = lba++;
-    b->svdLba = lba++;
-    lba++;
-
-    /* Path tables */
-    b->pathTableLbaL = lba++;
-    b->pathTableLbaM = lba++;
-    b->pathTableLbaLJoliet = lba++;
-    b->pathTableLbaMJoliet = lba++;
-
-    /* 3. Allocate ISO directory extents */
-    allocate_dir_lbas(b->rootDir, &lba, false);
-
-    /* 4. Allocate Joliet directory extents */
-    allocate_dir_lbas(b->rootDir, &lba, true);
-
-    /* 5. If UDF enabled, reserve space for AVDP / MVDS / FSD */
-    if (b->config.fsTypes & FS_TYPE_UDF) {
-        if (lba < 302) {
-            lba = 302; /* FSD at LBA 300, Root FE at LBA 301 */
-        }
-    }
-
-    /* 6. Allocate File data extents */
-    b->dataStartLba = lba;
-    allocate_file_lbas(b->rootDir, &lba, b->config.dvdVideoCompliance);
-
-    /* If UDF enabled, ensure volume contains at least 512 sectors */
-    if ((b->config.fsTypes & FS_TYPE_UDF) && lba < 512) {
-        lba = 512;
-    }
-
-    b->config.totalImageSectors = lba;
-    return lba;
-}
-
-static void write_datetime(uint8_t* p) {
-    SYSTEMTIME st;
-    GetSystemTime(&st);
-    char buf[18];
-    snprintf(buf, sizeof(buf), "%04u%02u%02u%02u%02u%02u%02u%c",
-             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
-             st.wMilliseconds / 10, 0);
-    memcpy(p, buf, 17);
-}
-
-static bool write_pvd(ImageBuilder* b, HANDLE hFile, bool isJoliet) {
-    uint8_t sector[FS_SECTOR_SIZE];
-    memset(sector, 0, sizeof(sector));
-
-    sector[0] = isJoliet ? 0x02 : 0x01; /* 1 = PVD, 2 = SVD (Joliet) */
-    memcpy(&sector[1], "CD001\x01", 6);
-
-    if (isJoliet) {
-        /* Joliet escape sequence: %/E (UCS-2 Level 3) */
-        sector[88] = 0x25; sector[89] = 0x2F; sector[90] = 0x45;
-        utf16_to_be(b->config.volumeLabelJoliet, &sector[40], wcslen(b->config.volumeLabelJoliet));
-    } else {
-        memcpy(&sector[40], b->config.volumeLabelIso, strlen(b->config.volumeLabelIso));
-    }
-
-    set_both_endian_32(&sector[80], b->config.totalImageSectors);
-    set_both_endian_16(&sector[120], 1); /* Volume set size */
-    set_both_endian_16(&sector[124], 1); /* Volume seq number */
-    set_both_endian_16(&sector[128], FS_SECTOR_SIZE);
-
-    /* Path tables */
-    uint32_t ptLba = isJoliet ? b->pathTableLbaLJoliet : b->pathTableLbaL;
-    uint32_t ptLbaM = isJoliet ? b->pathTableLbaMJoliet : b->pathTableLbaM;
-    *(uint32_t*)&sector[140] = ptLba;
-    sector[148] = (uint8_t)(ptLbaM >> 24); sector[149] = (uint8_t)(ptLbaM >> 16);
-    sector[150] = (uint8_t)(ptLbaM >> 8);  sector[151] = (uint8_t)(ptLbaM & 0xFF);
-
-    /* Root directory record (34 bytes at sector 156) */
-    uint8_t* rootRec = &sector[156];
-    rootRec[0] = 34; /* Length */
-    set_both_endian_32(&rootRec[2], isJoliet ? b->rootDir->allocatedLbaJoliet : b->rootDir->allocatedLbaIso);
-    set_both_endian_32(&rootRec[10], isJoliet ? b->rootDir->sectorCountJoliet * FS_SECTOR_SIZE : b->rootDir->sectorCountIso * FS_SECTOR_SIZE);
-    rootRec[25] = 0x02; /* Directory flag */
-    set_both_endian_16(&rootRec[28], 1);
-    rootRec[32] = 1;
-    rootRec[33] = 0x00; /* Special root identifier */
-
-    write_datetime(&sector[813]); /* Creation date */
-    write_datetime(&sector[830]); /* Mod date */
-    sector[881] = 0x01;           /* File structure version */
-
-    return write_bytes(hFile, sector, FS_SECTOR_SIZE);
-}
-
-/* Write directory records extent to ISO */
-static bool write_dir_extent(HANDLE hFile, FsDirectoryNode* dir, bool isJoliet) {
-    uint32_t extentBytes = isJoliet ? (dir->sectorCountJoliet * FS_SECTOR_SIZE) : (dir->sectorCountIso * FS_SECTOR_SIZE);
-    uint8_t* buffer = (uint8_t*)calloc(1, extentBytes);
-    if (!buffer) return false;
-    uint32_t offset = 0;
-
-    /* Entry 1: Current dir '.' */
-    buffer[offset] = 34;
-    set_both_endian_32(&buffer[offset + 2], isJoliet ? dir->allocatedLbaJoliet : dir->allocatedLbaIso);
-    set_both_endian_32(&buffer[offset + 10], extentBytes);
-    buffer[offset + 25] = 0x02;
-    set_both_endian_16(&buffer[offset + 28], 1);
-    buffer[offset + 32] = 1;
-    buffer[offset + 33] = 0x00;
-    offset += 34;
-
-    /* Entry 2: Parent dir '..' */
-    FsDirectoryNode* parent = dir->parent ? dir->parent : dir;
-    uint32_t parentBytes = isJoliet ? (parent->sectorCountJoliet * FS_SECTOR_SIZE) : (parent->sectorCountIso * FS_SECTOR_SIZE);
-    buffer[offset] = 34;
-    set_both_endian_32(&buffer[offset + 2], isJoliet ? parent->allocatedLbaJoliet : parent->allocatedLbaIso);
-    set_both_endian_32(&buffer[offset + 10], parentBytes);
-    buffer[offset + 25] = 0x02;
-    set_both_endian_16(&buffer[offset + 28], 1);
-    buffer[offset + 32] = 1;
-    buffer[offset + 33] = 0x01;
-    offset += 34;
-
-    /* Child Dirs */
-    FsDirectoryNode* c = dir->firstChildDir;
-    while (c) {
-        uint32_t nameLen = isJoliet ? (uint32_t)(wcslen(c->nameW) * 2) : (uint32_t)strlen(c->nameA);
-        uint8_t recLen = (uint8_t)(33 + nameLen);
-        if (recLen % 2 != 0) recLen++;
-
-        uint32_t cBytes = isJoliet ? (c->sectorCountJoliet * FS_SECTOR_SIZE) : (c->sectorCountIso * FS_SECTOR_SIZE);
-        buffer[offset] = recLen;
-        set_both_endian_32(&buffer[offset + 2], isJoliet ? c->allocatedLbaJoliet : c->allocatedLbaIso);
-        set_both_endian_32(&buffer[offset + 10], cBytes);
-        buffer[offset + 25] = 0x02;
-        set_both_endian_16(&buffer[offset + 28], 1);
-        buffer[offset + 32] = (uint8_t)nameLen;
-        if (isJoliet) {
-            utf16_to_be(c->nameW, &buffer[offset + 33], wcslen(c->nameW));
-        } else {
-            memcpy(&buffer[offset + 33], c->nameA, nameLen);
-        }
-
-        offset += recLen;
-        c = c->nextSibling;
-    }
-
-    /* Files */
-    FsFileNode* f = dir->firstFile;
-    while (f) {
-        uint32_t nameLen = isJoliet ? (uint32_t)(wcslen(f->nameW) * 2) : (uint32_t)strlen(f->nameA);
-        uint8_t recLen = (uint8_t)(33 + nameLen);
-        if (recLen % 2 != 0) recLen++;
-
-        buffer[offset] = recLen;
-        set_both_endian_32(&buffer[offset + 2], f->allocatedLba);
-        set_both_endian_32(&buffer[offset + 10], (uint32_t)f->fileSize);
-        buffer[offset + 25] = 0x00; /* Regular file */
-        set_both_endian_16(&buffer[offset + 28], 1);
-        buffer[offset + 32] = (uint8_t)nameLen;
-        if (isJoliet) {
-            utf16_to_be(f->nameW, &buffer[offset + 33], wcslen(f->nameW));
-        } else {
-            memcpy(&buffer[offset + 33], f->nameA, nameLen);
-        }
-
-        offset += recLen;
-        f = f->next;
-    }
-
-    bool success = write_bytes(hFile, buffer, extentBytes);
-    free(buffer);
-    if (!success) return false;
-
-    /* Recurse child dirs */
-    c = dir->firstChildDir;
-    while (c) {
-        if (!write_dir_extent(hFile, c, isJoliet)) return false;
-        c = c->nextSibling;
-    }
-    return true;
+    if (!deduplicate_files(b) || !fs_layout_prepare(b)) { fs_layout_free(b); return 0; }
+    return b->config.totalImageSectors;
 }
 
 /* 任何输入快照变化、短读、写入错误都必须中止镜像生成。 */
@@ -735,84 +451,7 @@ bool image_builder_create_iso(ImageBuilder* b,
     totalSize.QuadPart = (int64_t)b->config.totalImageSectors * FS_SECTOR_SIZE;
     if (!SetFilePointerEx(hOut, totalSize, NULL, FILE_BEGIN) || !SetEndOfFile(hOut)) goto failed;
 
-    /* 1. Write System Area (LBA 0..15 = 32KB zeroes) */
-    LARGE_INTEGER zeroPos;
-    zeroPos.QuadPart = 0;
-    if (!SetFilePointerEx(hOut, zeroPos, NULL, FILE_BEGIN)) goto failed;
-    uint8_t zeroSector[FS_SECTOR_SIZE] = { 0 };
-    for (int i = 0; i < 16; i++) {
-        if (!write_bytes(hOut, zeroSector, FS_SECTOR_SIZE)) goto failed;
-    }
-
-    /* 2. Write ISO9660 PVD (LBA 16) */
-    if (!write_pvd(b, hOut, false)) goto failed;
-
-    /* 3. Write Joliet SVD (LBA 17) */
-    if (!write_pvd(b, hOut, true)) goto failed;
-
-    /* 4. Write Volume Descriptor Set Terminator (LBA 18) */
-    memset(zeroSector, 0, sizeof(zeroSector));
-    zeroSector[0] = 0xFF; /* Terminator */
-    memcpy(&zeroSector[1], "CD001\x01", 6);
-    if (!write_bytes(hOut, zeroSector, FS_SECTOR_SIZE)) goto failed;
-
-    /* 5. Write Empty Path Tables (4 sectors) */
-    for (int i = 0; i < 4; i++) {
-        memset(zeroSector, 0, sizeof(zeroSector));
-        if (!write_bytes(hOut, zeroSector, FS_SECTOR_SIZE)) goto failed;
-    }
-
-    /* 6. Write ISO9660 Directory Extents */
-    LARGE_INTEGER dirPosIso;
-    dirPosIso.QuadPart = (int64_t)b->rootDir->allocatedLbaIso * FS_SECTOR_SIZE;
-    if (!SetFilePointerEx(hOut, dirPosIso, NULL, FILE_BEGIN)) goto failed;
-    if (!write_dir_extent(hOut, b->rootDir, false)) goto failed;
-
-    /* 7. Write Joliet Directory Extents */
-    LARGE_INTEGER dirPosJoliet;
-    dirPosJoliet.QuadPart = (int64_t)b->rootDir->allocatedLbaJoliet * FS_SECTOR_SIZE;
-    if (!SetFilePointerEx(hOut, dirPosJoliet, NULL, FILE_BEGIN)) goto failed;
-    if (!write_dir_extent(hOut, b->rootDir, true)) goto failed;
-
-    /* 8. If UDF enabled, write UDF Descriptors (VRS, MVDS, AVDP, RVDS, FSD) */
-    if (b->config.fsTypes & FS_TYPE_UDF) {
-        bool isUdf250 = (b->config.udfRev >= UDF_REV_250);
-
-        /* Write VRS at LBA 19..21 (BEA01, NSR02/03, TEA01) */
-        LARGE_INTEGER vrsPos;
-        vrsPos.QuadPart = (int64_t)19 * FS_SECTOR_SIZE;
-        if (!SetFilePointerEx(hOut, vrsPos, NULL, FILE_BEGIN)) goto failed;
-        uint8_t vrsBuffer[3 * FS_SECTOR_SIZE];
-        udf_build_vrs(vrsBuffer, isUdf250);
-        if (!write_bytes(hOut, vrsBuffer, sizeof(vrsBuffer))) goto failed;
-
-        /* Write MVDS at LBA 32..47 (16 sectors) */
-        LARGE_INTEGER mvdsPos;
-        mvdsPos.QuadPart = (int64_t)32 * FS_SECTOR_SIZE;
-        if (!SetFilePointerEx(hOut, mvdsPos, NULL, FILE_BEGIN)) goto failed;
-        uint8_t mvdsBuffer[16 * FS_SECTOR_SIZE] = {0};
-        udf_build_mvds(mvdsBuffer, 32, b->config.volumeLabelUdf, 300, b->config.totalImageSectors - 300, 300, isUdf250);
-        if (!write_bytes(hOut, mvdsBuffer, sizeof(mvdsBuffer))) goto failed;
-
-        /* Write AVDP at LBA 256 */
-        LARGE_INTEGER avdpPos;
-        avdpPos.QuadPart = (int64_t)256 * FS_SECTOR_SIZE;
-        if (!SetFilePointerEx(hOut, avdpPos, NULL, FILE_BEGIN)) goto failed;
-        uint8_t avdpSector[FS_SECTOR_SIZE];
-        udf_build_avdp(avdpSector, 256, 32, 16);
-        if (!write_bytes(hOut, avdpSector, FS_SECTOR_SIZE)) goto failed;
-
-        /* Write RVDS at LBA 257..272 (duplicate of MVDS) */
-        if (!write_bytes(hOut, mvdsBuffer, sizeof(mvdsBuffer))) goto failed;
-
-        /* Write FSD at LBA 300 */
-        LARGE_INTEGER fsdPos;
-        fsdPos.QuadPart = (int64_t)300 * FS_SECTOR_SIZE;
-        if (!SetFilePointerEx(hOut, fsdPos, NULL, FILE_BEGIN)) goto failed;
-        uint8_t fsdSector[FS_SECTOR_SIZE];
-        udf_build_fsd(fsdSector, 300, 301);
-        if (!write_bytes(hOut, fsdSector, FS_SECTOR_SIZE)) goto failed;
-    }
+    if (!fs_layout_write(b, hOut)) goto failed;
 
     /* 9. Write File Contents */
     if (!write_all_files_data(b, hOut, progressCallback, userData) || !FlushFileBuffers(hOut)) goto failed;
