@@ -263,6 +263,23 @@ typedef struct {
     /* Followed by: Extended Attributes, then Allocation Descriptors (ShortADs) */
 } UdfFileEntry;
 
+/* UDF 2.x的扩展文件项，Blu-ray布局使用独立的对象长度与创建时间字段。 */
+typedef struct {
+    UdfDescriptorTag descTag;
+    uint8_t icbTag[20];
+    uint32_t uid, gid, permissions;
+    uint16_t fileLinkCount;
+    uint8_t recordFormat, recordDisplayAttr;
+    uint32_t recordLength;
+    uint64_t infoLength, objectSize, logicalBlocksRecorded;
+    UdfTimestamp accessDateAndTime, modDateAndTime, creationDateAndTime, attrDateAndTime;
+    uint32_t checkpoint, reserved;
+    UdfLongAd extendedAttrIcb, streamDirectoryIcb;
+    UdfEntityId implementationIdent;
+    uint64_t uniqueId;
+    uint32_t lengthOfExtendedAttrs, lengthOfAllocationDescriptors;
+} UdfExtendedFileEntry;
+
 /**
  * @brief File Identifier Descriptor (FID) (ECMA-167 4/14.4)
  */

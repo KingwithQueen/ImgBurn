@@ -130,6 +130,7 @@ static void free_dir_node(FsDirectoryNode* dir) {
     FsFileNode* f = dir->firstFile;
     while (f) {
         FsFileNode* next = f->next;
+        free(f->patches);
         free(f);
         f = next;
     }
@@ -187,7 +188,7 @@ void image_builder_destroy(ImageBuilder* b) {
     }
 }
 
-static FsDirectoryNode* get_or_create_dir(ImageBuilder* b, const wchar_t* relDirPath) {
+FsDirectoryNode* fs_ensure_directory(ImageBuilder* b, const wchar_t* relDirPath) {
     fs_layout_free(b);
     FsDirectoryNode* root = b->rootDir;
     if (relDirPath && wcslen(relDirPath) >= MAX_PATH) return NULL;
@@ -244,7 +245,7 @@ bool image_builder_add_file(ImageBuilder* b,
 
     if (fad.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) return false;
     uint64_t fileSize = ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
-    if (fileSize > UINT32_MAX) return false;
+    if (fileSize > (uint64_t)(UINT32_MAX - 4096u) * FS_SECTOR_SIZE) return false;
     /* Extract directory and filename from discRelativePath */
     wchar_t dirPart[MAX_PATH] = { 0 };
     wchar_t filePart[MAX_PATH] = { 0 };
@@ -261,7 +262,7 @@ bool image_builder_add_file(ImageBuilder* b,
     }
 
     if (!filePart[0] || wcslen(filePart) > 127) return false;
-    FsDirectoryNode* dir = get_or_create_dir(b, dirPart);
+    FsDirectoryNode* dir = fs_ensure_directory(b, dirPart);
     if (!dir) return false;
 
     for (FsFileNode* existing = dir->firstFile; existing; existing = existing->next) if (_wcsicmp(existing->nameW, filePart) == 0) return false;
@@ -274,6 +275,7 @@ bool image_builder_add_file(ImageBuilder* b,
     wcsncpy(f->sourceDiskPath, sourceFilePath, MAX_PATH - 1);
     f->fileSize = ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
     f->modTime = fad.ftLastWriteTime;
+    f->parent = dir;
     f->sectorCount = (uint32_t)((f->fileSize + FS_SECTOR_SIZE - 1) / FS_SECTOR_SIZE);
 
     /* Append to dir */
@@ -289,7 +291,7 @@ bool image_builder_add_folder(ImageBuilder* b, const wchar_t* hostFolderPath, co
     if (!b || !b->rootDir || !hostFolderPath || wcslen(hostFolderPath) + 3 > MAX_PATH) return false;
     DWORD attributes = GetFileAttributesW(hostFolderPath);
     if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
-    if (!get_or_create_dir(b, discDestFolder)) return false;
+    if (!fs_ensure_directory(b, discDestFolder)) return false;
     wchar_t search[MAX_PATH];
     if (swprintf(search, MAX_PATH, L"%ls\\*", hostFolderPath) < 0) return false;
     WIN32_FIND_DATAW data;
@@ -315,8 +317,10 @@ bool image_builder_add_folder(ImageBuilder* b, const wchar_t* hostFolderPath, co
 
 /* Collect all files into a flat list for deduplication */
 static bool collect_files(FsDirectoryNode* dir, FsFileNode*** list, int* count, int* cap) {
+    if (dir->excluded) return true;
     FsFileNode* f = dir->firstFile;
     while (f) {
+        if (f->excluded) { f = f->next; continue; }
         if (*count >= *cap) {
             if (*cap > INT_MAX / 2) return false;
             int newCapacity = *cap == 0 ? 256 : *cap * 2;
@@ -345,7 +349,7 @@ static bool deduplicate_files(ImageBuilder* b) {
     if (!collect_files(b->rootDir, &allFiles, &count, &cap)) { free(allFiles); return false; }
     b->config.deduplicatedBytesSaved = 0;
     for (int i = 0; i < count; i++) { allFiles[i]->isDuplicate = false; allFiles[i]->duplicateOf = NULL; allFiles[i]->crc32 = 0; }
-    if (!b->config.optimizeDuplicateFiles) { free(allFiles); return true; }
+    if (!b->config.optimizeDuplicateFiles || b->config.dvdVideoCompliance || b->config.blurayCompliance) { free(allFiles); return true; }
 
     for (int i = 0; i < count; i++) {
         FsFileNode* fi = allFiles[i];
@@ -373,7 +377,8 @@ static bool deduplicate_files(ImageBuilder* b) {
 
 uint32_t image_builder_calculate_layout(ImageBuilder* b) {
     if (!b || !b->rootDir) return 0;
-    if (!deduplicate_files(b) || !fs_layout_prepare(b)) { fs_layout_free(b); return 0; }
+    fs_layout_free(b);
+    if (!fs_video_prepare(b) || !deduplicate_files(b) || !fs_layout_prepare(b)) { fs_layout_free(b); return 0; }
     return b->config.totalImageSectors;
 }
 
@@ -397,7 +402,7 @@ static bool write_all_files_data(ImageBuilder* b, HANDLE output, ImageProgressFn
             while (remaining > 0 && success) {
                 DWORD wanted = remaining < sizeof(buffer) ? (DWORD)remaining : (DWORD)sizeof(buffer), actual = 0;
                 success = ReadFile(source, buffer, wanted, &actual, NULL) && actual > 0 && actual <= wanted;
-                if (success) { success = write_bytes(output, buffer, actual); remaining -= actual; }
+                if (success) { fs_video_patch(node, node->fileSize - remaining, buffer, actual); success = write_bytes(output, buffer, actual); remaining -= actual; }
             }
             if (success && node->fileSize % FS_SECTOR_SIZE != 0) {
                 DWORD padding = FS_SECTOR_SIZE - (DWORD)(node->fileSize % FS_SECTOR_SIZE);

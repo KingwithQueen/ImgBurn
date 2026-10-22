@@ -18,6 +18,7 @@ extern "C" {
 #include <windows.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include "imgburn_image.h"
 
 #define CDDA_SAMPLE_RATE     44100
 #define CDDA_CHANNELS        2
@@ -52,6 +53,13 @@ typedef struct {
     uint32_t pregapSectors;         /* Pregap (default 150 = 2 seconds) */
     uint32_t postgapSectors;        /* POSTGAP产生的静音扇区。 */
     bool sourceIsWave;
+    CueFileType sourceType;
+    uint32_t flags;
+    char songwriter[128];
+    CueIndex indices[MAX_CUE_INDICES];
+    int indexCount;
+    unsigned sessionNumber;
+    unsigned sourceFileGroup;
     bool hasIndex00;
     MsfTime index00;
     MsfTime startTime;
@@ -68,6 +76,10 @@ typedef struct {
     int trackCount;
     AudioTrack tracks[MAX_AUDIO_TRACKS];
     uint32_t totalSectors;          /* Total sectors including lead-in pregap */
+    char songwriter[128];
+    wchar_t cdTextFile[MAX_PATH];
+    unsigned sessionCount;
+    uint32_t sessionLeadIn[99], sessionLeadOut[99], sessionEndLba[99];
 } AudioCompilation;
 
 /**
@@ -134,6 +146,8 @@ uint32_t audio_decoder_read(AudioDecoder* decoder, void* outBuffer, uint32_t byt
  * @brief Close audio decoder and cleanup pipe/process
  */
 void audio_decoder_close(AudioDecoder* decoder);
+/* 完整解码并检查子进程退出结果，返回真实PCM字节数而不是估算时长。 */
+bool audio_measure_decoded(const wchar_t* path, uint64_t* pcmBytes);
 
 /**
  * @brief Parse a standard CUE Sheet file into AudioCompilation

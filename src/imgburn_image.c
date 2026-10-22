@@ -5,6 +5,7 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 #include "imgburn_image.h"
+#include "imgburn_audio.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,10 +108,12 @@ static bool cue_token(char** cursor, char* output, size_t capacity) {
     }
     if (quoted && *p++ != '"') return false;
     if (*p && !isspace((unsigned char)*p)) return false;
-    output[count] = 0; *cursor = p; return count != 0;
+    output[count] = 0; *cursor = p; return count != 0 || quoted;
 }
 
 static bool cue_end(const char* text) { while (*text && isspace((unsigned char)*text)) text++; return *text == 0; }
+/* IsoBuster会在REM会话字段后附加分号说明，只忽略这类注释的尾部。 */
+static bool cue_rem_end(const char* text) { while (*text && isspace((unsigned char)*text)) text++; return !*text || *text == ';'; }
 
 static bool cue_number(const char* text, unsigned limit, unsigned* result) {
     unsigned value = 0;
@@ -135,154 +138,229 @@ static uint32_t cue_le32(const uint8_t* value) { return (uint32_t)value[0] | (ui
 
 static bool cue_read(FILE* file, uint64_t offset, void* data, size_t bytes) { return offset <= INT64_MAX && _fseeki64(file, (int64_t)offset, SEEK_SET) == 0 && fread(data, 1, bytes, file) == bytes; }
 
-/* 只接受已有完整计数实现的BINARY和原生PCM WAVE，避免猜测压缩音频长度。 */
-static bool cue_source_size(const wchar_t* path, bool wave, uint32_t sectorSize, uint32_t* sectors) {
-    FILE* file = _wfopen(path, L"rb");
-    if (!file) return false;
-    bool ok = false;
-    if (_fseeki64(file, 0, SEEK_END) != 0) goto done;
-    int64_t size = _ftelli64(file);
-    if (size <= 0) goto done;
-    uint64_t bytes = (uint64_t)size;
-    if (wave) {
-        uint8_t header[12];
-        if (sectorSize != 2352 || !cue_read(file, 0, header, 12) || memcmp(header, "RIFF", 4) || memcmp(header + 8, "WAVE", 4)) goto done;
-        uint64_t end = (uint64_t)cue_le32(header + 4) + 8, offset = 12;
-        bool format = false, data = false;
-        if (end > bytes || end < 12) goto done;
-        while (offset + 8 <= end) {
-            uint8_t chunk[24] = {0};
-            if (!cue_read(file, offset, chunk, 8)) goto done;
-            uint32_t length = cue_le32(chunk + 4);
-            if (length > end - offset - 8) goto done;
-            if (!memcmp(chunk, "fmt ", 4)) {
-                if (format || length < 16 || !cue_read(file, offset + 8, chunk + 8, 16) || chunk[8] != 1 || chunk[9] || chunk[10] != 2 || chunk[11] || cue_le32(chunk + 12) != 44100 || cue_le32(chunk + 16) != 176400 || chunk[20] != 4 || chunk[21] || chunk[22] != 16 || chunk[23]) goto done;
-                format = true;
-            } else if (!memcmp(chunk, "data", 4)) { if (data || length % 4) goto done; bytes = length; data = true; }
-            offset += 8 + (uint64_t)length + (length & 1u);
-            if (offset > end) goto done;
-        }
-        if (!format || !data || !bytes || offset != end) goto done;
-    } else if (bytes % sectorSize) goto done;
-    if ((bytes + sectorSize - 1) / sectorSize > UINT32_MAX) goto done;
-    *sectors = (uint32_t)((bytes + sectorSize - 1) / sectorSize); ok = true;
-done:
-    fclose(file); return ok;
+static char* cue_load_text(FILE* file) {
+    if (_fseeki64(file, 0, SEEK_END)) return NULL;
+    int64_t length = _ftelli64(file);
+    if (length <= 0 || length > 4 * 1024 * 1024) return NULL;
+    uint8_t* raw = (uint8_t*)calloc((size_t)length + 2, 1);
+    if (!raw || !cue_read(file, 0, raw, (size_t)length)) { free(raw); return NULL; }
+    wchar_t* wide = NULL; int count = 0;
+    bool utf16 = length >= 2 && ((raw[0] == 0xFF && raw[1] == 0xFE) || (raw[0] == 0xFE && raw[1] == 0xFF));
+    if (utf16) {
+        if ((length - 2) % 2) { free(raw); return NULL; }
+        count = (int)((length - 2) / 2);
+        wide = (wchar_t*)calloc((size_t)count + 1, sizeof(wchar_t));
+        if (!wide) { free(raw); return NULL; }
+        for (int i = 0; i < count; i++) wide[i] = raw[0] == 0xFF ? (wchar_t)(raw[2 + i * 2] | (uint16_t)raw[3 + i * 2] << 8) : (wchar_t)((uint16_t)raw[2 + i * 2] << 8 | raw[3 + i * 2]);
+    } else {
+        int skip = length >= 3 && !memcmp(raw, "\xEF\xBB\xBF", 3) ? 3 : 0;
+        UINT page = CP_UTF8; count = MultiByteToWideChar(page, MB_ERR_INVALID_CHARS, (const char*)raw + skip, (int)length - skip, NULL, 0);
+        if (!count && !skip) { page = CP_ACP; count = MultiByteToWideChar(page, MB_ERR_INVALID_CHARS, (const char*)raw, (int)length, NULL, 0); }
+        if (!count) { free(raw); return NULL; }
+        wide = (wchar_t*)calloc((size_t)count + 1, sizeof(wchar_t));
+        if (!wide || !MultiByteToWideChar(page, MB_ERR_INVALID_CHARS, (const char*)raw + skip, (int)length - skip, wide, count)) { free(raw); free(wide); return NULL; }
+    }
+    free(raw);
+    for (int i = 0; i < count; i++) if (!wide[i]) { free(wide); return NULL; }
+    int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, count, NULL, 0, NULL, NULL);
+    char* text = bytes > 0 ? (char*)calloc((size_t)bytes + 1, 1) : NULL;
+    if (text && !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, count, text, bytes, NULL, NULL)) { free(text); text = NULL; }
+    free(wide); return text;
+}
+
+static uint32_t cue_sector_size(TrackDataMode mode) {
+    switch (mode) {
+        case TRACK_MODE_MODE1_2048: case TRACK_MODE_MODE2_2048: return 2048;
+        case TRACK_MODE_MODE2_2324: return 2324;
+        case TRACK_MODE_MODE2_2336: case TRACK_MODE_CDI_2336: return 2336;
+        case TRACK_MODE_CDG_2448: return 2448;
+        default: return 2352;
+    }
+}
+
+static bool cue_source_bytes(const wchar_t* path, CueFileType type, uint64_t* bytes) {
+    if (type != CUE_FILE_BINARY && type != CUE_FILE_MOTOROLA) return audio_measure_decoded(path, bytes);
+    FILE* file = _wfopen(path, L"rb"); if (!file) return false;
+    bool ok = !_fseeki64(file, 0, SEEK_END); int64_t size = ok ? _ftelli64(file) : -1;
+    fclose(file); if (size <= 0) return false; *bytes = (uint64_t)size; return true;
+}
+
+static bool cue_path(const wchar_t* descriptor, const char* utf8, wchar_t* result) {
+    wchar_t name[MAX_PATH], absolute[MAX_PATH], combined[MAX_PATH];
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1, name, MAX_PATH)) return false;
+    DWORD count = GetFullPathNameW(descriptor, MAX_PATH, absolute, NULL);
+    if (!count || count >= MAX_PATH) return false;
+    wchar_t* slash = wcsrchr(absolute, L'\\'); if (!slash) return false; slash[1] = 0;
+    if (name[0] == '\\' || name[0] == '/' || (wcslen(name) > 1 && name[1] == ':')) {
+        if (swprintf(combined, MAX_PATH, L"%ls", name) < 0) return false;
+    } else if (swprintf(combined, MAX_PATH, L"%ls%ls", absolute, name) < 0) return false;
+    count = GetFullPathNameW(combined, MAX_PATH, result, NULL); return count && count < MAX_PATH;
 }
 
 bool imgburn_cue_parse(const wchar_t* cueFilePath, CueSheet* outCue) {
     if (!outCue) return false;
     memset(outCue, 0, sizeof(*outCue));
     if (!cueFilePath || wcslen(cueFilePath) >= MAX_PATH) return false;
-    FILE* file = _wfopen(cueFilePath, L"rb");
-    if (!file) return false;
-    CueSheet* sheet = (CueSheet*)calloc(1, sizeof(*sheet));
-    if (!sheet) { fclose(file); return false; }
-    wchar_t absolute[MAX_PATH], directory[MAX_PATH], currentFile[MAX_PATH] = L"";
-    DWORD chars = GetFullPathNameW(cueFilePath, MAX_PATH, absolute, NULL);
-    bool ok = false, wave = false, firstLine = true;
-    unsigned fileId = 0, groups[MAX_CUE_TRACKS] = {0};
-    bool waves[MAX_CUE_TRACKS] = {0}, pregaps[MAX_CUE_TRACKS] = {0}, postgaps[MAX_CUE_TRACKS] = {0};
+    FILE* file = _wfopen(cueFilePath, L"rb"); if (!file) return false;
+    CueSheet* sheet = (CueSheet*)calloc(1, sizeof(*sheet)); char* text = cue_load_text(file); bool ok = false;
+    if (!sheet || !text) goto done;
+    DWORD chars = GetFullPathNameW(cueFilePath, MAX_PATH, sheet->cueFilePath, NULL);
     if (!chars || chars >= MAX_PATH) goto done;
-    wcscpy(directory, absolute);
-    wchar_t* slash = wcsrchr(directory, L'\\'); if (!slash) goto done; slash[1] = 0;
-    wcscpy(sheet->cueFilePath, absolute);
-    CueTrack* track = NULL;
-    char line[2048];
-    while (fgets(line, sizeof(line), file)) {
-        if (!strchr(line, '\n') && !feof(file)) goto done;
-        char* cursor = line;
-        if (firstLine && !memcmp(line, "\xEF\xBB\xBF", 3)) cursor += 3;
-        firstLine = false;
-        if (cue_end(cursor)) continue;
+    wchar_t currentFile[MAX_PATH] = L""; CueFileType type = CUE_FILE_BINARY;
+    unsigned fileId = 0, session = 1, groups[99] = {0}; uint32_t decodedHints[100] = {0};
+    bool pregaps[99] = {0}, postgaps[99] = {0}; CueTrack* track = NULL;
+    sheet->sessionCount = 1;
+    for (unsigned i = 1; i < 99; i++) sheet->sessionLeadIn[i] = 4500;
+    for (unsigned i = 0; i < 99; i++) sheet->sessionLeadOut[i] = i ? 2250 : 6750;
+    char* next = text;
+    while (*next) {
+        char* line = next; char* end = strchr(next, '\n');
+        if (end) { *end = 0; next = end + 1; } else next += strlen(next);
+        if (strlen(line) >= 2048) goto done;
+        char* cursor = line; if (cue_end(cursor)) continue;
         char command[32], value[1024], second[32];
         if (!cue_token(&cursor, command, sizeof(command))) goto done;
-        if (!_stricmp(command, "REM")) continue;
+        if (!_stricmp(command, "REM")) {
+            if (cue_end(cursor)) continue;
+            if (!cue_token(&cursor, command, sizeof(command))) goto done;
+            if (!_stricmp(command, "SESSION")) {
+                unsigned number;
+                if (!cue_token(&cursor, second, sizeof(second)) || !cue_rem_end(cursor) || !cue_number(second, 99, &number) || !number || (number == 1 ? (session != 1 || sheet->trackCount != 0) : number != session + 1)) goto done;
+                if (number > 1 && (!sheet->trackCount || sheet->tracks[sheet->trackCount - 1].sessionNumber != session)) goto done;
+                session = number; sheet->sessionCount = session; track = NULL;
+            } else if (!_stricmp(command, "LEAD-IN")) {
+                if (!cue_token(&cursor, second, sizeof(second)) || !cue_rem_end(cursor) || !cue_msf(second, &sheet->sessionLeadIn[session - 1])) goto done;
+            } else if (!_stricmp(command, "FILE-DECODED-SIZE")) {
+                if (!fileId || !cue_token(&cursor, second, sizeof(second)) || !cue_rem_end(cursor) || !cue_msf(second, &decodedHints[fileId])) goto done;
+            } else if (!_stricmp(command, "LEAD-OUT")) {
+                /* 保留并核对声明的会话结束地址，不把它当成注释丢弃。 */
+                if (!cue_token(&cursor, second, sizeof(second)) || !cue_rem_end(cursor) || !cue_msf(second, &sheet->sessionEndLba[session - 1])) goto done;
+            }
+            continue;
+        }
         if (!cue_token(&cursor, value, sizeof(value))) goto done;
         if (!_stricmp(command, "FILE")) {
-            if (!cue_token(&cursor, second, sizeof(second)) || !cue_end(cursor) || (_stricmp(second, "BINARY") && _stricmp(second, "WAVE"))) goto done;
-            wchar_t wide[MAX_PATH], combined[MAX_PATH];
-            if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, wide, MAX_PATH)) goto done;
-            if (wide[0] == L'\\' || wide[0] == L'/' || (wcslen(wide) > 1 && wide[1] == L':')) {
-                if (swprintf(combined, MAX_PATH, L"%ls", wide) < 0) goto done;
-            } else if (swprintf(combined, MAX_PATH, L"%ls%ls", directory, wide) < 0) goto done;
-            chars = GetFullPathNameW(combined, MAX_PATH, currentFile, NULL);
-            if (!chars || chars >= MAX_PATH || ++fileId > MAX_CUE_TRACKS) goto done;
-            wave = !_stricmp(second, "WAVE"); track = NULL; continue;
+            if (!value[0] || !cue_token(&cursor, second, sizeof(second)) || !cue_end(cursor) || !cue_path(cueFilePath, value, currentFile) || ++fileId > 99) goto done;
+            if (!_stricmp(second, "BINARY")) type = CUE_FILE_BINARY;
+            else if (!_stricmp(second, "MOTOROLA")) type = CUE_FILE_MOTOROLA;
+            else if (!_stricmp(second, "WAVE")) type = CUE_FILE_WAVE;
+            else if (!_stricmp(second, "AIFF")) type = CUE_FILE_AIFF;
+            else if (!_stricmp(second, "MP3")) type = CUE_FILE_MP3;
+            else if (!_stricmp(second, "FLAC") || !_stricmp(second, "OGG") || !_stricmp(second, "APE") || !_stricmp(second, "WAVPACK")) type = CUE_FILE_AUDIO;
+            else goto done;
+            track = NULL; continue;
         }
         if (!_stricmp(command, "TRACK")) {
             unsigned number;
-            if (!currentFile[0] || sheet->trackCount == MAX_CUE_TRACKS || !cue_number(value, 99, &number) || number != (unsigned)sheet->trackCount + 1 || !cue_token(&cursor, second, sizeof(second)) || !cue_end(cursor)) goto done;
-            track = &sheet->tracks[sheet->trackCount]; groups[sheet->trackCount] = fileId; waves[sheet->trackCount++] = wave;
-            track->trackNumber = (int)number; wcscpy(track->sourceFilePath, currentFile);
-            track->sourceIsWave = wave;
+            if (!currentFile[0] || sheet->trackCount == 99 || !cue_number(value, 99, &number) || number != (unsigned)sheet->trackCount + 1 || !cue_token(&cursor, second, sizeof(second)) || !cue_end(cursor)) goto done;
+            track = &sheet->tracks[sheet->trackCount]; groups[sheet->trackCount++] = fileId;
+            track->trackNumber = (int)number; track->sessionNumber = session; track->sourceFileGroup = fileId; track->sourceType = type; track->sourceIsWave = type == CUE_FILE_WAVE; wcscpy(track->sourceFilePath, currentFile);
             if (!_stricmp(second, "AUDIO")) track->mode = TRACK_MODE_AUDIO;
             else if (!_stricmp(second, "MODE1/2048")) track->mode = TRACK_MODE_MODE1_2048;
             else if (!_stricmp(second, "MODE1/2352")) track->mode = TRACK_MODE_MODE1_2352;
             else if (!_stricmp(second, "MODE2/2336")) track->mode = TRACK_MODE_MODE2_2336;
             else if (!_stricmp(second, "MODE2/2352")) track->mode = TRACK_MODE_MODE2_2352;
+            else if (!_stricmp(second, "MODE2/2048")) track->mode = TRACK_MODE_MODE2_2048;
+            else if (!_stricmp(second, "MODE2/2324")) track->mode = TRACK_MODE_MODE2_2324;
+            else if (!_stricmp(second, "CDI/2336")) track->mode = TRACK_MODE_CDI_2336;
+            else if (!_stricmp(second, "CDI/2352")) track->mode = TRACK_MODE_CDI_2352;
+            else if (!_stricmp(second, "CDG")) track->mode = TRACK_MODE_CDG_2448;
             else goto done;
-            if (wave && track->mode != TRACK_MODE_AUDIO) goto done;
+            track->sectorSize = cue_sector_size(track->mode);
+            if (type >= CUE_FILE_WAVE && track->mode != TRACK_MODE_AUDIO) goto done;
             continue;
         }
         if (!_stricmp(command, "INDEX")) {
-            unsigned index;
-            uint32_t address;
+            unsigned index; uint32_t address;
             if (!track || track->indexCount == MAX_CUE_INDICES || !cue_number(value, 99, &index) || !cue_token(&cursor, second, sizeof(second)) || !cue_end(cursor) || !cue_msf(second, &address)) goto done;
+            if (!track->indexCount && index > 1) goto done;
             if (track->indexCount && (index <= (unsigned)track->indices[track->indexCount - 1].indexNumber || address < track->indices[track->indexCount - 1].lba)) goto done;
             CueIndex* entry = &track->indices[track->indexCount++]; entry->indexNumber = (int)index; entry->lba = address; strcpy(entry->msfStr, second); continue;
         }
+        if (!_stricmp(command, "FLAGS")) {
+            if (!track || track->flags) goto done;
+            do {
+                unsigned flag = !_stricmp(value, "DCP") ? CUE_FLAG_DCP : !_stricmp(value, "4CH") ? CUE_FLAG_4CH : !_stricmp(value, "PRE") ? CUE_FLAG_PRE : !_stricmp(value, "SCMS") ? CUE_FLAG_SCMS : 0;
+                if (!flag || (track->flags & flag)) goto done; track->flags |= flag;
+                if (cue_end(cursor)) break;
+                if (!cue_token(&cursor, value, sizeof(value))) goto done;
+            } while (true);
+            if (track->mode != TRACK_MODE_AUDIO && (track->flags & (CUE_FLAG_PRE | CUE_FLAG_4CH))) goto done;
+            continue;
+        }
         if (!cue_end(cursor)) goto done;
-        if (!_stricmp(command, "TITLE") || !_stricmp(command, "PERFORMER")) {
+        if (!_stricmp(command, "TITLE") || !_stricmp(command, "PERFORMER") || !_stricmp(command, "SONGWRITER")) {
             if (strlen(value) >= 128) goto done;
-            char* destination = !_stricmp(command, "TITLE") ? (track ? track->title : sheet->discTitle) : (track ? track->performer : sheet->discPerformer);
+            char* destination = !_stricmp(command, "TITLE") ? (track ? track->title : sheet->discTitle) : !_stricmp(command, "PERFORMER") ? (track ? track->performer : sheet->discPerformer) : (track ? track->songwriter : sheet->songwriter);
             strcpy(destination, value);
+        } else if (!_stricmp(command, "CDTEXTFILE")) {
+            if (track || !cue_path(cueFilePath, value, sheet->cdTextFile) || GetFileAttributesW(sheet->cdTextFile) == INVALID_FILE_ATTRIBUTES) goto done;
         } else if (!_stricmp(command, "PREGAP") || !_stricmp(command, "POSTGAP")) {
-            uint32_t duration;
-            if (!track || !cue_msf(value, &duration)) goto done;
+            uint32_t duration; if (!track || !cue_msf(value, &duration)) goto done;
             unsigned i = (unsigned)sheet->trackCount - 1;
             if (!_stricmp(command, "PREGAP")) { if (pregaps[i]) goto done; pregaps[i] = true; track->pregapSectors = duration; }
             else { if (postgaps[i]) goto done; postgaps[i] = true; track->postgapSectors = duration; }
         } else if (!_stricmp(command, "CATALOG")) {
-            if (strlen(value) != 13 || strspn(value, "0123456789") != 13 || track) goto done;
-            strcpy(sheet->catalogNumber, value);
+            if (strlen(value) != 13 || strspn(value, "0123456789") != 13 || track) goto done; strcpy(sheet->catalogNumber, value);
         } else if (!_stricmp(command, "ISRC")) {
             if (!track || strlen(value) != 12) goto done;
-            for (int i = 0; i < 12; i++) if (!isalnum((unsigned char)value[i])) goto done;
-            strcpy(track->isrc, value);
+            for (int i = 0; i < 12; i++) if (!isalnum((unsigned char)value[i])) goto done; strcpy(track->isrc, value);
         } else goto done;
     }
-    if (ferror(file) || !sheet->trackCount || groups[sheet->trackCount - 1] != fileId) goto done;
-    uint64_t total = 0;
+    if (!sheet->trackCount || groups[sheet->trackCount - 1] != fileId || sheet->tracks[sheet->trackCount - 1].sessionNumber != session) goto done;
+    uint64_t total = 0; unsigned previousSession = 1;
     for (int first = 0; first < sheet->trackCount;) {
-        int last = first + 1;
-        while (last < sheet->trackCount && groups[last] == groups[first]) last++;
+        int last = first + 1; while (last < sheet->trackCount && groups[last] == groups[first]) last++;
         if (groups[first] != (first ? groups[first - 1] + 1 : 1)) goto done;
-        uint32_t sectorSize = sheet->tracks[first].mode == TRACK_MODE_MODE1_2048 ? 2048 : sheet->tracks[first].mode == TRACK_MODE_MODE2_2336 ? 2336 : 2352;
-        uint32_t fileSectors;
-        if (!cue_source_size(sheet->tracks[first].sourceFilePath, waves[first], sectorSize, &fileSectors)) goto done;
-        uint64_t gaps = 0;
+        CueTrack* initial = &sheet->tracks[first];
+        if (initial->sessionNumber != previousSession) {
+            total += (uint64_t)sheet->sessionLeadOut[previousSession - 1] + sheet->sessionLeadIn[initial->sessionNumber - 1];
+            if (!initial->pregapSectors && initial->indexCount && initial->indices[0].indexNumber == 1 && !initial->indices[0].lba) total += 150;
+            previousSession = initial->sessionNumber;
+        }
+        uint64_t sourceBytes; if (!cue_source_bytes(initial->sourceFilePath, initial->sourceType, &sourceBytes)) goto done;
+        uint64_t usedBytes = 0, gaps = 0, sourceFrames = 0; uint32_t fileEnd = 0;
         for (int i = first; i < last; i++) {
             CueTrack* current = &sheet->tracks[i];
-            uint32_t currentSize = current->mode == TRACK_MODE_MODE1_2048 ? 2048 : current->mode == TRACK_MODE_MODE2_2336 ? 2336 : 2352;
-            if (currentSize != sectorSize) goto done;
-            bool indexOne = false;
-            uint32_t start = 0;
-            for (int j = 0; j < current->indexCount; j++) {
-                if (current->indices[j].lba >= fileSectors) goto done;
-                if (current->indices[j].indexNumber == 1) { indexOne = true; start = current->indices[j].lba; }
+            if (!current->indexCount) goto done;
+            bool indexOne = false; uint32_t start = 0, segment = i == first ? 0 : current->indices[0].lba;
+            for (int j = 0; j < current->indexCount; j++) if (current->indices[j].indexNumber == 1) { indexOne = true; start = current->indices[j].lba; }
+            if (!indexOne || start < segment || usedBytes > sourceBytes) goto done;
+            uint64_t available = sourceBytes - usedBytes;
+            uint64_t end = i + 1 < last && sheet->tracks[i + 1].indexCount ? sheet->tracks[i + 1].indices[0].lba : segment + (available + current->sectorSize - 1) / current->sectorSize;
+            if (i + 1 < last && sheet->tracks[i + 1].sessionNumber != current->sessionNumber) {
+                const CueTrack* following = &sheet->tracks[i + 1];
+                uint64_t sessionGap = (uint64_t)sheet->sessionLeadOut[current->sessionNumber - 1] + sheet->sessionLeadIn[following->sessionNumber - 1];
+                if (following->indices[0].indexNumber == 1 && !following->pregapSectors) sessionGap += 150;
+                /* 单BIN的INDEX可包含未存入文件的会话间隔，物理字节偏移必须扣除此段。 */
+                if (end < sessionGap) goto done; end -= sessionGap;
             }
-            uint32_t end = i + 1 < last && sheet->tracks[i + 1].indexCount ? sheet->tracks[i + 1].indices[0].lba : fileSectors;
-            if (!indexOne || end <= start || (current->indexCount && current->indices[current->indexCount - 1].lba >= end)) goto done;
+            if (i + 1 == last && current->sourceType < CUE_FILE_WAVE && available % current->sectorSize) goto done;
+            if (end <= start || end > UINT32_MAX || current->indices[current->indexCount - 1].lba >= end) goto done;
+            uint64_t segmentBytes = (end - segment) * current->sectorSize;
+            if (i + 1 < last && segmentBytes > available) goto done;
             gaps += current->pregapSectors;
             if (total + start + gaps > UINT32_MAX) goto done;
-            current->startLba = (uint32_t)(total + start + gaps); current->sectorCount = end - start; gaps += current->postgapSectors;
+            current->startLba = (uint32_t)(total + start + gaps); current->sectorCount = (uint32_t)(end - start);
+            current->sourceByteOffset = usedBytes + (uint64_t)(start - segment) * current->sectorSize;
+            current->sourceByteLength = (uint64_t)current->sectorCount * current->sectorSize;
+            if (current->sourceByteOffset >= sourceBytes) goto done;
+            if (current->sourceByteLength > sourceBytes - current->sourceByteOffset) current->sourceByteLength = sourceBytes - current->sourceByteOffset;
+            usedBytes += segmentBytes; sourceFrames += end - segment; gaps += current->postgapSectors; fileEnd = (uint32_t)end;
+            if (i + 1 == sheet->trackCount || sheet->tracks[i + 1].sessionNumber != current->sessionNumber) {
+                uint64_t sessionEnd = total + end + gaps; uint32_t declared = sheet->sessionEndLba[current->sessionNumber - 1];
+                if (sessionEnd > UINT32_MAX || (declared && declared != sessionEnd)) goto done;
+                sheet->sessionEndLba[current->sessionNumber - 1] = (uint32_t)sessionEnd;
+            }
+            previousSession = current->sessionNumber;
         }
-        total += fileSectors + gaps; if (total > UINT32_MAX) goto done; first = last;
+        if (decodedHints[groups[first]] && decodedHints[groups[first]] != sourceFrames) goto done;
+        total += fileEnd + gaps; if (total > UINT32_MAX) goto done;
+        first = last;
     }
     sheet->totalSectors = (uint32_t)total; memcpy(outCue, sheet, sizeof(*sheet)); ok = true;
 done:
-    free(sheet); fclose(file); return ok;
+    free(text); free(sheet); fclose(file); return ok;
 }
 
 /* -------------------------------------------------------------------------
@@ -304,81 +382,146 @@ static bool mds_resolve(const wchar_t* descriptor, const wchar_t* name, wchar_t*
     return length && length < MAX_PATH;
 }
 
-/* 当前只支持可完整表达的MDS 1.x单会话、单文件DVD；其它布局明确失败。 */
+static bool mds_filename(const uint8_t* data, uint64_t size, uint32_t footer, const wchar_t* descriptor, MdsDataFile* result) {
+    if (!mds_range(size, footer, 16)) return false;
+    uint32_t offset = cue_le32(data + footer), wide = cue_le32(data + footer + 4);
+    if (wide > 1 || !mds_range(size, offset, wide ? 2 : 1)) return false;
+    wchar_t name[MAX_PATH] = {0}; size_t count = 0;
+    if (wide) {
+        while (count < MAX_PATH && offset + (uint64_t)count * 2 + 2 <= size) {
+            uint16_t value = (uint16_t)(data[offset + count * 2] | (uint16_t)data[offset + count * 2 + 1] << 8);
+            if (!value) break; name[count++] = (wchar_t)value;
+        }
+        if (count == MAX_PATH || offset + (uint64_t)count * 2 + 2 > size) return false;
+    } else {
+        while (offset + count < size && data[offset + count] && count < MAX_PATH * 3) count++;
+        if (offset + count >= size || count >= MAX_PATH * 3 || !MultiByteToWideChar(CP_ACP, 0, (const char*)data + offset, (int)count + 1, name, MAX_PATH)) return false;
+    }
+    if (name[0] == '*' && name[1] == '.') {
+        if (wcslen(name) >= 16 || wcschr(name + 1, L'*') || wcschr(name, L'\\') || wcschr(name, L'/')) return false;
+        wchar_t local[MAX_PATH]; if (wcslen(descriptor) >= MAX_PATH) return false; wcscpy(local, descriptor);
+        wchar_t* dot = wcsrchr(local, L'.'); if (!dot || (size_t)(dot - local) + wcslen(name + 1) >= MAX_PATH) return false; wcscpy(dot, name + 1);
+        DWORD length = GetFullPathNameW(local, MAX_PATH, result->path, NULL); if (!length || length >= MAX_PATH) return false;
+    } else if (!mds_resolve(descriptor, name, result->path)) return false;
+    WIN32_FILE_ATTRIBUTE_DATA attributes;
+    if (!GetFileAttributesExW(result->path, GetFileExInfoStandard, &attributes) || (attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return false;
+    result->bytes = (uint64_t)attributes.nFileSizeHigh << 32 | attributes.nFileSizeLow;
+    return true;
+}
+
+static bool mds_track_mode(uint8_t mode, uint8_t sub, uint16_t bytes, bool dvd) {
+    if (sub != 0 && sub != 8) return false;
+    if (sub == 8) { if (bytes < 96) return false; bytes -= 96; }
+    if (dvd) return mode == 0xAA && !sub && bytes == 2048;
+    if (mode == 0xA9) return bytes == 2352;
+    if (mode == 0xAA) return bytes == 2048 || bytes == 2352;
+    if (mode == 0xAB) return bytes == 2336 || bytes == 2352;
+    if (mode == 0xAC) return bytes == 2048 || bytes == 2352;
+    if (mode == 0xAD) return bytes == 2324 || bytes == 2328 || bytes == 2352;
+    return false;
+}
+
 bool imgburn_mds_parse(const wchar_t* mdsFilePath, MdsSheet* outMds) {
     if (!outMds) return false;
     memset(outMds, 0, sizeof(*outMds));
     if (!mdsFilePath || wcslen(mdsFilePath) >= MAX_PATH) return false;
-    FILE* file = _wfopen(mdsFilePath, L"rb");
-    if (!file) return false;
-    bool ok = false;
-    uint8_t* data = NULL;
-    if (_fseeki64(file, 0, SEEK_END)) goto done;
-    int64_t size = _ftelli64(file);
-    if (size < 88 || size > 16 * 1024 * 1024) goto done;
-    data = (uint8_t*)malloc((size_t)size);
+    FILE* file = _wfopen(mdsFilePath, L"rb"); if (!file) return false;
+    bool ok = false; uint8_t* data = NULL; MdsSheet* result = (MdsSheet*)calloc(1, sizeof(*result));
+    if (!result || _fseeki64(file, 0, SEEK_END)) goto done;
+    int64_t fileSize = _ftelli64(file); if (fileSize < 88 || fileSize > 16 * 1024 * 1024) goto done;
+    uint64_t size = (uint64_t)fileSize; data = (uint8_t*)malloc((size_t)size);
     if (!data || !cue_read(file, 0, data, (size_t)size)) goto done;
     const MdsHeader* header = (const MdsHeader*)data;
-    if (memcmp(header->signature, "MEDIA DESCRIPTOR", 16) || header->version[0] != 1 || header->sessionCount != 1 || (header->mediumType != 0x10 && header->mediumType != 0x12) || !mds_range(size, header->sessionsOffset, sizeof(MdsSessionBlock))) goto done;
-    const MdsSessionBlock* session = (const MdsSessionBlock*)(data + header->sessionsOffset);
-    if (session->sessionStartLba != 0 || session->sessionEndLba <= 0 || session->sessionNumber != 1 || session->totalTracks != 1 || session->leadInTracks || session->firstTrack != 1 || session->lastTrack != 1 || !mds_range(size, session->tracksOffset, sizeof(MdsTrackBlock))) goto done;
-    const MdsTrackBlock* track = (const MdsTrackBlock*)(data + session->tracksOffset);
-    if (track->trackMode != 0xAA || track->subChannel || track->point != 1 || track->sectorSize != 2048 || track->startLba || track->startByteOffset || track->fileCount != 1 || track->extraOffset != (uint32_t)session->sessionEndLba || !mds_range(size, track->footerOffset, 16)) goto done;
-    const uint8_t* footer = data + track->footerOffset;
-    uint32_t nameOffset = cue_le32(footer), wide = cue_le32(footer + 4);
-    wchar_t name[MAX_PATH] = {0};
-    if (wide > 1 || !mds_range(size, nameOffset, wide ? 2 : 1)) goto done;
-    size_t count = 0;
-    if (wide) {
-        while (count < MAX_PATH && nameOffset + (uint64_t)count * 2 + 2 <= (uint64_t)size) {
-            uint16_t value = (uint16_t)(data[nameOffset + count * 2] | (uint16_t)data[nameOffset + count * 2 + 1] << 8);
-            if (!value) break;
-            name[count++] = (wchar_t)value;
+    bool dvd = header->mediumType == 0x10 || header->mediumType == 0x12;
+    if (memcmp(header->signature, "MEDIA DESCRIPTOR", 16) || header->version[0] != 1 || (!dvd && header->mediumType > 2) || !header->sessionCount || header->sessionCount > MAX_MDS_SESSIONS || !mds_range(size, header->sessionsOffset, (uint64_t)header->sessionCount * 24)) goto done;
+    result->mediumType = header->mediumType; result->sessionCount = header->sessionCount;
+    result->bcaOffset = header->bcaOffset; result->bcaLength = header->bcaLength; result->dpmOffset = header->dpmOffset;
+    if (header->bcaLength && !mds_range(size, header->bcaOffset, header->bcaLength)) goto done;
+    if (header->dpmOffset) {
+        if (!mds_range(size, header->dpmOffset, 4)) goto done;
+        uint32_t count = cue_le32(data + header->dpmOffset);
+        if (!count || count > 1024 || !mds_range(size, header->dpmOffset, 4 + (uint64_t)count * 4)) goto done;
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t offset = cue_le32(data + header->dpmOffset + 4 + i * 4);
+            if (!mds_range(size, offset, 16) || !mds_range(size, offset, 16 + (uint64_t)cue_le32(data + offset + 12) * 4)) goto done;
         }
-        if (count == MAX_PATH || nameOffset + (uint64_t)count * 2 + 2 > (uint64_t)size) goto done;
-    } else {
-        while (nameOffset + count < (uint64_t)size && data[nameOffset + count] && count < MAX_PATH * 3) count++;
-        if (nameOffset + count >= (uint64_t)size || count >= MAX_PATH * 3 || !MultiByteToWideChar(CP_ACP, 0, (const char*)data + nameOffset, (int)count + 1, name, MAX_PATH)) goto done;
     }
-    MdsSheet result = {0};
-    if (!_wcsicmp(name, L"*.mdf")) {
-        wcscpy(name, mdsFilePath); wchar_t* dot = wcsrchr(name, L'.'); if (!dot || (size_t)(dot - name) > MAX_PATH - 5) goto done; wcscpy(dot, L".mdf");
-        DWORD length = GetFullPathNameW(name, MAX_PATH, result.dataFilePath, NULL); if (!length || length >= MAX_PATH) goto done;
-    } else if (!mds_resolve(mdsFilePath, name, result.dataFilePath)) goto done;
-    WIN32_FILE_ATTRIBUTE_DATA attributes;
-    if (!GetFileAttributesExW(result.dataFilePath, GetFileExInfoStandard, &attributes) || (attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) goto done;
-    uint64_t sourceBytes = (uint64_t)attributes.nFileSizeHigh << 32 | attributes.nFileSizeLow;
-    if (sourceBytes != (uint64_t)session->sessionEndLba * 2048) goto done;
-    result.totalSectors = (uint32_t)session->sessionEndLba; result.trackCount = 1; result.mediumType = header->mediumType;
+    unsigned previousTrack = 0; int32_t previousEnd = INT32_MIN;
+    for (unsigned s = 0; s < header->sessionCount; s++) {
+        MdsSessionBlock session; memcpy(&session, data + header->sessionsOffset + s * 24, sizeof(session));
+        if (session.sessionNumber != s + 1 || session.sessionStartLba < previousEnd || session.sessionEndLba <= session.sessionStartLba || session.sessionEndLba <= 0 || !session.totalTracks || session.leadInTracks >= session.totalTracks || session.firstTrack != previousTrack + 1 || session.lastTrack < session.firstTrack || session.lastTrack > 99 || !mds_range(size, session.tracksOffset, (uint64_t)session.totalTracks * 80)) goto done;
+        unsigned actual = 0, leadIn = 0;
+        for (unsigned i = 0; i < session.totalTracks; i++) {
+            MdsTrackBlock track; memcpy(&track, data + session.tracksOffset + i * 80, sizeof(track));
+            if (track.point < 1 || track.point > 99) { leadIn++; continue; }
+            if (track.point != previousTrack + 1 || track.point < session.firstTrack || track.point > session.lastTrack || result->trackCount >= MAX_MDS_TRACKS || !mds_track_mode(track.trackMode, track.subChannel, track.sectorSize, dvd) || !track.fileCount || track.fileCount > MAX_MDS_FILES - result->dataFileCount || !mds_range(size, track.footerOffset, (uint64_t)track.fileCount * 16)) goto done;
+            MdsTrack* target = &result->tracks[result->trackCount++];
+            target->sessionNumber = session.sessionNumber; target->trackNumber = track.point; target->mode = track.trackMode; target->subChannel = track.subChannel; target->control = track.adrControl; target->sectorSize = track.sectorSize; target->startLba = (int32_t)track.startLba; target->startByteOffset = track.startByteOffset;
+            if (target->startLba < session.sessionStartLba || target->startLba >= session.sessionEndLba) goto done;
+            if (dvd) target->sectorCount = track.extraOffset ? track.extraOffset : (uint32_t)(session.sessionEndLba - target->startLba);
+            else {
+                if (!mds_range(size, track.extraOffset, 8)) goto done;
+                target->pregapSectors = cue_le32(data + track.extraOffset); target->sectorCount = cue_le32(data + track.extraOffset + 4);
+            }
+            if (!target->sectorCount || (int64_t)target->startLba + target->sectorCount > session.sessionEndLba) goto done;
+            target->firstFile = (uint16_t)result->dataFileCount; target->fileCount = (uint16_t)track.fileCount;
+            uint64_t available = 0;
+            for (uint32_t f = 0; f < track.fileCount; f++) {
+                MdsDataFile* part = &result->files[result->dataFileCount++];
+                if (!mds_filename(data, size, track.footerOffset + f * 16, mdsFilePath, part)) goto done;
+                uint64_t skipped = f ? 0 : track.startByteOffset;
+                if (skipped > part->bytes || available > UINT64_MAX - (part->bytes - skipped)) goto done;
+                available += part->bytes - skipped;
+                if (f + 1 < track.fileCount && (part->bytes - skipped) % track.sectorSize) goto done;
+            }
+            if (available < (uint64_t)target->sectorCount * target->sectorSize) goto done;
+            previousTrack = track.point; actual++;
+        }
+        if (actual != (unsigned)(session.lastTrack - session.firstTrack + 1) || leadIn != session.leadInTracks || previousTrack != session.lastTrack) goto done;
+        result->sessions[s] = session; previousEnd = session.sessionEndLba;
+    }
+    result->totalSectors = (uint32_t)previousEnd;
     if (header->discStructuresOffset) {
-        if (!mds_range(size, header->discStructuresOffset, 4100)) goto done;
-        const uint8_t* pfi = data + header->discStructuresOffset + 2052;
-        unsigned layers = (pfi[2] >> 5) & 3;
+        if (!dvd || !mds_range(size, header->discStructuresOffset, 4100)) goto done;
+        const uint8_t* pfi = data + header->discStructuresOffset + 2052; unsigned layers = (pfi[2] >> 5) & 3;
         if (layers > 1) goto done;
-        if (layers == 1) {
+        if (layers) {
             if (!(pfi[2] & 0x10) || !mds_range(size, header->discStructuresOffset, 8200)) goto done;
             uint32_t start = mds_be32(pfi + 4) & 0xFFFFFF, end = mds_be32(pfi + 12) & 0xFFFFFF;
             if (start != 0x30000 || end < start) goto done;
-            result.layerBreakLba = end - start + 1;
-            if (result.layerBreakLba >= result.totalSectors || result.layerBreakLba < (result.totalSectors + 1) / 2) goto done;
+            result->layerBreakLba = end - start + 1;
+            if (result->layerBreakLba >= result->totalSectors || result->layerBreakLba < (result->totalSectors + 1) / 2) goto done;
         }
     }
-    wcscpy(result.mdsFilePath, mdsFilePath); *outMds = result; ok = true;
+    wcscpy(result->mdsFilePath, mdsFilePath); if (result->dataFileCount) wcscpy(result->dataFilePath, result->files[0].path);
+    memcpy(outMds, result, sizeof(*result)); ok = true;
 done:
-    free(data); fclose(file); return ok;
+    free(result); free(data); fclose(file); return ok;
 }
 
 bool imgburn_mds_create(const wchar_t* mdsFilePath, const wchar_t* dataFileName, uint32_t totalSectors, uint32_t layerBreakLba) {
-    if (!mdsFilePath || !dataFileName || !dataFileName[0] || wcslen(mdsFilePath) >= MAX_PATH || wcslen(dataFileName) >= MAX_PATH || !totalSectors || totalSectors > INT32_MAX) return false;
+    const wchar_t* files[] = {dataFileName};
+    return imgburn_mds_create_files(mdsFilePath, files, 1, totalSectors, layerBreakLba);
+}
+
+bool imgburn_mds_create_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba) {
+    if (!mdsFilePath || !dataFiles || !fileCount || fileCount > MAX_MDS_FILES || wcslen(mdsFilePath) >= MAX_PATH || !totalSectors || totalSectors > INT32_MAX) return false;
     if (layerBreakLba && (layerBreakLba >= totalSectors || layerBreakLba < (totalSectors + 1) / 2 || layerBreakLba > 2086912 || layerBreakLba % 16)) return false;
     if (!layerBreakLba && totalSectors > 2295104) return false;
     wchar_t source[MAX_PATH], destination[MAX_PATH], temporary[MAX_PATH];
-    if (!mds_resolve(mdsFilePath, dataFileName, source)) return false;
     DWORD length = GetFullPathNameW(mdsFilePath, MAX_PATH, destination, NULL);
-    if (!length || length >= MAX_PATH || !_wcsicmp(source, destination)) return false;
-    WIN32_FILE_ATTRIBUTE_DATA attributes;
-    if (!GetFileAttributesExW(source, GetFileExInfoStandard, &attributes) || (attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || ((uint64_t)attributes.nFileSizeHigh << 32 | attributes.nFileSizeLow) != (uint64_t)totalSectors * 2048) return false;
-    uint32_t nameBytes = (uint32_t)(wcslen(dataFileName) + 1) * 2, structures = (208 + nameBytes + 3) & ~3u;
+    if (!length || length >= MAX_PATH) return false;
+    uint64_t sourceBytes = 0; uint32_t structures = 192 + (uint32_t)fileCount * 16;
+    for (size_t i = 0; i < fileCount; i++) {
+        if (!dataFiles[i] || !dataFiles[i][0] || wcslen(dataFiles[i]) >= MAX_PATH || !mds_resolve(mdsFilePath, dataFiles[i], source) || !_wcsicmp(source, destination)) return false;
+        WIN32_FILE_ATTRIBUTE_DATA attributes;
+        if (!GetFileAttributesExW(source, GetFileExInfoStandard, &attributes) || (attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return false;
+        uint64_t part = (uint64_t)attributes.nFileSizeHigh << 32 | attributes.nFileSizeLow;
+        if (!part || part % 2048 || sourceBytes > UINT64_MAX - part) return false;
+        sourceBytes += part; structures += (uint32_t)(wcslen(dataFiles[i]) + 1) * 2;
+    }
+    if (sourceBytes != (uint64_t)totalSectors * 2048) return false;
+    structures = (structures + 3) & ~3u;
     uint32_t bytes = structures + (layerBreakLba ? 8200 : 4100);
     uint8_t* data = (uint8_t*)calloc(1, bytes);
     if (!data) return false;
@@ -387,8 +530,12 @@ bool imgburn_mds_create(const wchar_t* mdsFilePath, const wchar_t* dataFileName,
     MdsSessionBlock* session = (MdsSessionBlock*)(data + 88);
     session->sessionEndLba = (int32_t)totalSectors; session->sessionNumber = 1; session->totalTracks = 1; session->firstTrack = 1; session->lastTrack = 1; session->tracksOffset = 112;
     MdsTrackBlock* track = (MdsTrackBlock*)(data + 112);
-    track->trackMode = 0xAA; track->adrControl = 0x14; track->point = 1; track->time[5] = 2; track->extraOffset = totalSectors; track->sectorSize = 2048; track->fileCount = 1; track->footerOffset = 192;
-    uint32_t footer[4] = {208, 1, 0, 0}; memcpy(data + 192, footer, sizeof(footer)); memcpy(data + 208, dataFileName, nameBytes);
+    track->trackMode = 0xAA; track->adrControl = 0x14; track->point = 1; track->time[5] = 2; track->extraOffset = totalSectors; track->sectorSize = 2048; track->fileCount = (uint32_t)fileCount; track->footerOffset = 192;
+    uint32_t nameOffset = 192 + (uint32_t)fileCount * 16;
+    for (size_t i = 0; i < fileCount; i++) {
+        uint32_t footer[4] = {nameOffset, 1, 0, 0}, nameBytes = (uint32_t)(wcslen(dataFiles[i]) + 1) * 2;
+        memcpy(data + 192 + i * 16, footer, sizeof(footer)); memcpy(data + nameOffset, dataFiles[i], nameBytes); nameOffset += nameBytes;
+    }
     uint8_t* pfi = data + structures + 2052;
     pfi[0] = 1; pfi[1] = 0x0F; pfi[2] = layerBreakLba ? 0x30 : 0;
     mds_set_be32(pfi + 4, 0x30000);

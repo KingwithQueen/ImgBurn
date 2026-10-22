@@ -223,6 +223,8 @@ uint32_t audio_decoder_read(AudioDecoder* decoder, void* outBuffer, uint32_t byt
         decoder->dataBytesRemaining -= bytesRead;
     } else {
         if (!ReadFile(decoder->hPipeRead, outBuffer, bytesToRead, &bytesRead, NULL)) {
+            DWORD error = GetLastError();
+            if (error != ERROR_BROKEN_PIPE) decoder->lastError = error;
             return 0;
         }
     }
@@ -254,6 +256,26 @@ void audio_decoder_close(AudioDecoder* decoder) {
     memset(decoder, 0, sizeof(*decoder));
 }
 
+bool audio_measure_decoded(const wchar_t* path, uint64_t* pcmBytes) {
+    if (!path || !pcmBytes || wcslen(path) >= MAX_PATH || wcschr(path, L'"')) return false;
+    *pcmBytes = 0;
+    HANDLE source = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (source == INVALID_HANDLE_VALUE) return false;
+    AudioDecoder decoder; uint32_t sectors = 0;
+    if (!audio_decoder_open(&decoder, path, NULL, &sectors)) { CloseHandle(source); return false; }
+    uint8_t buffer[65536]; uint64_t bytes = 0;
+    for (;;) { uint32_t actual = audio_decoder_read(&decoder, buffer, sizeof(buffer)); if (!actual) break; if (bytes > UINT64_MAX - actual) { decoder.lastError = ERROR_FILE_TOO_LARGE; break; } bytes += actual; }
+    bool ok = decoder.lastError == 0 && bytes && bytes % CDDA_BYTES_PER_SAMPLE == 0;
+    if (decoder.isPipe) {
+        DWORD code = 1;
+        if (WaitForSingleObject(decoder.hProcess, 30000) != WAIT_OBJECT_0) { TerminateProcess(decoder.hProcess, ERROR_TIMEOUT); ok = false; }
+        else if (!GetExitCodeProcess(decoder.hProcess, &code) || code != 0) ok = false;
+    }
+    audio_decoder_close(&decoder); CloseHandle(source);
+    if (ok) *pcmBytes = bytes;
+    return ok;
+}
+
 bool cue_sheet_parse(const wchar_t* cuePath, AudioCompilation* outComp) {
     if (!outComp) return false;
     memset(outComp, 0, sizeof(*outComp));
@@ -263,6 +285,8 @@ bool cue_sheet_parse(const wchar_t* cuePath, AudioCompilation* outComp) {
     for (int i = 0; i < sheet->trackCount; i++) if (sheet->tracks[i].mode != TRACK_MODE_AUDIO || sheet->tracks[i].sectorCount >= 100 * 60 * 75) { free(sheet); return false; }
     strcpy(outComp->cdTitle, sheet->discTitle); strcpy(outComp->cdPerformer, sheet->discPerformer);
     strcpy(outComp->catalogNumber, sheet->catalogNumber);
+    strcpy(outComp->songwriter, sheet->songwriter); wcscpy(outComp->cdTextFile, sheet->cdTextFile); outComp->sessionCount = sheet->sessionCount;
+    memcpy(outComp->sessionLeadIn, sheet->sessionLeadIn, sizeof(outComp->sessionLeadIn)); memcpy(outComp->sessionLeadOut, sheet->sessionLeadOut, sizeof(outComp->sessionLeadOut)); memcpy(outComp->sessionEndLba, sheet->sessionEndLba, sizeof(outComp->sessionEndLba));
     outComp->trackCount = sheet->trackCount; outComp->totalSectors = sheet->totalSectors;
     for (int i = 0; i < sheet->trackCount; i++) {
         const CueTrack* source = &sheet->tracks[i]; AudioTrack* target = &outComp->tracks[i];
@@ -271,11 +295,12 @@ bool cue_sheet_parse(const wchar_t* cuePath, AudioCompilation* outComp) {
         strcpy(target->isrc, source->isrc);
         target->startLba = source->startLba; target->sectorCount = source->sectorCount; target->pregapSectors = source->pregapSectors;
         target->postgapSectors = source->postgapSectors; target->sourceIsWave = source->sourceIsWave;
+        target->sourceType = source->sourceType; target->flags = source->flags; target->sessionNumber = source->sessionNumber; target->sourceFileGroup = source->sourceFileGroup; strcpy(target->songwriter, source->songwriter);
+        target->indexCount = source->indexCount; memcpy(target->indices, source->indices, (size_t)source->indexCount * sizeof(CueIndex));
         target->duration = lba_to_msf(source->sectorCount);
         for (int j = 0; j < source->indexCount; j++) {
             if (source->indices[j].indexNumber == 1) target->startTime = lba_to_msf(source->indices[j].lba);
             else if (source->indices[j].indexNumber == 0) { target->hasIndex00 = true; target->index00 = lba_to_msf(source->indices[j].lba); }
-            else { memset(outComp, 0, sizeof(*outComp)); free(sheet); return false; }
         }
     }
     free(sheet); return true;
@@ -303,10 +328,18 @@ bool cue_sheet_generate(const AudioCompilation* comp, const wchar_t* outCuePath)
     const size_t capacity = 256 * 1024;
     char* text = (char*)calloc(1, capacity);
     if (!text) return false;
-    bool ok = true, previousWave = false;
+    bool ok = true; CueFileType previousType = CUE_FILE_BINARY; unsigned session = 0, previousGroup = 0;
     size_t used = 0;
     if (comp->cdTitle[0]) ok = cue_append(text, capacity, &used, "TITLE \"%s\"\n", comp->cdTitle);
     if (ok && comp->cdPerformer[0]) ok = cue_append(text, capacity, &used, "PERFORMER \"%s\"\n", comp->cdPerformer);
+    if (!cue_metadata(comp->songwriter, 128)) ok = false;
+    if (ok && comp->songwriter[0]) ok = cue_append(text, capacity, &used, "SONGWRITER \"%s\"\n", comp->songwriter);
+    if (ok && comp->cdTextFile[0]) {
+        char utf8[MAX_PATH * 3]; wchar_t cdText[MAX_PATH];
+        chars = wcsnlen(comp->cdTextFile, MAX_PATH) == MAX_PATH ? 0 : GetFullPathNameW(comp->cdTextFile, MAX_PATH, cdText, NULL);
+        if (!chars || chars >= MAX_PATH || !_wcsicmp(cdText, destination) || !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, cdText, -1, utf8, sizeof(utf8), NULL, NULL) || !cue_metadata(utf8, sizeof(utf8))) ok = false;
+        else ok = cue_append(text, capacity, &used, "CDTEXTFILE \"%s\"\n", utf8);
+    }
     if (comp->catalogNumber[0]) {
         if (strnlen(comp->catalogNumber, 16) != 13 || strspn(comp->catalogNumber, "0123456789") != 13) ok = false;
         else if (ok) ok = cue_append(text, capacity, &used, "CATALOG %s\n", comp->catalogNumber);
@@ -317,31 +350,52 @@ bool cue_sheet_generate(const AudioCompilation* comp, const wchar_t* outCuePath)
         if (wcsnlen(track->filePath, MAX_PATH) == MAX_PATH || !track->filePath[0] || track->trackNumber != i + 1 || !cue_metadata(track->title, 128) || !cue_metadata(track->performer, 128)) { ok = false; break; }
         chars = GetFullPathNameW(track->filePath, MAX_PATH, source, NULL);
         if (!chars || chars >= MAX_PATH || !_wcsicmp(source, destination) || !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, source, -1, utf8, sizeof(utf8), NULL, NULL)) { ok = false; break; }
-        if (wcscmp(previous, source) || previousWave != track->sourceIsWave) {
-            ok = cue_append(text, capacity, &used, "FILE \"%s\" %s\n", utf8, track->sourceIsWave ? "WAVE" : "BINARY");
-            wcscpy(previous, source); previousWave = track->sourceIsWave;
+        unsigned currentSession = track->sessionNumber ? track->sessionNumber : 1;
+        if (currentSession != session) {
+            if (currentSession != session + 1 || currentSession > 99) { ok = false; break; }
+            ok = cue_append(text, capacity, &used, "REM SESSION %u\n", currentSession); session = currentSession;
+            if (currentSession > 1 && comp->sessionLeadIn[currentSession - 1] >= 100 * 60 * 75) ok = false;
+            if (ok && currentSession > 1 && comp->sessionLeadIn[currentSession - 1]) { MsfTime lead = lba_to_msf(comp->sessionLeadIn[currentSession - 1]); ok = cue_append(text, capacity, &used, "REM LEAD-IN %02u:%02u:%02u\n", lead.minute, lead.second, lead.frame); }
+        }
+        CueFileType type = track->sourceIsWave && track->sourceType == CUE_FILE_BINARY ? CUE_FILE_WAVE : track->sourceType;
+        static const char* typeNames[] = {"BINARY", "MOTOROLA", "WAVE", "AIFF", "MP3", "WAVE"};
+        if ((unsigned)type >= sizeof(typeNames) / sizeof(*typeNames)) { ok = false; break; }
+        if (wcscmp(previous, source) || previousType != type || (track->sourceFileGroup && track->sourceFileGroup != previousGroup)) {
+            if (ok) ok = cue_append(text, capacity, &used, "FILE \"%s\" %s\n", utf8, typeNames[type]);
+            wcscpy(previous, source); previousType = type; previousGroup = track->sourceFileGroup;
         }
         if (ok) ok = cue_append(text, capacity, &used, "  TRACK %02d AUDIO\n", track->trackNumber);
         if (ok && track->title[0]) ok = cue_append(text, capacity, &used, "    TITLE \"%s\"\n", track->title);
         if (ok && track->performer[0]) ok = cue_append(text, capacity, &used, "    PERFORMER \"%s\"\n", track->performer);
+        if (!cue_metadata(track->songwriter, 128)) ok = false;
+        if (ok && track->songwriter[0]) ok = cue_append(text, capacity, &used, "    SONGWRITER \"%s\"\n", track->songwriter);
+        if (track->flags & ~(CUE_FLAG_DCP | CUE_FLAG_4CH | CUE_FLAG_PRE | CUE_FLAG_SCMS)) ok = false;
+        if (ok && track->flags) ok = cue_append(text, capacity, &used, "    FLAGS%s%s%s%s\n", track->flags & CUE_FLAG_DCP ? " DCP" : "", track->flags & CUE_FLAG_4CH ? " 4CH" : "", track->flags & CUE_FLAG_PRE ? " PRE" : "", track->flags & CUE_FLAG_SCMS ? " SCMS" : "");
         if (track->isrc[0]) {
             if (strnlen(track->isrc, 16) != 12 || !cue_metadata(track->isrc, 16)) ok = false;
             for (size_t j = 0; ok && j < 12; j++) if (!((track->isrc[j] >= '0' && track->isrc[j] <= '9') || (track->isrc[j] >= 'A' && track->isrc[j] <= 'Z') || (track->isrc[j] >= 'a' && track->isrc[j] <= 'z'))) ok = false;
-            else if (ok) ok = cue_append(text, capacity, &used, "    ISRC %s\n", track->isrc);
+            if (ok) ok = cue_append(text, capacity, &used, "    ISRC %s\n", track->isrc);
         }
         if (ok && track->pregapSectors) {
             MsfTime gap = lba_to_msf(track->pregapSectors);
             if (track->pregapSectors >= 100 * 60 * 75) ok = false;
             else ok = cue_append(text, capacity, &used, "    PREGAP %02u:%02u:%02u\n", gap.minute, gap.second, gap.frame);
         }
-        if (ok && track->hasIndex00) {
+        if (track->indexCount < 0 || track->indexCount > MAX_CUE_INDICES) ok = false;
+        if (track->indexCount) {
+            for (int index = 0; ok && index < track->indexCount; index++) {
+                const CueIndex* entry = &track->indices[index];
+                if (entry->indexNumber < 0 || entry->indexNumber > 99 || entry->lba >= 100 * 60 * 75 || (index && (entry->indexNumber <= track->indices[index - 1].indexNumber || entry->lba < track->indices[index - 1].lba))) { ok = false; break; }
+                MsfTime time = lba_to_msf(entry->lba); ok = cue_append(text, capacity, &used, "    INDEX %02d %02u:%02u:%02u\n", entry->indexNumber, time.minute, time.second, time.frame);
+            }
+        } else if (ok && track->hasIndex00) {
             MsfTime time = track->index00;
             if (time.minute >= 100 || time.second >= 60 || time.frame >= 75) ok = false;
             else ok = cue_append(text, capacity, &used, "    INDEX 00 %02u:%02u:%02u\n", time.minute, time.second, time.frame);
         }
         MsfTime time = track->startTime;
         if (time.minute >= 100 || time.second >= 60 || time.frame >= 75) ok = false;
-        if (ok) ok = cue_append(text, capacity, &used, "    INDEX 01 %02u:%02u:%02u\n", time.minute, time.second, time.frame);
+        if (ok && !track->indexCount) ok = cue_append(text, capacity, &used, "    INDEX 01 %02u:%02u:%02u\n", time.minute, time.second, time.frame);
         if (ok && track->postgapSectors) {
             MsfTime gap = lba_to_msf(track->postgapSectors);
             if (track->postgapSectors >= 100 * 60 * 75) ok = false;

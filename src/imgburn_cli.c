@@ -59,6 +59,7 @@ static void print_usage(void) {
     printf("                                 Embedded changer / jukebox controls\n\n");
     printf("Authoring & Image Commands:\n");
     printf("  build <out.iso> <folder> [--label <vol>] [--udf <1.02|2.50>]\n");
+    printf("        [--dvd-video | --bluray]  Build DVD-Video or Blu-ray layout\n");
     printf("                                 Build ISO9660 + Joliet + UDF disc image\n");
     printf("  cue <file.cue>                 Parse and display CUE sheet tracks & CD-Text\n");
     printf("  mds <file.mds>                 Parse and display MDS metadata & Layer Break\n\n");
@@ -237,7 +238,7 @@ static void on_cli_build_progress(int percent, uint32_t currentLba, uint32_t tot
 
 static int cmd_build(int argc, char **argv) {
     if (argc < 4) {
-        printf("Usage: imgburn build <out.iso> <folder> [--label <vol>] [--udf <1.02|2.50>]\n");
+        printf("Usage: imgburn build <out.iso> <folder> [--label <vol>] [--udf <1.02|2.50>] [--dvd-video | --bluray]\n");
         return 1;
     }
 
@@ -245,6 +246,7 @@ static int cmd_build(int argc, char **argv) {
     const char *folderA = argv[3];
     const char *labelA = "IMGBURN_DISC";
     UdfRevision udfRev = UDF_REV_102;
+    bool dvdVideo = false, bluray = false;
 
     for (int i = 4; i < argc; i++) {
         if (_stricmp(argv[i], "--label") == 0 && i + 1 < argc) {
@@ -253,11 +255,14 @@ static int cmd_build(int argc, char **argv) {
             const char *ver = argv[++i];
             if (strcmp(ver, "2.50") == 0) udfRev = UDF_REV_250;
             else if (strcmp(ver, "1.02") != 0) { printf("Error: Unsupported UDF revision.\n"); return 1; }
-        } else {
+        } else if (!_stricmp(argv[i], "--dvd-video")) dvdVideo = true;
+        else if (!_stricmp(argv[i], "--bluray")) bluray = true;
+        else {
             printf("Error: Unknown or incomplete build option: %s\n", argv[i]);
             return 1;
         }
     }
+    if (dvdVideo && bluray) { printf("Error: Choose one video layout.\n"); return 1; }
 
     wchar_t outIsoW[MAX_PATH], folderW[MAX_PATH];
     if (!utf8_path(outIsoA, outIsoW, MAX_PATH) || !utf8_path(folderA, folderW, MAX_PATH)) return 1;
@@ -269,6 +274,9 @@ static int cmd_build(int argc, char **argv) {
         return 1;
     }
     b.config.udfRev = udfRev;
+    b.config.dvdVideoCompliance = dvdVideo; b.config.blurayCompliance = bluray;
+    if (dvdVideo) { b.config.fsTypes = FS_TYPE_ISO_UDF; b.config.udfRev = UDF_REV_102; }
+    if (bluray) { b.config.fsTypes = FS_TYPE_UDF; b.config.udfRev = UDF_REV_250; }
 
     wprintf(L"Scanning source folder: %ls ...\n", folderW);
     if (!image_builder_add_folder(&b, folderW, L"")) {
@@ -581,62 +589,34 @@ static int cmd_changer(int argc, char **argv) {
 /* -------------------------------------------------------------------------
  * Command: cue <file.cue>
  * ------------------------------------------------------------------------- */
-static int cmd_cue(const char *cueFile) {
-    wchar_t cueW[MAX_PATH];
-    if (!utf8_path(cueFile, cueW, MAX_PATH)) return 1;
-
-    CueSheet cue;
-    if (!imgburn_cue_parse(cueW, &cue)) {
-        printf("Error: Failed to parse CUE sheet '%s'\n", cueFile);
-        return 1;
+static int cmd_cue(const char* cueFile) {
+    wchar_t path[MAX_PATH];
+    if (!utf8_path(cueFile, path, MAX_PATH)) return 1;
+    CueSheet* cue = (CueSheet*)calloc(1, sizeof(*cue));
+    if (!cue) return 1;
+    if (!imgburn_cue_parse(path, cue)) { printf("Error: Failed to parse CUE sheet '%s'\n", cueFile); free(cue); return 1; }
+    printf("CUE Sheet Metadata:\n  Disc Title: '%s'\n  Disc Performer: '%s'\n  Catalog / UPC: '%s'\n  Sessions: %u\n  Total Tracks: %d\n  Total Sectors: %u\n", cue->discTitle, cue->discPerformer, cue->catalogNumber, cue->sessionCount, cue->trackCount, cue->totalSectors);
+    static const char* modes[] = {"AUDIO","MODE1/2048","MODE1/2352","MODE2/2336","MODE2/2352","MODE2/2048","MODE2/2324","CDI/2336","CDI/2352","CDG"};
+    for (int i = 0; i < cue->trackCount; i++) {
+        const CueTrack* t = &cue->tracks[i];
+        printf("  Session %u Track %02d: %s | LBA %u | Sectors %u | Source Offset %llu | Flags %u | Indices %d\n", t->sessionNumber, t->trackNumber, modes[t->mode], t->startLba, t->sectorCount, t->sourceByteOffset, t->flags, t->indexCount);
     }
-
-    printf("CUE Sheet Metadata:\n");
-    printf("  Disc Title:      '%s'\n", cue.discTitle[0] ? cue.discTitle : "N/A");
-    printf("  Disc Performer:  '%s'\n", cue.discPerformer[0] ? cue.discPerformer : "N/A");
-    printf("  Catalog / UPC:   '%s'\n", cue.catalogNumber[0] ? cue.catalogNumber : "N/A");
-    printf("  Total Tracks:    %d\n\n", cue.trackCount);
-
-    printf("Track Listing:\n");
-    for (int i = 0; i < cue.trackCount; i++) {
-        const char *modeStr = (cue.tracks[i].mode == TRACK_MODE_AUDIO) ? "AUDIO (CD-DA)" :
-                              (cue.tracks[i].mode == TRACK_MODE_MODE1_2048) ? "MODE1 / 2048" : "MODE2 / 2352";
-        printf("  Track %02d: %-15s | LBA %-6u | Pregap %u | '%s' - '%s'\n",
-               cue.tracks[i].trackNumber,
-               modeStr,
-               cue.tracks[i].startLba,
-               cue.tracks[i].pregapSectors,
-               cue.tracks[i].performer[0] ? cue.tracks[i].performer : "Unknown",
-               cue.tracks[i].title[0] ? cue.tracks[i].title : "Untitled");
-    }
-    return 0;
+    free(cue); return 0;
 }
 
-/* -------------------------------------------------------------------------
- * Command: mds <file.mds>
- * ------------------------------------------------------------------------- */
-static int cmd_mds(const char *mdsFile) {
-    wchar_t mdsW[MAX_PATH];
-    if (!utf8_path(mdsFile, mdsW, MAX_PATH)) return 1;
-
-    MdsSheet mds;
-    if (!imgburn_mds_parse(mdsW, &mds)) {
-        printf("Error: Failed to parse MDS file '%s'\n", mdsFile);
-        return 1;
+static int cmd_mds(const char* mdsFile) {
+    wchar_t path[MAX_PATH];
+    if (!utf8_path(mdsFile, path, MAX_PATH)) return 1;
+    MdsSheet* mds = (MdsSheet*)calloc(1, sizeof(*mds));
+    if (!mds) return 1;
+    if (!imgburn_mds_parse(path, mds)) { printf("Error: Failed to parse MDS file '%s'\n", mdsFile); free(mds); return 1; }
+    const char* medium = mds->mediumType >= 0x10 ? (mds->layerBreakLba ? "DVD-DL" : "DVD") : mds->mediumType == 2 ? "CD-RW" : mds->mediumType == 1 ? "CD-R" : "CD-ROM";
+    printf("MDS Sheet Metadata:\n  Medium Type: %s (%u)\n  Total Sectors: %u\n  Sessions: %u\n  Tracks: %d\n  Data File References: %u\n  Layer Break: %u\n", medium, mds->mediumType, mds->totalSectors, mds->sessionCount, mds->trackCount, mds->dataFileCount, mds->layerBreakLba);
+    for (int i = 0; i < mds->trackCount; i++) {
+        const MdsTrack* t = &mds->tracks[i];
+        printf("  Session %u Track %u: LBA %d | Sectors %u | Sector Size %u | Pregap %u | Files %u\n", t->sessionNumber, t->trackNumber, t->startLba, t->sectorCount, t->sectorSize, t->pregapSectors, t->fileCount);
     }
-
-    const char *medStr = (mds.mediumType == 2) ? "DVD-DL (Dual Layer)" :
-                         (mds.mediumType == 1) ? "DVD (Single Layer)" : "CD-ROM";
-    printf("MDS Sheet Metadata:\n");
-    printf("  Medium Type:     %s (%u)\n", medStr, mds.mediumType);
-    printf("  Total Sectors:   %u LBA (%.2f MB)\n", mds.totalSectors, ((double)mds.totalSectors * 2048.0) / (1024.0 * 1024.0));
-    printf("  Associated Data: %ls\n", mds.dataFilePath);
-    if (mds.layerBreakLba > 0) {
-        printf("  Layer Break:     LBA %u (Layer 0 Capacity)\n", mds.layerBreakLba);
-    } else {
-        printf("  Layer Break:     None (Single Layer)\n");
-    }
-    return 0;
+    free(mds); return 0;
 }
 
 /* -------------------------------------------------------------------------

@@ -61,6 +61,7 @@ typedef struct {
 
 /* Forward declarations */
 struct FsDirectoryNode;
+typedef struct { uint64_t offset; uint32_t value; } FsBytePatch;
 
 /**
  * @brief Represents a file inside the disc compilation
@@ -70,6 +71,8 @@ typedef struct FsFileNode {
     wchar_t nameW[128];             /* Full Joliet / UDF Unicode name */
     wchar_t jolietNameW[65];        /* Joliet标准名称；原始Unicode名称供UDF保留。 */
     uint32_t udfIcb;
+    uint32_t udfAllocationLba;
+    uint32_t udfAllocationBlocks;
     uint64_t udfUniqueId;
     wchar_t sourceDiskPath[MAX_PATH];/* Actual source file on host disk */
     uint64_t fileSize;
@@ -83,6 +86,10 @@ typedef struct FsFileNode {
     struct FsFileNode* duplicateOf; /* Points to first unique file */
 
     struct FsFileNode* next;
+    struct FsDirectoryNode* parent;
+    bool excluded;
+    FsBytePatch* patches;
+    size_t patchCount;
 } FsFileNode;
 
 /**
@@ -108,6 +115,7 @@ typedef struct FsDirectoryNode {
     uint32_t udfData;
     uint32_t udfBytes;
     uint64_t udfUniqueId;
+    bool excluded;
 } FsDirectoryNode;
 
 /**

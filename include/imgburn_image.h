@@ -2,8 +2,8 @@
  * @file imgburn_image.h
  * @brief C17镜像识别、CUE与MDS元数据接口。
  *
- * CUE支持UTF-8、BINARY及原生PCM WAVE，校验引用和扇区边界。
- * MDS当前只支持1.x单会话、单文件DVD，分层使用真实PFI字段。
+ * CUE支持多编码、混合轨道、多会话及音频解码后的精确计数。
+ * MDS支持1.x多会话CD、DVD与分卷数据引用，分层使用真实PFI字段。
  * DVD-Video候选计算尚需接入镜像布局与PGC，不返回推测位置。
  */
 
@@ -21,6 +21,8 @@ extern "C" {
 #define MAX_CUE_TRACKS       99
 #define MAX_CUE_INDICES      100
 #define MAX_MDS_TRACKS       100
+#define MAX_MDS_FILES        512
+#define MAX_MDS_SESSIONS     99
 #define MAX_DVD_LAYER_BREAKS 64
 
 /* -------------------------------------------------------------------------
@@ -43,14 +45,22 @@ typedef enum {
     TRACK_MODE_MODE1_2048,   /* Standard CD-ROM / DVD data (2048 bytes) */
     TRACK_MODE_MODE1_2352,   /* Raw Mode 1 with Sync/Header/ECC (2352 bytes) */
     TRACK_MODE_MODE2_2336,   /* Mode 2 Formless (2336 bytes) */
-    TRACK_MODE_MODE2_2352    /* Mode 2 CD-ROM XA (2352 bytes) */
+    TRACK_MODE_MODE2_2352,
+    TRACK_MODE_MODE2_2048,
+    TRACK_MODE_MODE2_2324,
+    TRACK_MODE_CDI_2336,
+    TRACK_MODE_CDI_2352,
+    TRACK_MODE_CDG_2448
 } TrackDataMode;
+
+typedef enum { CUE_FILE_BINARY, CUE_FILE_MOTOROLA, CUE_FILE_WAVE, CUE_FILE_AIFF, CUE_FILE_MP3, CUE_FILE_AUDIO } CueFileType;
+enum { CUE_FLAG_DCP = 1, CUE_FLAG_4CH = 2, CUE_FLAG_PRE = 4, CUE_FLAG_SCMS = 8 };
 
 /* -------------------------------------------------------------------------
  * CUE Sheet Structures
  * ------------------------------------------------------------------------- */
 typedef struct {
-    int indexNumber;         /* 0 = Pre-gap, 1 = Track start, 2..9 = Sub-indices */
+    int indexNumber;         /* 0为预间隙，1为轨道起点，2至99为子索引。 */
     uint32_t lba;            /* CUE的INDEX地址相对于当前FILE，不是光盘绝对地址。 */
     char msfStr[10];         /* "MM:SS:FF" string */
 } CueIndex;
@@ -60,6 +70,12 @@ typedef struct {
     TrackDataMode mode;
     wchar_t sourceFilePath[MAX_PATH]; /* Associated audio/data file */
     bool sourceIsWave;       /* FILE声明的类型，不能由扩展名猜测。 */
+    CueFileType sourceType;
+    uint32_t sectorSize, flags;
+    uint64_t sourceByteOffset, sourceByteLength;
+    unsigned sessionNumber;
+    unsigned sourceFileGroup; /* 保留同路径重复FILE声明与跨会话共用FILE的区别。 */
+    char songwriter[128];
     char title[128];         /* CD-Text Title */
     char performer[128];     /* CD-Text Performer */
     char isrc[16];           /* ISRC code */
@@ -83,6 +99,10 @@ typedef struct {
     CueTrack tracks[MAX_CUE_TRACKS];
     int trackCount;
     uint32_t totalSectors;
+    char songwriter[128];
+    wchar_t cdTextFile[MAX_PATH];
+    unsigned sessionCount;
+    uint32_t sessionLeadIn[99], sessionLeadOut[99], sessionEndLba[99];
 } CueSheet;
 
 /* -------------------------------------------------------------------------
@@ -135,6 +155,16 @@ typedef struct {
 } MdsTrackBlock;
 #pragma pack(pop)
 
+typedef struct { wchar_t path[MAX_PATH]; uint64_t bytes; } MdsDataFile;
+typedef struct {
+    uint16_t sessionNumber, trackNumber, sectorSize;
+    uint8_t mode, subChannel, control;
+    int32_t startLba;
+    uint32_t sectorCount, pregapSectors;
+    uint64_t startByteOffset;
+    uint16_t firstFile, fileCount;
+} MdsTrack;
+
 typedef struct {
     wchar_t mdsFilePath[MAX_PATH];
     wchar_t dataFilePath[MAX_PATH]; /* Path to .mdf or .iso */
@@ -142,7 +172,15 @@ typedef struct {
     uint32_t totalSectors;
     uint32_t layerBreakLba;  /* L0 sector count for dual-layer DVD, 0 if single layer */
     int trackCount;
+    unsigned sessionCount, dataFileCount;
+    MdsSessionBlock sessions[MAX_MDS_SESSIONS];
+    MdsTrack tracks[MAX_MDS_TRACKS];
+    MdsDataFile files[MAX_MDS_FILES];
+    uint32_t bcaOffset, bcaLength, dpmOffset;
 } MdsSheet;
+
+/* 分卷DVD的所有数据文件均按逻辑顺序列出；原单文件入口由此实现。 */
+bool imgburn_mds_create_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba);
 
 /* -------------------------------------------------------------------------
  * DVD-Video Layer Break Candidate Structure

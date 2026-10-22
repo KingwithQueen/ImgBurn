@@ -60,6 +60,7 @@
     <ClCompile Include="src\imgburn_spti.c" />
     <ClCompile Include="src\imgburn_udf.c" />
     <ClCompile Include="src\imgburn_vendor.c" />
+    <ClCompile Include="src\imgburn_video.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\imgburn_audio.h" />

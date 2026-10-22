@@ -7,6 +7,8 @@
 
 #define BLOCK 2048u
 #define MAX_EXTENT 0x3FFFF800u
+#define ISO_SECTION 0xFFFFF800u
+_Static_assert(sizeof(UdfExtendedFileEntry) == 216, "UDF extended file entry size");
 
 typedef struct {
     FsDirectoryNode* dir;
@@ -25,6 +27,7 @@ typedef struct {
     bool metadataPartition;
     FILETIME created;
     ImageBuildConfig configuration;
+    uint32_t reserveVds;
 } Layout;
 
 static uint32_t blocks(uint64_t bytes) { return (uint32_t)((bytes + BLOCK - 1) / BLOCK); }
@@ -51,7 +54,10 @@ static bool put(HANDLE output, uint32_t lba, const void* buffer, uint32_t length
 
 void fs_layout_free(ImageBuilder* builder) {
     Layout* plan = (Layout*)builder->layout;
-    if (plan) { free(plan->dirs); free(plan->jolietDirs); free(plan->files); free(plan); }
+    if (plan) {
+        for (size_t i = 0; plan->files && i < plan->fileCount; i++) if (plan->files[i]) { free(plan->files[i]->patches); plan->files[i]->patches = NULL; plan->files[i]->patchCount = 0; }
+        free(plan->dirs); free(plan->jolietDirs); free(plan->files); free(plan);
+    }
     builder->layout = NULL;
     builder->config.totalImageSectors = 0;
 }
@@ -62,14 +68,14 @@ static int joliet_order(const void* a, const void* b) { return wcscmp(((const Tr
 
 static TreeEntry* entries(FsDirectoryNode* dir, size_t* count) {
     *count = 0;
-    for (FsDirectoryNode* d = dir->firstChildDir; d; d = d->nextSibling) (*count)++;
-    for (FsFileNode* f = dir->firstFile; f; f = f->next) (*count)++;
+    for (FsDirectoryNode* d = dir->firstChildDir; d; d = d->nextSibling) if (!d->excluded) (*count)++;
+    for (FsFileNode* f = dir->firstFile; f; f = f->next) if (!f->excluded) (*count)++;
     if (*count > SIZE_MAX / sizeof(TreeEntry)) return NULL;
     TreeEntry* result = (TreeEntry*)calloc(*count ? *count : 1, sizeof(TreeEntry));
     if (!result) return NULL;
     size_t index = 0;
-    for (FsDirectoryNode* d = dir->firstChildDir; d; d = d->nextSibling) result[index++] = (TreeEntry){d, NULL, d->nameW, d->nameA, d->jolietNameW};
-    for (FsFileNode* f = dir->firstFile; f; f = f->next) result[index++] = (TreeEntry){NULL, f, f->nameW, f->nameA, f->jolietNameW};
+    for (FsDirectoryNode* d = dir->firstChildDir; d; d = d->nextSibling) if (!d->excluded) result[index++] = (TreeEntry){d, NULL, d->nameW, d->nameA, d->jolietNameW};
+    for (FsFileNode* f = dir->firstFile; f; f = f->next) if (!f->excluded) result[index++] = (TreeEntry){NULL, f, f->nameW, f->nameA, f->jolietNameW};
     return result;
 }
 
@@ -165,8 +171,11 @@ static uint32_t dir_size(FsDirectoryNode* dir, bool joliet) {
     for (size_t i = 0; i < count; i++) {
         uint32_t length = (uint32_t)(33 + (joliet ? wcslen(list[i].joliet) * 2 : strlen(list[i].iso)));
         length = (length + 1) & ~1u;
-        if (position > UINT32_MAX - BLOCK) { free(list); return 0; }
-        position = record_offset((uint32_t)position, length) + length;
+        uint64_t records = list[i].file && list[i].file->fileSize ? (list[i].file->fileSize + ISO_SECTION - 1) / ISO_SECTION : 1;
+        while (records--) {
+            if (position > UINT32_MAX - BLOCK) { free(list); return 0; }
+            position = record_offset((uint32_t)position, length) + length;
+        }
     }
     free(list);
     return blocks(position);
@@ -200,7 +209,7 @@ static bool udf_dir_size(FsDirectoryNode* dir) {
 bool fs_layout_prepare(ImageBuilder* builder) {
     fs_layout_free(builder);
     unsigned flags = builder->config.fsTypes;
-    if (!flags || (flags & ~FS_TYPE_ALL) || builder->config.boot.isBootable || builder->config.dvdVideoCompliance || builder->config.blurayCompliance) return false;
+    if (!flags || (flags & ~FS_TYPE_ALL) || builder->config.boot.isBootable) return false;
     if ((flags & FS_TYPE_UDF) && builder->config.udfRev != UDF_REV_102 && builder->config.udfRev != UDF_REV_250) return false;
     Layout* plan = (Layout*)calloc(1, sizeof(Layout));
     if (!plan) return false;
@@ -212,6 +221,8 @@ bool fs_layout_prepare(ImageBuilder* builder) {
     plan->jolietDirs = (FsDirectoryNode**)calloc(plan->dirCount, sizeof(*plan->dirs));
     plan->files = (FsFileNode**)calloc(plan->fileCount ? plan->fileCount : 1, sizeof(*plan->files));
     if (!plan->dirs || !plan->jolietDirs || !plan->files || !enumerate(plan, builder->rootDir, false) || !enumerate(plan, builder->rootDir, true)) goto failed;
+    if (builder->config.dvdVideoCompliance || builder->config.blurayCompliance) qsort(plan->files, plan->fileCount, sizeof(*plan->files), fs_video_file_order);
+    plan->reserveVds = 48;
     GetSystemTimeAsFileTime(&plan->created);
     /* Joliet需要ISO主卷；纯UDF则从扇区16直接开始VRS。 */
     bool isoBridge = (flags & (FS_TYPE_ISO9660 | FS_TYPE_JOLIET)) != 0;
@@ -256,6 +267,12 @@ bool fs_layout_prepare(ImageBuilder* builder) {
         for (size_t i = 0; i < plan->fileCount; i++) {
             plan->files[i]->udfIcb = (uint32_t)cursor++;
             plan->files[i]->udfUniqueId = 15 + plan->dirCount + i;
+            uint64_t descriptors = (plan->files[i]->fileSize + MAX_EXTENT - 1) / MAX_EXTENT;
+            plan->files[i]->udfAllocationLba = (uint32_t)cursor;
+            unsigned capacity = builder->config.udfRev == UDF_REV_250 ? 114 : 117;
+            plan->files[i]->udfAllocationBlocks = descriptors > capacity ? (uint32_t)((descriptors - capacity + 124) / 125) : 0;
+            cursor += plan->files[i]->udfAllocationBlocks;
+            if (cursor > UINT32_MAX - 4096) goto failed;
         }
         for (size_t i = 0; i < plan->dirCount; i++) {
             FsDirectoryNode* dir = plan->dirs[i];
@@ -265,7 +282,7 @@ bool fs_layout_prepare(ImageBuilder* builder) {
         }
         plan->metadataBlocks = plan->metadataPartition ? align32((uint32_t)cursor) : (uint32_t)cursor;
         if (plan->metadataPartition) {
-            /* 镜像副本位于主元数据之前，数据区结束后仅保留尾锚及填充。 */
+            /* 元数据副本位于物理分区前部，尾部描述区和锚点独立安排。 */
             plan->mirrorFe = 1; plan->mirrorData = 32; plan->metadata = 32 + plan->metadataBlocks;
         }
         cursor = (uint64_t)plan->partition + plan->metadata + plan->metadataBlocks;
@@ -273,19 +290,22 @@ bool fs_layout_prepare(ImageBuilder* builder) {
     builder->dataStartLba = (uint32_t)cursor;
     for (size_t i = 0; i < plan->fileCount; i++) {
         FsFileNode* file = plan->files[i];
-        /* ISO多区段文件与UDF分配扩展尚未接入，禁止长度截断。 */
-        if (file->fileSize > UINT32_MAX) goto failed;
         if (file->isDuplicate) continue;
+        uint32_t aligned = fs_video_align_file(builder, file, (uint32_t)cursor);
+        if (aligned < cursor) goto failed;
+        cursor = aligned;
         file->allocatedLba = (uint32_t)cursor; cursor += file->sectorCount;
         if (cursor > UINT32_MAX - 4096) goto failed;
     }
     for (size_t i = 0; i < plan->fileCount; i++) if (plan->files[i]->isDuplicate) plan->files[i]->allocatedLba = plan->files[i]->duplicateOf->allocatedLba;
     if (flags & FS_TYPE_UDF) {
         plan->partitionBlocks = (uint32_t)cursor - plan->partition;
+        if (builder->config.blurayCompliance) { plan->reserveVds = align32((uint32_t)cursor); cursor = (uint64_t)plan->reserveVds + 32; }
         cursor += 257;
     }
     if (cursor > UINT32_MAX) goto failed;
     builder->config.totalImageSectors = (uint32_t)cursor;
+    if (!fs_video_finalize(builder)) goto failed;
     memcpy(&plan->configuration, &builder->config, sizeof(plan->configuration));
     return true;
 failed:
@@ -375,12 +395,16 @@ static bool iso_directory(ImageBuilder* b, HANDLE output, FsDirectoryNode* dir, 
         TreeEntry* entry = &list[i];
         uint8_t nameLength = (uint8_t)(joliet ? wcslen(entry->joliet) * 2 : strlen(entry->iso));
         uint32_t length = (33u + nameLength + 1u) & ~1u;
-        offset = record_offset(offset, length);
         if (joliet) ucs2(name, entry->joliet); else memcpy(name, entry->iso, nameLength);
         uint32_t lba = entry->file ? entry->file->allocatedLba : (joliet ? entry->dir->allocatedLbaJoliet : entry->dir->allocatedLbaIso);
-        uint32_t size = entry->file ? (uint32_t)entry->file->fileSize : (joliet ? entry->dir->sectorCountJoliet : entry->dir->sectorCountIso) * BLOCK;
-        iso_record(data + offset, length, lba, size, entry->dir != NULL, name, nameLength, entry->file ? &entry->file->modTime : &plan->created);
-        offset += length;
+        uint64_t remaining = entry->file ? entry->file->fileSize : (joliet ? entry->dir->sectorCountJoliet : entry->dir->sectorCountIso) * (uint64_t)BLOCK;
+        do {
+            uint32_t section = remaining > ISO_SECTION ? ISO_SECTION : (uint32_t)remaining;
+            offset = record_offset(offset, length);
+            iso_record(data + offset, length, lba, section, entry->dir != NULL, name, nameLength, entry->file ? &entry->file->modTime : &plan->created);
+            if (remaining > section) data[offset + 25] |= 0x80;
+            offset += length; remaining -= section; lba += blocks(section);
+        } while (remaining);
     }
     bool ok = put(output, joliet ? dir->allocatedLbaJoliet : dir->allocatedLbaIso, data, bytes);
     free(list); free(data); return ok;
@@ -460,7 +484,7 @@ static bool udf_tree_put(ImageBuilder* b, HANDLE output, uint32_t logical, const
     return !plan->metadataPartition || put(output, plan->partition + plan->mirrorData + logical, data, length);
 }
 
-static bool udf_fe(ImageBuilder* b, HANDLE output, uint32_t block, uint8_t type, uint64_t unique, uint64_t bytes, uint32_t extent, uint16_t reference, uint16_t links, const FILETIME* time) {
+static bool udf_fe(ImageBuilder* b, HANDLE output, uint32_t block, uint8_t type, uint64_t unique, uint64_t bytes, uint32_t extent, uint16_t reference, uint16_t links, const FILETIME* time, uint32_t allocationLba) {
     Layout* plan = (Layout*)b->layout;
     uint8_t data[BLOCK] = {0};
     UdfFileEntry* fe = (UdfFileEntry*)data;
@@ -470,16 +494,42 @@ static bool udf_fe(ImageBuilder* b, HANDLE output, uint32_t block, uint8_t type,
     fe->fileLinkCount = links; fe->infoLength = bytes; fe->logicalBlocksRecorded = blocks(bytes); fe->checkpoint = 1; fe->uniqueId = unique;
     udf_filetime_to_timestamp(time, &fe->accessDateAndTime); fe->modDateAndTime = fe->accessDateAndTime; fe->attrDateAndTime = fe->accessDateAndTime;
     entity(&fe->implementationIdent, "*ImgBurn C", 0);
-    uint32_t offset = sizeof(*fe);
-    while (bytes) {
-        uint32_t length = bytes > MAX_EXTENT ? MAX_EXTENT : (uint32_t)bytes;
-        if (regular) { UdfLongAd ad = {0}; ad.length = length; ad.logicalBlockNum = extent; ad.partitionRefNum = reference; memcpy(data + offset, &ad, sizeof(ad)); offset += sizeof(ad); }
-        else { UdfShortAd ad = {length, extent}; memcpy(data + offset, &ad, sizeof(ad)); offset += sizeof(ad); }
-        bytes -= length; extent += blocks(length);
+    bool extended = b->config.udfRev == UDF_REV_250;
+    if (extended) {
+        UdfExtendedFileEntry* efe = (UdfExtendedFileEntry*)data;
+        /* 头部前64字节保持一致，其余字段按EFE偏移重新填写。 */
+        memset(data + 64, 0, BLOCK - 64);
+        efe->objectSize = bytes; efe->logicalBlocksRecorded = blocks(bytes); efe->checkpoint = 1; efe->uniqueId = unique;
+        udf_filetime_to_timestamp(time, &efe->accessDateAndTime); efe->modDateAndTime = efe->accessDateAndTime; efe->creationDateAndTime = efe->accessDateAndTime; efe->attrDateAndTime = efe->accessDateAndTime;
+        entity(&efe->implementationIdent, "*ImgBurn C", 0);
     }
-    fe->lengthOfAllocationDescriptors = offset - sizeof(*fe); tag(b, data, UDF_TAG_FE, block, (uint16_t)offset);
-    if (type == UDF_FILE_TYPE_METADATA_MAIN || type == UDF_FILE_TYPE_METADATA_MIRR) return put(output, plan->partition + block, data, BLOCK);
-    return udf_tree_put(b, output, block, data, BLOCK);
+    bool first = true;
+    do {
+        uint32_t header = first ? (extended ? sizeof(UdfExtendedFileEntry) : sizeof(*fe)) : 24, offset = header, adSize = regular ? 16 : 8;
+        uint64_t needed = (bytes + MAX_EXTENT - 1) / MAX_EXTENT;
+        uint32_t slots = (BLOCK - header) / adSize;
+        bool continuation = needed > slots;
+        if (continuation && (!regular || !allocationLba)) return false;
+        uint32_t count = continuation ? slots - 1 : (uint32_t)needed;
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t length = bytes > MAX_EXTENT ? MAX_EXTENT : (uint32_t)bytes;
+            if (regular) { UdfLongAd ad = {0}; ad.length = length; ad.logicalBlockNum = extent; ad.partitionRefNum = reference; memcpy(data + offset, &ad, sizeof(ad)); }
+            else { UdfShortAd ad = {length, extent}; memcpy(data + offset, &ad, sizeof(ad)); }
+            offset += adSize; bytes -= length; extent += blocks(length);
+        }
+        if (continuation) {
+            UdfLongAd ad = {0}; ad.length = 0xC0000000u | BLOCK; ad.logicalBlockNum = allocationLba; ad.partitionRefNum = plan->metadataPartition ? 1 : 0;
+            memcpy(data + offset, &ad, sizeof(ad)); offset += sizeof(ad);
+        }
+        if (first && extended) ((UdfExtendedFileEntry*)data)->lengthOfAllocationDescriptors = offset - header;
+        else if (first) ((UdfFileEntry*)data)->lengthOfAllocationDescriptors = offset - header;
+        else le32(data + 20, offset - header);
+        tag(b, data, first ? (extended ? UDF_TAG_EXTENDED_FE : UDF_TAG_FE) : UDF_TAG_ALLOC_EXTENT, block, (uint16_t)(!first && b->config.udfRev == UDF_REV_102 ? 24 : offset));
+        if (type == UDF_FILE_TYPE_METADATA_MAIN || type == UDF_FILE_TYPE_METADATA_MIRR) return put(output, plan->partition + block, data, BLOCK);
+        if (!udf_tree_put(b, output, block, data, BLOCK)) return false;
+        if (!continuation) return true;
+        block = allocationLba++; first = false; memset(data, 0, sizeof(data));
+    } while (true);
 }
 
 static uint32_t write_fid(ImageBuilder* b, uint8_t* target, uint32_t position, uint32_t dataBlock, const wchar_t* name, uint32_t icb, uint64_t unique, uint8_t flags) {
@@ -513,7 +563,7 @@ static bool udf_directory(ImageBuilder* b, HANDLE output, FsDirectoryNode* dir) 
         offset += write_fid(b, data, offset, dir->udfData, e->original, e->dir ? e->dir->udfIcb : e->file->udfIcb, e->dir ? e->dir->udfUniqueId : e->file->udfUniqueId, e->dir ? 2 : 0);
     }
     bool ok = offset == dir->udfBytes && udf_tree_put(b, output, dir->udfData, data, blocks(dir->udfBytes) * BLOCK);
-    if (ok) ok = udf_fe(b, output, dir->udfIcb, UDF_FILE_TYPE_DIRECTORY, dir->udfUniqueId, dir->udfBytes, dir->udfData, plan->metadataPartition ? 1 : 0, links, &plan->created);
+    if (ok) ok = udf_fe(b, output, dir->udfIcb, UDF_FILE_TYPE_DIRECTORY, dir->udfUniqueId, dir->udfBytes, dir->udfData, plan->metadataPartition ? 1 : 0, links, &plan->created, 0);
     free(list); free(data); return ok;
 }
 
@@ -531,11 +581,11 @@ static bool udf_tree(ImageBuilder* b, HANDLE output) {
     for (size_t i = 0; i < plan->dirCount; i++) if (!udf_directory(b, output, plan->dirs[i])) return false;
     for (size_t i = 0; i < plan->fileCount; i++) {
         FsFileNode* file = plan->files[i];
-        if (!udf_fe(b, output, file->udfIcb, UDF_FILE_TYPE_REGULAR, file->udfUniqueId, file->fileSize, file->allocatedLba - plan->partition, 0, 1, &file->modTime)) return false;
+        if (!udf_fe(b, output, file->udfIcb, UDF_FILE_TYPE_REGULAR, file->udfUniqueId, file->fileSize, file->allocatedLba - plan->partition, 0, 1, &file->modTime, file->udfAllocationLba)) return false;
     }
     if (plan->metadataPartition) {
-        if (!udf_fe(b, output, 0, UDF_FILE_TYPE_METADATA_MAIN, 0, (uint64_t)plan->metadataBlocks * BLOCK, plan->metadata, 0, 0, &plan->created) ||
-            !udf_fe(b, output, plan->mirrorFe, UDF_FILE_TYPE_METADATA_MIRR, 0, (uint64_t)plan->metadataBlocks * BLOCK, plan->mirrorData, 0, 0, &plan->created)) return false;
+        if (!udf_fe(b, output, 0, UDF_FILE_TYPE_METADATA_MAIN, 0, (uint64_t)plan->metadataBlocks * BLOCK, plan->metadata, 0, 0, &plan->created, 0) ||
+            !udf_fe(b, output, plan->mirrorFe, UDF_FILE_TYPE_METADATA_MIRR, 0, (uint64_t)plan->metadataBlocks * BLOCK, plan->mirrorData, 0, 0, &plan->created, 0)) return false;
     }
     return true;
 }
@@ -556,12 +606,12 @@ bool fs_layout_write(ImageBuilder* b, HANDLE output) {
     }
     if (!(b->config.fsTypes & FS_TYPE_UDF)) return true;
     udf_build_vrs(data, plan->metadataPartition);
-    if (!put(output, plan->terminator + 1, data, sizeof(data)) || !udf_volume_sequence(b, output, 32) || !udf_volume_sequence(b, output, 48) || !udf_integrity(b, output) || !udf_tree(b, output)) return false;
+    if (!put(output, plan->terminator + 1, data, sizeof(data)) || !udf_volume_sequence(b, output, 32) || !udf_volume_sequence(b, output, plan->reserveVds) || !udf_integrity(b, output) || !udf_tree(b, output)) return false;
     uint32_t anchors[3] = {256, b->config.totalImageSectors - 257, b->config.totalImageSectors - 1};
     for (int i = 0; i < 3; i++) {
         memset(data, 0, BLOCK);
         UdfAnchorVolDescPtr* anchor = (UdfAnchorVolDescPtr*)data;
-        anchor->mainVdsExtent = (UdfExtentAd){16 * BLOCK, 32}; anchor->reserveVdsExtent = (UdfExtentAd){16 * BLOCK, 48};
+        anchor->mainVdsExtent = (UdfExtentAd){16 * BLOCK, 32}; anchor->reserveVdsExtent = (UdfExtentAd){16 * BLOCK, plan->reserveVds};
         tag(b, anchor, UDF_TAG_AVDP, anchors[i], 512);
         if (!put(output, anchors[i], data, BLOCK)) return false;
     }
