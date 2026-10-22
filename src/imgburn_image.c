@@ -320,10 +320,16 @@ bool imgburn_cue_parse(const wchar_t* cueFilePath, CueSheet* outCue) {
             if (!initial->pregapSectors && initial->indexCount && initial->indices[0].indexNumber == 1 && !initial->indices[0].lba) total += 150;
             previousSession = initial->sessionNumber;
         }
-        uint64_t sourceBytes; if (!cue_source_bytes(initial->sourceFilePath, initial->sourceType, &sourceBytes)) goto done;
+        uint64_t sourceBytes; uint32_t cached = initial->sourceType >= CUE_FILE_WAVE ? decodedHints[groups[first]] : 0;
+        if (cached) {
+            /* 原版把此REM作为解码结果缓存，载入时不重新解码或要求与实际长度相等。 */
+            DWORD attributes = GetFileAttributesW(initial->sourceFilePath); if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) goto done;
+            sourceBytes = (uint64_t)cached * 2352;
+        } else if (!cue_source_bytes(initial->sourceFilePath, initial->sourceType, &sourceBytes)) goto done;
         uint64_t usedBytes = 0, gaps = 0, sourceFrames = 0; uint32_t fileEnd = 0;
         for (int i = first; i < last; i++) {
             CueTrack* current = &sheet->tracks[i];
+            current->decodedSourceSectors = cached;
             if (!current->indexCount) goto done;
             bool indexOne = false; uint32_t start = 0, segment = i == first ? 0 : current->indices[0].lba;
             for (int j = 0; j < current->indexCount; j++) if (current->indices[j].indexNumber == 1) { indexOne = true; start = current->indices[j].lba; }

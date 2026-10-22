@@ -74,6 +74,7 @@ typedef struct {
     CueFileType sourceType;
     uint32_t sectorSize, flags;
     uint64_t sourceByteOffset, sourceByteLength;
+    uint32_t decodedSourceSectors; /* REM解码长度缓存，0表示需实际解码测量。 */
     unsigned sessionNumber;
     unsigned sourceFileGroup; /* 保留同路径重复FILE声明与跨会话共用FILE的区别。 */
     char songwriter[128];

@@ -299,7 +299,7 @@ static LRESULT CALLBACK preview_info_proc(HWND window, UINT message, WPARAM wp, 
         for (unsigned i = 0; i < 13; i++) { int y = i < 9 ? 28 + i * 29 : i < 11 ? 328 + (i - 9) * 29 : 418 + (i - 11) * 29; CreateWindowW(L"STATIC", labels[i], WS_CHILD | WS_VISIBLE, 20, y, 125, 22, window, NULL, NULL, NULL); p->infoValues[i] = CreateWindowW(i == 8 ? PROGRESS_CLASSW : L"STATIC", L"", WS_CHILD | WS_VISIBLE | (i == 8 ? 0 : SS_CENTER), 148, y, 194, 22, window, NULL, NULL, NULL); }
         SendMessageW(p->infoValues[8], PBM_SETRANGE32, 0, 10080); return 0;
     }
-    if (message == WM_CLOSE) { ShowWindow(window, SW_HIDE); if (p) SendDlgItemMessageW(p->window, PREVIEW_INFO, BM_SETCHECK, BST_UNCHECKED, 0); return 0; }
+    if (message == WM_CLOSE) { ShowWindow(window, SW_HIDE); if (p) { SendDlgItemMessageW(p->window, PREVIEW_INFO, BM_SETCHECK, BST_UNCHECKED, 0); InvalidateRect(p->window, NULL, FALSE); } return 0; }
     return DefWindowProcW(window, message, wp, lp);
 }
 
@@ -394,6 +394,19 @@ static void preview_paint(PreviewWindow* p, HDC dc) {
     if (!p->realSize && dh > height) { dh = height; dw = (int)((uint64_t)height * an / ad); }
     BITMAPINFO bitmap = {0}; bitmap.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); bitmap.bmiHeader.biWidth = p->plan.width; bitmap.bmiHeader.biHeight = -(LONG)p->plan.height; bitmap.bmiHeader.biPlanes = 1; bitmap.bmiHeader.biBitCount = 24; bitmap.bmiHeader.biCompression = BI_RGB;
     SetStretchBltMode(dc, HALFTONE); StretchDIBits(dc, (width - dw) / 2, r.top + (height - dh) / 2, dw, dh, 0, 0, p->plan.width, p->plan.height, p->pixels, &bitmap, DIB_RGB_COLORS, SRCCOPY);
+    /* 原版只在Info开启时标出菜单按钮边界，边框不写入BMP，也不执行按钮命令。 */
+    DvdPreviewPacketInfo packet;
+    if (SendDlgItemMessageW(p->window, PREVIEW_INFO, BM_GETCHECK, 0, 0) == BST_CHECKED && p->frameInfo.valid && imgburn_preview_packet_info(p->clips[p->cellIndex], p->frameInfo.byteOffset, &packet) && packet.highlightStatus) {
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(255,0,0));
+        if (pen) {
+            HGDIOBJ previousPen = SelectObject(dc, pen), previousBrush = SelectObject(dc, GetStockObject(NULL_BRUSH)); int left = (width - dw) / 2, top = r.top + (height - dh) / 2;
+            for (unsigned i = 0; i < packet.buttonCount; i++) {
+                const DvdPreviewButton* button = &packet.buttons[i];
+                Rectangle(dc, left + (int)((uint64_t)button->left * dw / p->plan.width), top + (int)((uint64_t)button->top * dh / p->plan.height), left + (int)((uint64_t)(button->right + 1) * dw / p->plan.width), top + (int)((uint64_t)(button->bottom + 1) * dh / p->plan.height));
+            }
+            SelectObject(dc, previousBrush); SelectObject(dc, previousPen); DeleteObject(pen);
+        }
+    }
 }
 
 static LRESULT CALLBACK preview_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
@@ -458,7 +471,7 @@ static LRESULT CALLBACK preview_proc(HWND window, UINT message, WPARAM wp, LPARA
                     CreateWindowExW(WS_EX_TOOLWINDOW, L"ImgBurnPreviewInfo", L"Information", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, x, y, 378, 526, window, NULL, GetModuleHandleW(NULL), p);
                 }
                 if (p->infoWindow) { ShowWindow(p->infoWindow, SendDlgItemMessageW(window, PREVIEW_INFO, BM_GETCHECK, 0, 0) == BST_CHECKED ? SW_SHOWNORMAL : SW_HIDE); preview_info_update(p); }
-                else SendDlgItemMessageW(window, PREVIEW_INFO, BM_SETCHECK, BST_UNCHECKED, 0); break;
+                else SendDlgItemMessageW(window, PREVIEW_INFO, BM_SETCHECK, BST_UNCHECKED, 0); InvalidateRect(window, NULL, FALSE); break;
             case PREVIEW_BMP: {
                 if (!p->painted) break; bool resume = p->playing; p->playing = false; imgburn_preview_audio_pause(p->audio, true);
                 wchar_t path[MAX_PATH] = L"ImgBurn_Preview.bmp"; OPENFILENAMEW save = {0}; save.lStructSize = sizeof(save); save.hwndOwner = window; save.lpstrFilter = L"BMP File (*.bmp)\0*.bmp\0\0"; save.lpstrFile = path; save.nMaxFile = MAX_PATH; save.lpstrDefExt = L"bmp"; save.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;

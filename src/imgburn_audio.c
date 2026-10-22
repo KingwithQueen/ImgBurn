@@ -296,6 +296,7 @@ bool cue_sheet_parse(const wchar_t* cuePath, AudioCompilation* outComp) {
         target->startLba = source->startLba; target->sectorCount = source->sectorCount; target->pregapSectors = source->pregapSectors;
         target->postgapSectors = source->postgapSectors; target->sourceIsWave = source->sourceIsWave;
         target->sourceType = source->sourceType; target->flags = source->flags; target->sessionNumber = source->sessionNumber; target->sourceFileGroup = source->sourceFileGroup; strcpy(target->songwriter, source->songwriter);
+        target->decodedSourceSectors = source->decodedSourceSectors;
         target->indexCount = source->indexCount; memcpy(target->indices, source->indices, (size_t)source->indexCount * sizeof(CueIndex));
         target->duration = lba_to_msf(source->sectorCount);
         for (int j = 0; j < source->indexCount; j++) {
@@ -328,7 +329,7 @@ bool cue_sheet_generate(const AudioCompilation* comp, const wchar_t* outCuePath)
     const size_t capacity = 256 * 1024;
     char* text = (char*)calloc(1, capacity);
     if (!text) return false;
-    bool ok = true; CueFileType previousType = CUE_FILE_BINARY; unsigned session = 0, previousGroup = 0;
+    bool ok = true; CueFileType previousType = CUE_FILE_BINARY; unsigned session = 0, previousGroup = 0; uint32_t previousDecoded = 0;
     size_t used = 0;
     if (comp->cdTitle[0]) ok = cue_append(text, capacity, &used, "TITLE \"%s\"\n", comp->cdTitle);
     if (ok && comp->cdPerformer[0]) ok = cue_append(text, capacity, &used, "PERFORMER \"%s\"\n", comp->cdPerformer);
@@ -369,8 +370,13 @@ bool cue_sheet_generate(const AudioCompilation* comp, const wchar_t* outCuePath)
         if ((unsigned)type >= sizeof(typeNames) / sizeof(*typeNames)) { ok = false; break; }
         if (wcscmp(previous, source) || previousType != type || (track->sourceFileGroup && track->sourceFileGroup != previousGroup)) {
             if (ok) ok = cue_append(text, capacity, &used, "FILE \"%s\" %s\n", utf8, typeNames[type]);
+            if (track->decodedSourceSectors) {
+                if (type < CUE_FILE_WAVE || track->decodedSourceSectors >= 100 * 60 * 75) ok = false;
+                else { MsfTime decoded = lba_to_msf(track->decodedSourceSectors); if (ok) ok = cue_append(text, capacity, &used, "REM FILE-DECODED-SIZE %02u:%02u:%02u\n", decoded.minute, decoded.second, decoded.frame); }
+            }
+            previousDecoded = track->decodedSourceSectors;
             wcscpy(previous, source); previousType = type; previousGroup = track->sourceFileGroup;
-        }
+        } else if (previousDecoded != track->decodedSourceSectors) ok = false;
         if (ok) ok = cue_append(text, capacity, &used, "  TRACK %02d AUDIO\n", track->trackNumber);
         if (ok && track->title[0]) ok = cue_append(text, capacity, &used, "    TITLE \"%s\"\n", track->title);
         if (ok && track->performer[0]) ok = cue_append(text, capacity, &used, "    PERFORMER \"%s\"\n", track->performer);

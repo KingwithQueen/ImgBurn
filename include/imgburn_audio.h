@@ -60,6 +60,7 @@ typedef struct {
     int indexCount;
     unsigned sessionNumber;
     unsigned sourceFileGroup;
+    uint32_t decodedSourceSectors;  /* 保留源文件的解码长度缓存，导出时仍属于FILE。 */
     bool hasIndex00;
     MsfTime index00;
     MsfTime startTime;
