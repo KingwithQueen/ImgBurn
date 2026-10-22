@@ -324,6 +324,7 @@ static bool dvd_pgci_navigation(DvdReader* r, FsFileNode* const* parts, uint32_t
             DvdNavigationCell cell = {0}; cell.titleSet = (uint16_t)titleSet; cell.domain = domain; cell.languageUnit = (uint16_t)languageUnit; cell.languageCode = languageCode; cell.menuType = menuTypes[i]; cell.pgc = (uint16_t)(i + 1); cell.cell = (uint16_t)(j + 1); cell.program = (uint16_t)(program + 1);
             cell.angleBlockFirstCell = blockType ? (uint16_t)angleFirst : 0;
             cell.playbackMilliseconds = dvd_time_ms(cp + 4);
+            cell.pgcOffset = (uint32_t)begin;
             cell.vobId = dvd_be16(position); cell.cellId = position[3]; cell.category = video_be32(cp); cell.ifoOffset = (uint32_t)(begin + playback + j * 24); cell.previousCellCommand = previousCommand;
             cell.firstIlvuEndSector = video_be32(cp + 12); cell.firstSector = video_be32(cp + 8); cell.lastVobuSector = video_be32(cp + 16); cell.lastSector = video_be32(cp + 20);
             if (!cell.vobId || !cell.cellId || cell.firstSector > cell.lastVobuSector || cell.lastVobuSector > cell.lastSector || cell.lastSector >= vobSectors || parts[0]->allocatedLba > UINT32_MAX - cell.firstSector) return false;
@@ -533,6 +534,20 @@ bool imgburn_dvd_preview_plan(const ImageBuilder* b, DvdNavigationDomain domain,
         plan->width = resolution == 0 ? 720 : resolution == 1 ? 704 : 352; plan->height = pal ? 576 : 480; if (resolution == 3) plan->height /= 2;
         plan->aspectNumerator = (attrs[0] & 12) == 12 ? 16 : 4; plan->aspectDenominator = (attrs[0] & 12) == 12 ? 9 : 3;
         plan->frameRateNumerator = pal ? 25 : 30000; plan->frameRateDenominator = pal ? 1 : 1001;
+        plan->videoCoding = attrs[0] >> 6;
+        unsigned audioCount = dvd_be16(attrs + 2); uint8_t controls[16] = {0}; if (audioCount > 8) ok = false;
+        DvdReader audioReader = {_wfopen(ifo->sourceDiskPath, L"rb"),ifo->fileSize};
+        if (!audioReader.file || !dvd_read(&audioReader, (uint64_t)selected->pgcOffset + 12, controls, sizeof(controls))) ok = false;
+        if (audioReader.file) fclose(audioReader.file);
+        for (unsigned i = 0; ok && i < audioCount; i++) {
+            if (!(controls[i * 2] & 0x80)) continue;
+            unsigned stream = controls[i * 2] & 7; const uint8_t* a = attrs + 4 + i * 8; unsigned format = a[0] >> 5;
+            if (format != 0 && format != 2 && format != 3 && format != 4 && format != 6) continue;
+            DvdPreviewAudio* target = &plan->audio[plan->audioCount++]; target->format = format;
+            target->streamId = (format == 0 ? 0x80 : format == 4 ? 0xA0 : format == 6 ? 0x88 : 0x1C0) + stream;
+            target->channels = (a[1] & 7) + 1; target->sampleRate = (a[1] & 0x30) == 0x10 ? 96000 : 48000;
+            target->languageCode = (a[0] & 12) == 4 ? dvd_be16(a + 2) : 0;
+        }
     }
     imgburn_dvd_free_navigation(&nav); if (!ok) { memset(plan, 0, sizeof(*plan)); SetLastError(ERROR_INVALID_DATA); } return ok;
 }

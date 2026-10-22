@@ -362,7 +362,10 @@ bool imgburn_cue_parse(const wchar_t* cueFilePath, CueSheet* outCue) {
             }
             previousSession = current->sessionNumber;
         }
-        if (decodedHints[groups[first]] && decodedHints[groups[first]] != sourceFrames) goto done;
+        /* 解码长度提示描述整个源文件，LEAD-OUT截短引用范围后也不能把尾部漏算。 */
+        uint32_t lastSectorSize = sheet->tracks[last - 1].sectorSize;
+        uint64_t decodedFrames = sourceFrames + (usedBytes < sourceBytes ? (sourceBytes - usedBytes + lastSectorSize - 1) / lastSectorSize : 0);
+        if (decodedHints[groups[first]] && decodedHints[groups[first]] != decodedFrames) goto done;
         total += fileEnd + gaps; if (total > UINT32_MAX) goto done;
         first = last;
     }

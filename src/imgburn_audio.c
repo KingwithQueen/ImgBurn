@@ -409,6 +409,14 @@ bool cue_sheet_generate(const AudioCompilation* comp, const wchar_t* outCuePath)
             else ok = cue_append(text, capacity, &used, "    POSTGAP %02u:%02u:%02u\n", gap.minute, gap.second, gap.frame);
         }
     }
+    if (ok && session && comp->sessionEndLba[session - 1]) {
+        uint32_t end = comp->sessionEndLba[session - 1];
+        if (end >= 100 * 60 * 75) ok = false;
+        else {
+            /* 末会话也必须保留引用终点，避免截短音轨导出后重新包含源文件尾部。 */
+            MsfTime leadOut = lba_to_msf(end); ok = cue_append(text, capacity, &used, "REM LEAD-OUT %02u:%02u:%02u\n", leadOut.minute, leadOut.second, leadOut.frame);
+        }
+    }
     if (!ok) { free(text); return false; }
     /* 先完成临时文件，再替换目标，保证失败不会留下半份CUE。 */
     static volatile LONG sequence = 0;
