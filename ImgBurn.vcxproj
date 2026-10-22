@@ -56,6 +56,7 @@
     <ClCompile Include="src\imgburn_image.c" />
     <ClCompile Include="src\imgburn_mmc.c" />
     <ClCompile Include="src\imgburn_pipeline.c" />
+    <ClCompile Include="src\imgburn_preview.c" />
     <ClCompile Include="src\imgburn_ringbuffer.c" />
     <ClCompile Include="src\imgburn_spti.c" />
     <ClCompile Include="src\imgburn_udf.c" />
@@ -70,6 +71,7 @@
     <ClInclude Include="include\imgburn_image.h" />
     <ClInclude Include="include\imgburn_mmc.h" />
     <ClInclude Include="include\imgburn_pipeline.h" />
+    <ClInclude Include="include\imgburn_preview.h" />
     <ClInclude Include="include\imgburn_ringbuffer.h" />
     <ClInclude Include="include\imgburn_spti.h" />
     <ClInclude Include="include\imgburn_udf.h" />

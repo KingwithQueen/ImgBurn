@@ -338,6 +338,12 @@ bool imgburn_cue_parse(const wchar_t* cueFilePath, CueSheet* outCue) {
                 if (end < sessionGap) goto done; end -= sessionGap;
             }
             if (i + 1 == last && current->sourceType < CUE_FILE_WAVE && available % current->sectorSize) goto done;
+            if (i + 1 == last && (i + 1 == sheet->trackCount || sheet->tracks[i + 1].sessionNumber != current->sessionNumber)) {
+                uint32_t declared = sheet->sessionEndLba[current->sessionNumber - 1];
+                uint64_t overhead = total + gaps + current->pregapSectors + current->postgapSectors;
+                /* 显式LEAD-OUT限定末轨长度，源文件尾部允许保留未引用的数据。 */
+                if (declared) { if (declared <= overhead || declared - overhead > end) goto done; end = declared - overhead; }
+            }
             if (end <= start || end > UINT32_MAX || current->indices[current->indexCount - 1].lba >= end) goto done;
             uint64_t segmentBytes = (end - segment) * current->sectorSize;
             if (i + 1 < last && segmentBytes > available) goto done;
@@ -451,7 +457,8 @@ bool imgburn_mds_parse(const wchar_t* mdsFilePath, MdsSheet* outMds) {
     unsigned previousTrack = 0; int32_t previousEnd = INT32_MIN;
     for (unsigned s = 0; s < header->sessionCount; s++) {
         MdsSessionBlock session; memcpy(&session, data + header->sessionsOffset + s * 24, sizeof(session));
-        if (session.sessionNumber != s + 1 || session.sessionStartLba < previousEnd || session.sessionEndLba <= session.sessionStartLba || session.sessionEndLba <= 0 || !session.totalTracks || (dvd ? (session.leadInTracks != 0 && session.leadInTracks != 3) : session.leadInTracks >= session.totalTracks) || session.firstTrack != previousTrack + 1 || session.lastTrack < session.firstTrack || session.lastTrack > 99 || !mds_range(size, session.tracksOffset, (uint64_t)session.totalTracks * 80)) goto done;
+        bool compactCd = !dvd && header->sessionCount == 1 && session.totalTracks == 1 && session.leadInTracks == 3 && session.firstTrack == 1 && session.lastTrack == 1;
+        if (session.sessionNumber != s + 1 || session.sessionStartLba < previousEnd || session.sessionEndLba <= session.sessionStartLba || session.sessionEndLba <= 0 || !session.totalTracks || (dvd ? (session.leadInTracks != 0 && session.leadInTracks != 3) : !compactCd && session.leadInTracks >= session.totalTracks) || session.firstTrack != previousTrack + 1 || session.lastTrack < session.firstTrack || session.lastTrack > 99 || !mds_range(size, session.tracksOffset, (uint64_t)session.totalTracks * 80)) goto done;
         unsigned actual = 0, leadIn = 0; int64_t previousTrackEnd = session.sessionStartLba;
         for (unsigned i = 0; i < session.totalTracks; i++) {
             MdsTrackBlock track; memcpy(&track, data + session.tracksOffset + i * 80, sizeof(track));
@@ -480,8 +487,8 @@ bool imgburn_mds_parse(const wchar_t* mdsFilePath, MdsSheet* outMds) {
             if (available < (uint64_t)target->sectorCount * target->sectorSize) goto done;
             previousTrack = track.point; actual++;
         }
-        /* 原版DVD描述保留leadInTracks=3，但不会像CD那样附带三个TOC块。 */
-        if (actual != (unsigned)(session.lastTrack - session.firstTrack + 1) || (!dvd && leadIn != session.leadInTracks) || previousTrack != session.lastTrack) goto done;
+        /* 原版也接受单轨CD省略TOC块、保留leadInTracks=3的精简描述。 */
+        if (actual != (unsigned)(session.lastTrack - session.firstTrack + 1) || (!dvd && !compactCd && leadIn != session.leadInTracks) || previousTrack != session.lastTrack) goto done;
         result->sessions[s] = session; previousEnd = session.sessionEndLba;
     }
     result->totalSectors = (uint32_t)previousEnd;

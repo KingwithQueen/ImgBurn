@@ -215,6 +215,7 @@ typedef struct {
     uint8_t menuType;
     uint32_t firstIlvuEndSector;
     uint16_t angleBlockFirstCell;
+    uint32_t playbackMilliseconds;
 } DvdNavigationCell;
 
 typedef struct { DvdNavigationCell* cells; size_t cellCount; } DvdNavigation;
@@ -228,6 +229,16 @@ bool imgburn_dvd_layer_break_candidates(const ImageBuilder* builder, const DvdMe
 bool imgburn_dvd_layer_break_candidates_ex(const ImageBuilder* builder, const DvdMediaProfile* profile, unsigned options, DvdLayerBreakCandidate* candidates, size_t capacity, size_t* count);
 /* 选择后需重新计算布局；无效、过期的选择会在重新计算时失败。 */
 bool imgburn_dvd_select_layer_break(ImageBuilder* builder, const DvdMediaProfile* profile, const DvdLayerBreakCandidate* candidate, bool seamless);
+
+/* 预览只播放所选单元及其前一播放单元，不执行DVD虚拟机指令。 */
+typedef struct {
+    DvdNavigationCell cells[2];
+    unsigned cellCount, selectedIndex, width, height, aspectNumerator, aspectDenominator;
+    unsigned frameRateNumerator, frameRateDenominator;
+} DvdPreviewPlan;
+typedef bool (*DvdVideoWriteCallback)(const void* data, size_t bytes, void* context);
+bool imgburn_dvd_preview_plan(const ImageBuilder* builder, DvdNavigationDomain domain, unsigned titleSet, unsigned languageUnit, unsigned pgc, unsigned cell, DvdPreviewPlan* plan);
+bool imgburn_dvd_read_cell(const ImageBuilder* builder, const DvdNavigationCell* cell, DvdVideoWriteCallback write, void* context, uint64_t* bytesWritten);
 
 /* -------------------------------------------------------------------------
  * Image Engine APIs

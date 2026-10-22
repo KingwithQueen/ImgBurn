@@ -24,6 +24,7 @@
 #include "imgburn_vendor.h"
 #include "imgburn_image.h"
 #include "imgburn_changer.h"
+#include "imgburn_preview.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,6 +69,7 @@ static void print_usage(void) {
     printf("  mds <file.mds>                 Parse and display MDS metadata & Layer Break\n\n");
     printf("  dvd-layers <folder> [--show-interleaved] [--l0-min <n>] [--l0-max <n>] [--capacity <n>]\n");
     printf("                                 Inspect DVD navigation and layer break cells\n\n");
+    printf("  dvd-preview <folder> --title <VTS:PGC:Cell> | --menu <VTS:LU:PGC:Cell> [--ffmpeg <path>]\n");
     printf("Burning & Verification Commands:\n");
     printf("  burn <drive> <image> [--speed <Nx>] [--test] [--verify]\n");
     printf("                                 Burn disc image with real-time telemetry\n");
@@ -281,6 +283,18 @@ static int cmd_dvd_layers(int argc, char** argv) {
         }
     } else printf("Error: Invalid DVD navigation, media profile or no usable layer break cells.\n");
     bool success = candidates != NULL; free(candidates); image_builder_destroy(&b); return success ? 0 : 1;
+}
+
+static int cmd_dvd_preview(int argc, char** argv) {
+    if (argc < 5) return 1; wchar_t folder[MAX_PATH], ffmpeg[MAX_PATH]; const wchar_t* decoder = NULL; unsigned vts = 0, lu = 0, pgc = 0, cell = 0; DvdNavigationDomain domain; char extra;
+    if (!utf8_path(argv[2], folder, MAX_PATH)) return 1;
+    if (!_stricmp(argv[3], "--title") && sscanf(argv[4], "%3u:%4u:%3u%c", &vts, &pgc, &cell, &extra) == 3) domain = DVD_DOMAIN_TITLE;
+    else if (!_stricmp(argv[3], "--menu") && sscanf(argv[4], "%3u:%3u:%4u:%3u%c", &vts, &lu, &pgc, &cell, &extra) == 4) domain = vts ? DVD_DOMAIN_VTS_MENU : DVD_DOMAIN_VMG_MENU;
+    else return 1;
+    if (argc == 7 && !_stricmp(argv[5], "--ffmpeg") && utf8_path(argv[6], ffmpeg, MAX_PATH)) decoder = ffmpeg; else if (argc != 5) return 1;
+    ImageBuilder b; if (!image_builder_init(&b, "DVD_PREVIEW")) return 1; b.config.dvdVideoCompliance = true; b.config.fsTypes = FS_TYPE_ISO_UDF; DvdPreviewPlan plan;
+    bool ok = image_builder_add_folder(&b, folder, L"") && image_builder_calculate_layout(&b) && imgburn_dvd_preview_plan(&b, domain, vts, lu, pgc, cell, &plan);
+    int result = ok ? imgburn_dvd_preview_show(&b, &plan, decoder) : 1; if (result) printf("Error: DVD preview failed. Check the selected cell and FFmpeg decoder.\n"); image_builder_destroy(&b); return result;
 }
 
 static int cmd_build(int argc, char **argv) {
@@ -737,6 +751,8 @@ static int run_cli(int argc, char **argv) {
         return cmd_mds(argv[2]);
     } else if (_stricmp(cmd, "dvd-layers") == 0) {
         return cmd_dvd_layers(argc, argv);
+    } else if (_stricmp(cmd, "dvd-preview") == 0) {
+        return cmd_dvd_preview(argc, argv);
     } else if (_stricmp(cmd, "help") == 0 || _stricmp(cmd, "--help") == 0 || _stricmp(cmd, "-h") == 0) {
         print_usage();
         return 0;
