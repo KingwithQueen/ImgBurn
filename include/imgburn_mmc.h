@@ -56,9 +56,10 @@ typedef enum {
 typedef struct {
     MmcDiscStatus discStatus;
     bool isErasable;
-    uint8_t numSessions;
+    uint16_t numSessions;
     uint8_t firstTrack;
-    uint8_t lastTrack;
+    uint16_t lastTrack;
+    uint8_t lastSessionStatus;
     uint32_t leadInLba;
     uint32_t leadOutLba;
     MmcProfile currentProfile;
@@ -69,12 +70,13 @@ typedef struct {
  * @brief Track Information structure
  */
 typedef struct {
-    uint8_t trackNumber;
-    uint8_t sessionNumber;
+    uint16_t trackNumber;
+    uint16_t sessionNumber;
     bool isDamage;
     bool isCopy;
     bool isPacket;
     bool isBlank;
+    bool nwaValid;
     uint32_t trackStartLba;
     uint32_t nextWritableAddress;
     uint32_t freeBlocks;
@@ -130,7 +132,7 @@ bool mmc_synchronize_cache(OpticalDrive* drive);
 
 /**
  * @brief Close Track or Session (SCSI 0x5B)
- * @param closeType 1 = Close Track, 2 = Close Session / Finalize
+ * @param closeType 1 为关闭轨道，2 为关闭会话，6 为结束 DVD+R 光盘；含义需按介质区分。
  */
 bool mmc_close_track_session(OpticalDrive* drive, uint8_t closeType, uint16_t trackNumber);
 
@@ -150,9 +152,11 @@ bool mmc_load_eject(OpticalDrive* drive, bool eject);
  * @brief Reserve Track (SCSI 0x53)
  */
 bool mmc_reserve_track(OpticalDrive* drive, uint32_t reservationSizeLba);
+/* 刻录期间禁止手动弹出托盘，结束后恢复。 */
+bool mmc_prevent_removal(OpticalDrive* drive, bool prevent);
 
 /**
- * @brief Write 10/12-byte blocks (SCSI 0x2A WRITE 10 / 0xAA WRITE 12)
+ * @brief WRITE (10) 写入 2048 字节数据扇区，每次最多 32 扇区。
  */
 bool mmc_write_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, const void* buffer);
 

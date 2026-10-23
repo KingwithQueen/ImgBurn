@@ -143,12 +143,12 @@ static bool job_drive(GuiJob* job) {
         if (ok) job_text(job,L"校验通过：已比较 %u 扇区，仅检查可读性 %u 扇区。\r\n",job->comparedSectors,job->readableOnlySectors);
         else if (job->miscompares) job_text(job,L"发现 %u 个内容不一致的扇区。\r\n",job->miscompares);
     }
-    else if (mmc_read_capacity(&drive, &last, &bytes) && bytes == 2048) {
-        WIN32_FILE_ATTRIBUTE_DATA data; const wchar_t* image = job->sources[0].path; DiscImageType type = imgburn_image_detect_type(image);
-        if ((type == IMAGE_TYPE_ISO || type == IMAGE_TYPE_BIN) && GetFileAttributesExW(image, GetFileExInfoStandard, &data)) {
-            uint64_t length = (uint64_t)data.nFileSizeHigh << 32 | data.nFileSizeLow;
-            if (length && length % 2048 == 0 && length / 2048 <= (uint64_t)last + 1) { BurnConfig config = {0}; config.drive = &drive; config.imagePath = image; config.writeSpeedKbps = job->speed; config.verifyAfterWrite = job->verify; config.ringBufferBytes = 32 * 1024 * 1024; ok = pipeline_burn_image(&config, job_pipeline_progress, job); }
-        }
+    else if (job->operation == GUI_WRITE_DISC) {
+        BurnConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.writeSpeedKbps = job->speed; config.verifyAfterWrite = job->verify; config.ringBufferBytes = 32 * 1024 * 1024; config.cancelEvent = job->cancel; config.cycleTrayBeforeVerify = true;
+        ok = pipeline_burn_image(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
+        if (ok) job_text(job,L"DVD+R 数据镜像写入完成%ls。\r\n",job->verify ? L"并通过回读校验" : L"");
+        else if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前写入流程只支持空白单层 DVD+R 和 2048 字节 ISO/BIN 镜像。\r\n");
+        else if (job->error == ERROR_DISK_FULL) job_text(job,L"光盘的可写扇区不足。\r\n");
     }
     if (!ok && !job->error) job->error = drive.lastError ? drive.lastError : GetLastError();
     if (!ok && job->error == ERROR_ACCESS_DENIED && drive.lastError == ERROR_ACCESS_DENIED) job_text(job,drive.accessKnown && (drive.deviceAccess & (GENERIC_READ | GENERIC_WRITE)) != (GENERIC_READ | GENERIC_WRITE) ? L"未取得 SPTI 所需的设备读写访问权，请尝试以管理员身份运行。\r\n" : L"光驱或驱动程序拒绝了设备命令。\r\n");

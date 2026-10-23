@@ -108,14 +108,17 @@ bool mmc_read_disc_information(OpticalDrive* drive, MmcDiscInfo* outInfo) {
         return false;
     }
 
+    if (drive->lastTransferBytes != sizeof(buffer) || read_be16(buffer) < 32) { drive->lastError = ERROR_READ_FAULT; SetLastError(ERROR_READ_FAULT); return false; }
+
     /* Byte 2: Status bits */
     uint8_t discStatusBits = buffer[2] & 0x03;
     outInfo->discStatus = (MmcDiscStatus)discStatusBits;
     outInfo->isErasable = (buffer[2] & 0x10) != 0;
 
     outInfo->firstTrack = buffer[3];
-    outInfo->numSessions = buffer[4];
-    outInfo->lastTrack = buffer[6];
+    outInfo->numSessions = (uint16_t)((uint16_t)buffer[9] << 8 | buffer[4]);
+    outInfo->lastTrack = (uint16_t)((uint16_t)buffer[11] << 8 | buffer[6]);
+    outInfo->lastSessionStatus = (buffer[2] >> 2) & 3;
 
     /* Byte 16-19: Lead-in LBA */
     outInfo->leadInLba = read_be32(&buffer[16]);
@@ -123,6 +126,7 @@ bool mmc_read_disc_information(OpticalDrive* drive, MmcDiscInfo* outInfo) {
     outInfo->leadOutLba = read_be32(&buffer[20]);
 
     outInfo->currentProfile = mmc_get_current_profile(drive);
+    if (outInfo->currentProfile == MMC_PROFILE_UNKNOWN) { memset(outInfo,0,sizeof(*outInfo)); return false; }
     outInfo->profileName = mmc_get_profile_name(outInfo->currentProfile);
 
     return true;
@@ -143,12 +147,17 @@ bool mmc_read_track_information(OpticalDrive* drive, uint32_t lbaOrTrack, bool i
         return false;
     }
 
+    uint32_t declared = (uint32_t)read_be16(buffer) + 2, required = declared < sizeof(buffer) ? declared : sizeof(buffer);
+    if (drive->lastTransferBytes < required || declared < 32) { drive->lastError = ERROR_READ_FAULT; SetLastError(ERROR_READ_FAULT); return false; }
+
     outInfo->trackNumber = buffer[2];
     outInfo->sessionNumber = buffer[3];
+    if (drive->lastTransferBytes >= 34 && read_be16(buffer) >= 32) { outInfo->trackNumber |= (uint16_t)buffer[32] << 8; outInfo->sessionNumber |= (uint16_t)buffer[33] << 8; }
     outInfo->isDamage = (buffer[5] & 0x20) != 0;
     outInfo->isCopy = (buffer[5] & 0x10) != 0;
-    outInfo->isPacket = (buffer[6] & 0x01) != 0;
+    outInfo->isPacket = (buffer[6] & 0x20) != 0;
     outInfo->isBlank = (buffer[6] & 0x40) != 0;
+    outInfo->nwaValid = (buffer[7] & 0x01) != 0;
 
     outInfo->trackStartLba = read_be32(&buffer[8]);
     outInfo->nextWritableAddress = read_be32(&buffer[12]);
@@ -176,10 +185,7 @@ bool mmc_synchronize_cache(OpticalDrive* drive) {
 bool mmc_close_track_session(OpticalDrive* drive, uint8_t closeType, uint16_t trackNumber) {
     uint8_t cdb[10] = { 0 };
     cdb[0] = 0x5B; /* CLOSE TRACK SESSION */
-    /* Function field:
-     * 001b = Close Track
-     * 010b = Close Session / Finalize
-     */
+    /* 关闭功能由调用者按介质选择，DVD+R 的会话关闭和光盘结束使用不同值。 */
     cdb[2] = closeType & 0x07;
     write_be16(&cdb[4], trackNumber);
 
@@ -215,8 +221,10 @@ bool mmc_reserve_track(OpticalDrive* drive, uint32_t reservationSizeLba) {
     return spti_send_cdb(drive, cdb, 10, NULL, 0, true, 15);
 }
 
+bool mmc_prevent_removal(OpticalDrive* drive, bool prevent) { uint8_t cdb[6] = {0x1E}; cdb[4] = prevent ? 1 : 0; return spti_send_cdb(drive,cdb,6,NULL,0,true,10); }
+
 bool mmc_write_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, const void* buffer) {
-    if (!buffer || blockCount == 0) return false;
+    if (!buffer || blockCount == 0 || blockCount > 32 || startLba > UINT32_MAX - ((uint32_t)blockCount - 1)) { if (drive) drive->lastError = ERROR_INVALID_PARAMETER; SetLastError(ERROR_INVALID_PARAMETER); return false; }
 
     uint8_t cdb[10] = { 0 };
     cdb[0] = 0x2A; /* WRITE (10) */
@@ -224,7 +232,8 @@ bool mmc_write_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCoun
     write_be16(&cdb[7], blockCount);
 
     uint32_t transferBytes = blockCount * 2048; /* Standard optical block size = 2048 */
-    return spti_send_cdb(drive, cdb, 10, (void*)buffer, transferBytes, false, 30);
+    if (!spti_send_cdb(drive,cdb,10,(void*)buffer,transferBytes,false,30)) return false;
+    if (drive->lastTransferBytes != transferBytes) { drive->lastError = ERROR_WRITE_FAULT; SetLastError(ERROR_WRITE_FAULT); return false; } return true;
 }
 
 bool mmc_read_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, void* buffer) {

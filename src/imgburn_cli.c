@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#include <math.h>
 
 /* 内部路径统一使用UTF-8；过长或非法参数不得留下未初始化的宽字符缓冲区。 */
 static bool utf8_path(const char* input, wchar_t* output, int capacity) {
@@ -77,7 +78,7 @@ static void print_usage(void) {
     printf("                                 Inspect one sector as hexadecimal and ASCII\n");
     printf("  read <drive> <out.iso|out.cue> [--retries <0..20>] [--replace]\n");
     printf("                                 Read data ISO or raw CD BIN/CUE with Q indexes\n");
-    printf("  burn <drive> <image> [--speed <Nx>] [--test] [--verify]\n");
+    printf("  burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle]\n");
     printf("                                 Burn disc image with real-time telemetry\n");
     printf("  verify <drive> <image|--readable> [--retries <0..20>] [--compare-audio]\n");
     printf("                                 Verify data ISO/BIN or raw CD CUE; audio defaults to readability\n\n");
@@ -467,14 +468,17 @@ static int cmd_burn(int argc, char **argv) {
     const char *imageArg = argv[3];
     bool testMode = false;
     bool verifyAfter = false;
-    uint32_t speed = 0;
+    double speed = 0; bool reserve = false, cycle = true;
 
     for (int i = 4; i < argc; i++) {
         if (_stricmp(argv[i], "--test") == 0) testMode = true;
         else if (_stricmp(argv[i], "--verify") == 0) verifyAfter = true;
+        else if (_stricmp(argv[i], "--reserve") == 0) reserve = true;
+        else if (_stricmp(argv[i], "--no-cycle") == 0) cycle = false;
         else if (_stricmp(argv[i], "--speed") == 0 && i + 1 < argc) {
-            speed = (uint32_t)atoi(argv[++i]);
-        }
+            const char* value = argv[++i]; if (!_stricmp(value,"MAX")) speed = 0;
+            else { char* end; speed = strtod(value,&end); if ((*end == 'x' || *end == 'X') && !end[1]) end++; if (!value[0] || *end || !isfinite(speed) || speed < 1 || speed * 1385 + 0.5 >= 65535) { printf("Error: Invalid DVD write speed.\n"); return 1; } }
+        } else { printf("Error: Unknown or incomplete burn option.\n"); return 1; }
     }
 
     if (testMode) { printf("Error: Device test-write mode is not implemented yet.\n"); return 1; }
@@ -483,7 +487,7 @@ static int cmd_burn(int argc, char **argv) {
 
     wprintf(L"Target Drive: %ls\n", drivePath);
     wprintf(L"Source Image: %ls\n", imagePath);
-    printf("Options: TestMode=%s, VerifyAfterBurn=%s, Speed=%ux\n\n",
+    printf("Options: TestMode=%s, VerifyAfterBurn=%s, Speed=%.2fx (0=MAX)\n\n",
            testMode ? "YES" : "NO", verifyAfter ? "YES" : "NO", speed);
 
     OpticalDrive drive;
@@ -498,17 +502,21 @@ static int cmd_burn(int argc, char **argv) {
     config.imagePath = imagePath;
     config.testMode = testMode;
     config.verifyAfterWrite = verifyAfter;
-    config.writeSpeedKbps = (speed > 0) ? (uint16_t)(speed * 1385) : 0xFFFF;
+    config.writeSpeedKbps = speed > 0 ? (uint16_t)(speed * 1385 + 0.5) : 0xFFFF;
     config.ringBufferBytes = 32 * 1024 * 1024;
+    config.reserveTrack = reserve; config.cycleTrayBeforeVerify = cycle;
+    HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; } config.cancelEvent = cancel;
+    AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock); bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
 
     printf("Starting burn operation...\n");
     bool ok = pipeline_burn_image(&config, on_cli_burn_progress, NULL);
+    DWORD error = GetLastError(); if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock);
     printf("\n");
 
     if (ok) {
         printf("Burn operation completed successfully!\n");
     } else {
-        printf("Burn operation failed.\n");
+        printf("Burn operation failed (error %lu).\n",error);
     }
 
     spti_close_drive(&drive);

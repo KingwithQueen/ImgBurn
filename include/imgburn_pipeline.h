@@ -70,6 +70,9 @@ typedef struct {
     bool verifyAfterWrite;
     bool ejectWhenDone;
     size_t ringBufferBytes;         /* e.g. 32 MB or 64 MB */
+    HANDLE cancelEvent;             /* 借用的取消事件；不打断设备正在执行的命令。 */
+    bool reserveTrack;              /* DVD+R 的可选轨道预留，默认关闭。 */
+    bool cycleTrayBeforeVerify;     /* 写后校验前按原版默认流程重新装载介质。 */
 } BurnConfig;
 
 /**

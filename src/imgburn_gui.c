@@ -264,8 +264,8 @@ static bool gui_launch(GuiWindow* ui, GuiJob* job) {
     if (!job || ui->job) { imgburn_gui_job_free(job); return false; }
     ui->job = job; job->thread = CreateThread(NULL, 0, imgburn_gui_job_run, job, 0, NULL);
     if (!job->thread) { ui->job = NULL; imgburn_gui_job_free(job); return false; }
-    if (ui->go) EnableWindow(ui->go, FALSE); if (ui->cancel) EnableWindow(ui->cancel, job->operation == GUI_CALCULATE || job->operation == GUI_BUILD_IMAGE || job->operation == GUI_CREATE_CUE || job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC);
-    if (job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC) { EnableWindow(ui->destination,FALSE); EnableWindow(ui->drives,FALSE); }
+    if (ui->go) EnableWindow(ui->go, FALSE); if (ui->cancel) EnableWindow(ui->cancel, job->operation == GUI_CALCULATE || job->operation == GUI_BUILD_IMAGE || job->operation == GUI_CREATE_CUE || job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC);
+    if (job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC) { EnableWindow(ui->destination,FALSE); EnableWindow(ui->drives,FALSE); }
     gui_status(ui, L"正在执行..."); gui_menu(ui); return true;
 }
 
@@ -377,7 +377,7 @@ static void gui_ez_draw(GuiWindow* ui, DRAWITEMSTRUCT* draw) {
 static void gui_complete(GuiWindow* ui, GuiJob* job) {
     if (ui->job != job) return; WaitForSingleObject(job->thread, INFINITE); ui->job = NULL;
     if (job->operation == GUI_DRIVE_INFO) ui->mediaReady = job->mediaReady;
-    if (job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC) { EnableWindow(ui->destination,TRUE); EnableWindow(ui->drives,TRUE); }
+    if (job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC) { EnableWindow(ui->destination,TRUE); EnableWindow(ui->drives,TRUE); }
     if (ui->progress) SendMessageW(ui->progress, PBM_SETPOS, job->succeeded && job->operation != GUI_DRIVE_INFO ? 100 : 0, 0); if (ui->info) SetWindowTextW(ui->info,job->result); gui_log(ui,job->result);
     const wchar_t* completed = job->operation == GUI_DRIVE_INFO ? (job->mediaReady ? L"介质已就绪" : L"介质未就绪或未插入光盘") : job->operation == GUI_CALCULATE ? L"计算完成" : job->operation == GUI_INSPECT ? L"镜像信息已载入" : L"操作成功完成";
     gui_status(ui, job->succeeded ? completed : job->error == ERROR_CANCELLED ? L"操作已取消" : L"操作失败；请查看日志");
