@@ -266,6 +266,10 @@ DiscImageType imgburn_image_detect_type(const wchar_t *filePath);
  */
 bool imgburn_cue_parse(const wchar_t *cueFilePath, CueSheet *outCue);
 
+/* 无解码缓存的音源由调用者提供真实PCM字节数，允许写入与校验复用可取消的已锁定来源。 */
+typedef bool (*CueSourceResolver)(const wchar_t* path, CueFileType type, uint64_t* pcmBytes, void* context);
+bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourceResolver resolver, void* context);
+
 /**
  * @brief Parse an Alcohol / ImgBurn .MDS Media Descriptor file
  * @param mdsFilePath Path to .mds file

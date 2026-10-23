@@ -51,6 +51,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\imgburn_audio.c" />
+    <ClCompile Include="src\imgburn_audio_source.c" />
     <ClCompile Include="src\imgburn_cd_sector.c" />
     <ClCompile Include="src\imgburn_changer.c" />
     <ClCompile Include="src\imgburn_cli.c" />
@@ -75,6 +76,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\imgburn_audio.h" />
+    <ClInclude Include="include\imgburn_audio_source.h" />
     <ClInclude Include="include\imgburn_cd_sector.h" />
     <ClInclude Include="include\imgburn_changer.h" />
     <ClInclude Include="include\imgburn_fs.h" />

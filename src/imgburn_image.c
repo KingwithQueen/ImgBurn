@@ -197,7 +197,7 @@ static bool cue_path(const wchar_t* descriptor, const char* utf8, wchar_t* resul
     count = GetFullPathNameW(combined, MAX_PATH, result, NULL); return count && count < MAX_PATH;
 }
 
-bool imgburn_cue_parse(const wchar_t* cueFilePath, CueSheet* outCue) {
+bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourceResolver resolver, void* context) {
     if (!outCue) return false;
     memset(outCue, 0, sizeof(*outCue));
     if (!cueFilePath || wcslen(cueFilePath) >= MAX_PATH) return false;
@@ -326,6 +326,8 @@ bool imgburn_cue_parse(const wchar_t* cueFilePath, CueSheet* outCue) {
             /* 原版把此REM作为解码结果缓存，载入时不重新解码或要求与实际长度相等。 */
             DWORD attributes = GetFileAttributesW(initial->sourceFilePath); if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) goto done;
             sourceBytes = (uint64_t)cached * 2352;
+        } else if (resolver && initial->sourceType >= CUE_FILE_WAVE) {
+            if (!resolver(initial->sourceFilePath,initial->sourceType,&sourceBytes,context)) goto done;
         } else if (!cue_source_bytes(initial->sourceFilePath, initial->sourceType, &sourceBytes)) goto done;
         uint64_t usedBytes = 0, gaps = 0, sourceFrames = 0; uint32_t fileEnd = 0;
         for (int i = first; i < last; i++) {
@@ -378,8 +380,10 @@ bool imgburn_cue_parse(const wchar_t* cueFilePath, CueSheet* outCue) {
     }
     sheet->totalSectors = (uint32_t)total; memcpy(outCue, sheet, sizeof(*sheet)); ok = true;
 done:
-    free(text); free(sheet); fclose(file); return ok;
+    { DWORD error = GetLastError(); free(text); free(sheet); fclose(file); SetLastError(error); return ok; }
 }
+
+bool imgburn_cue_parse(const wchar_t* cueFilePath, CueSheet* outCue) { return imgburn_cue_parse_ex(cueFilePath,outCue,NULL,NULL); }
 
 /* -------------------------------------------------------------------------
  * Media Descriptor Sheet (.MDS) Parser & Creator
