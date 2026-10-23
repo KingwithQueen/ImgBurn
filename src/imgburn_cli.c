@@ -72,6 +72,8 @@ static void print_usage(void) {
     printf("                                 Inspect DVD navigation and layer break cells\n\n");
     printf("  dvd-preview <folder> --title <VTS:PGC:Cell> | --menu <VTS:LU:PGC:Cell> [--ffmpeg <path>]\n");
     printf("Burning & Verification Commands:\n");
+    printf("  read <drive> <out.iso> [--retries <0..20>] [--replace]\n");
+    printf("                                 Read a 2048-byte data disc to an ISO image\n");
     printf("  burn <drive> <image> [--speed <Nx>] [--test] [--verify]\n");
     printf("                                 Burn disc image with real-time telemetry\n");
     printf("  verify <drive> <image>         Compare physical disc against image file\n\n");
@@ -424,6 +426,31 @@ static void on_cli_burn_progress(const PipelineStats* p, void* userData) {
     fflush(stdout);
 }
 
+/* Read 与界面共用同一数据读取流程；显式参数控制重试和目标替换。 */
+static HANDLE cliReadCancel;
+static SRWLOCK cliReadLock = SRWLOCK_INIT;
+static BOOL WINAPI cli_read_control(DWORD type) {
+    if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT) return FALSE;
+    AcquireSRWLockShared(&cliReadLock); BOOL handled = cliReadCancel != NULL; if (handled) SetEvent(cliReadCancel); ReleaseSRWLockShared(&cliReadLock); return handled;
+}
+static int cmd_read(int argc, char** argv) {
+    if (argc < 4) { printf("Usage: imgburn read <drive> <out.iso> [--retries <0..20>] [--replace]\n"); return 1; }
+    ReadConfig config = {0}; config.retryCount = 20;
+    for (int i = 4; i < argc; i++) {
+        if (!_stricmp(argv[i],"--replace")) config.replaceExisting = true;
+        else if (!_stricmp(argv[i],"--retries") && i + 1 < argc) { char* end; const char* value = argv[++i]; unsigned long n = strtoul(value,&end,10); if (!value[0] || *end || n > 20 || value[0] == '-') { printf("Error: Retry count must be 0..20.\n"); return 1; } config.retryCount = (unsigned)n; }
+        else { printf("Error: Unknown or incomplete read option: %s\n",argv[i]); return 1; }
+    }
+    wchar_t device[MAX_PATH], image[MAX_PATH]; if (!parse_drive_path(argv[2],device,MAX_PATH) || !utf8_path(argv[3],image,MAX_PATH)) return 1;
+    OpticalDrive drive; if (!spti_open_drive(&drive,device,false)) { printf("Error: Cannot open source drive (%lu).\n",drive.lastError); return 1; }
+    HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; }
+    AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock);
+    bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
+    config.drive = &drive; config.imagePath = image; config.cancelEvent = cancel; bool ok = pipeline_read_disc(&config,on_cli_burn_progress,NULL); DWORD error = GetLastError();
+    if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock); spti_close_drive(&drive);
+    printf(ok ? "\nDisc image read successfully.\n" : "\nDisc read failed (error %lu).\n",error); return ok ? 0 : 1;
+}
+
 static int cmd_burn(int argc, char **argv) {
     if (argc < 4) {
         printf("Usage: imgburn burn <drive> <image> [--speed <Nx>] [--test] [--verify]\n");
@@ -738,6 +765,8 @@ static int run_cli(int argc, char **argv) {
         return cmd_build(argc, argv);
     } else if (_stricmp(cmd, "burn") == 0) {
         return cmd_burn(argc, argv);
+    } else if (_stricmp(cmd, "read") == 0) {
+        return cmd_read(argc,argv);
     } else if (_stricmp(cmd, "verify") == 0) {
         return cmd_verify(argc, argv);
     } else if (_stricmp(cmd, "booktype") == 0) {

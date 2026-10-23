@@ -161,6 +161,9 @@ bool mmc_write_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCoun
  */
 bool mmc_read_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, void* buffer);
 
+/* 核对单会话、单轨 MODE1 CD 的 TOC、结束位置及原始扇区头。 */
+bool mmc_check_iso_cd(OpticalDrive* drive, uint32_t sectors);
+
 #ifdef __cplusplus
 }
 #endif

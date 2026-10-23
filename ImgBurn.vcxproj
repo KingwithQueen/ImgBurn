@@ -60,6 +60,7 @@
     <ClCompile Include="src\imgburn_mmc.c" />
     <ClCompile Include="src\imgburn_pipeline.c" />
     <ClCompile Include="src\imgburn_preview.c" />
+    <ClCompile Include="src\imgburn_read.c" />
     <ClCompile Include="src\imgburn_ringbuffer.c" />
     <ClCompile Include="src\imgburn_spti.c" />
     <ClCompile Include="src\imgburn_udf.c" />

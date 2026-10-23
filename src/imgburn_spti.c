@@ -422,6 +422,7 @@ bool spti_send_cdb(OpticalDrive* drive,
                    uint32_t dataLength,
                    bool isDataIn,
                    uint32_t timeoutSeconds) {
+    if (drive) drive->lastTransferBytes = 0;
     if (!drive || !drive->hDevice || drive->hDevice == INVALID_HANDLE_VALUE || !cdb ||
         (cdbLength != 6 && cdbLength != 10 && cdbLength != 12 && cdbLength != 16) || (dataLength > 0 && !dataBuffer)) {
         if (drive) drive->lastError = ERROR_INVALID_PARAMETER;
@@ -465,11 +466,13 @@ bool spti_send_cdb(OpticalDrive* drive,
         if (sptdwb.sptd.SenseInfoLength > 0) {
             parse_sense_data(drive, sptdwb.SenseBuf, sptdwb.sptd.SenseInfoLength);
         }
-        return false;
+        drive->lastError = ERROR_IO_DEVICE; SetLastError(ERROR_IO_DEVICE); return false;
     }
 
     /* Success: clear last sense */
     memset(&drive->lastSense, 0, sizeof(drive->lastSense));
+    drive->lastTransferBytes = sptdwb.sptd.DataTransferLength;
+    drive->lastError = ERROR_SUCCESS;
     return true;
 }
 

@@ -128,6 +128,12 @@ static bool job_drive(GuiJob* job) {
         if (ok) { char text[29]; memcpy(text, inquiry + 8, 28); text[28] = 0; wchar_t wide[29]; MultiByteToWideChar(CP_ACP, 0, text, -1, wide, 29); job_text(job, L"%ls\r\n%ls\r\n", wide, ready ? L"介质已就绪" : L"介质未就绪或未插入光盘"); }
         if (ready && mmc_read_capacity(&drive, &last, &bytes)) job_text(job, L"容量：%llu 扇区，每扇区 %u 字节\r\n", (uint64_t)last + 1, bytes);
     } else if (!ready) SetLastError(ERROR_NOT_READY);
+    else if (job->operation == GUI_READ_DISC) {
+        ReadConfig config = {0}; config.drive = &drive; config.imagePath = job->destination; config.cancelEvent = job->cancel; config.retryCount = 20; config.replaceExisting = job->replaceExisting;
+        ok = pipeline_read_disc(&config,job_pipeline_progress,job);
+        if (ok) job_text(job,L"光盘镜像已读取：%ls\r\n",job->destination);
+        else { job->error = GetLastError(); if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前光盘布局不能保存为 ISO 数据镜像。\r\n"); else if (job->error == ERROR_DISK_FULL) job_text(job,L"目标位置的可用空间不足。\r\n"); }
+    }
     else if (job->operation == GUI_VERIFY_DISC) ok = pipeline_verify_disc(&drive, job->sources[0].path, job_pipeline_progress, job);
     else if (mmc_read_capacity(&drive, &last, &bytes) && bytes == 2048) {
         WIN32_FILE_ATTRIBUTE_DATA data; const wchar_t* image = job->sources[0].path; DiscImageType type = imgburn_image_detect_type(image);
@@ -136,7 +142,7 @@ static bool job_drive(GuiJob* job) {
             if (length && length % 2048 == 0 && length / 2048 <= (uint64_t)last + 1) { BurnConfig config = {0}; config.drive = &drive; config.imagePath = image; config.writeSpeedKbps = job->speed; config.verifyAfterWrite = job->verify; config.ringBufferBytes = 32 * 1024 * 1024; ok = pipeline_burn_image(&config, job_pipeline_progress, job); }
         }
     }
-    if (!ok) job->error = drive.lastError ? drive.lastError : GetLastError(); spti_close_drive(&drive); return ok;
+    if (!ok && !job->error) job->error = drive.lastError ? drive.lastError : GetLastError(); spti_close_drive(&drive); return ok;
 }
 
 DWORD WINAPI imgburn_gui_job_run(void* context) {
@@ -149,7 +155,7 @@ DWORD WINAPI imgburn_gui_job_run(void* context) {
         case GUI_INSPECT: job->succeeded = job_inspect(job); break;
         case GUI_CREATE_CUE: job->succeeded = job_cue(job); break;
         case GUI_CREATE_MDS: job->succeeded = job_mds(job); break;
-        case GUI_DRIVE_INFO: case GUI_VERIFY_DISC: case GUI_WRITE_DISC: job->succeeded = job_drive(job); break;
+        case GUI_DRIVE_INFO: case GUI_VERIFY_DISC: case GUI_WRITE_DISC: case GUI_READ_DISC: job->succeeded = job_drive(job); break;
         case GUI_DVD_INFO: job->dvdVideo = true; job->succeeded = job_prepare(job) && imgburn_dvd_read_navigation(&job->builder, &job->navigation); break;
         case GUI_DVD_PREVIEW: job->succeeded = imgburn_dvd_preview_show(&job->builder, &job->preview, NULL) == 0; break;
     }

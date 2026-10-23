@@ -87,6 +87,7 @@ bool mmc_read_capacity(OpticalDrive* drive, uint32_t* outLastLba, uint32_t* outB
     if (!spti_send_cdb(drive, cdb, 10, buffer, 8, true, 10)) {
         return false;
     }
+    if (drive->lastTransferBytes != sizeof(buffer)) { drive->lastError = ERROR_READ_FAULT; SetLastError(ERROR_READ_FAULT); return false; }
 
     if (outLastLba) *outLastLba = read_be32(&buffer[0]);
     if (outBlockSize) *outBlockSize = read_be32(&buffer[4]);
@@ -226,6 +227,7 @@ bool mmc_write_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCoun
 }
 
 bool mmc_read_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, void* buffer) {
+    if (!buffer || !blockCount || startLba > UINT32_MAX - ((uint32_t)blockCount - 1)) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
     if (!buffer || blockCount == 0) return false;
 
     uint8_t cdb[10] = { 0 };
@@ -234,5 +236,25 @@ bool mmc_read_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount
     write_be16(&cdb[7], blockCount);
 
     uint32_t transferBytes = blockCount * 2048;
-    return spti_send_cdb(drive, cdb, 10, buffer, transferBytes, true, 30);
+    if (!spti_send_cdb(drive, cdb, 10, buffer, transferBytes, true, 30)) return false;
+    if (drive->lastTransferBytes != transferBytes) { drive->lastError = ERROR_READ_FAULT; SetLastError(ERROR_READ_FAULT); return false; }
+    return true;
+}
+
+/* ISO 读取只接收一个完整会话中的单条 MODE1 数据轨；其他 CD 需要保留原始轨道布局。 */
+bool mmc_check_iso_cd(OpticalDrive* drive, uint32_t sectors) {
+    uint8_t cdb[12] = {0}, session[12] = {0}, toc[20] = {0}, sector[2352] = {0};
+    cdb[0] = 0x43; cdb[2] = 1; cdb[8] = sizeof(session);
+    if (!spti_send_cdb(drive,cdb,10,session,sizeof(session),true,10)) return false;
+    if (drive->lastTransferBytes != sizeof(session) || read_be16(session) != 10 || session[2] != 1 || session[3] != 1) goto unsupported;
+    cdb[2] = 0; cdb[8] = sizeof(toc);
+    if (!spti_send_cdb(drive,cdb,10,toc,sizeof(toc),true,10)) return false;
+    if (drive->lastTransferBytes != sizeof(toc) || read_be16(toc) != 18 || toc[2] != 1 || toc[3] != 1 || toc[6] != 1 || !(toc[5] & 4) || read_be32(toc + 8) || toc[14] != 0xAA || read_be32(toc + 16) != sectors) goto unsupported;
+    memset(cdb,0,sizeof(cdb)); cdb[0] = 0xBE; cdb[8] = 1; cdb[9] = 0xF8;
+    if (!spti_send_cdb(drive,cdb,12,sector,sizeof(sector),true,30)) return false;
+    if (drive->lastTransferBytes != sizeof(sector) || sector[0] || sector[11] || sector[15] != 1) goto unsupported;
+    for (unsigned i = 1; i < 11; i++) if (sector[i] != 0xFF) goto unsupported;
+    return true;
+unsupported:
+    drive->lastError = ERROR_NOT_SUPPORTED; SetLastError(ERROR_NOT_SUPPORTED); return false;
 }

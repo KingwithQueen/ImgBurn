@@ -29,7 +29,8 @@ typedef enum {
     PIPELINE_STATE_VERIFYING,
     PIPELINE_STATE_COMPLETED,
     PIPELINE_STATE_ABORTED,
-    PIPELINE_STATE_FAILED
+    PIPELINE_STATE_FAILED,
+    PIPELINE_STATE_READING
 } PipelineState;
 
 /**
@@ -91,6 +92,17 @@ bool pipeline_verify_disc(OpticalDrive* drive,
                           const wchar_t* sourceImagePath,
                           PipelineProgressCallback callback,
                           void* userData);
+
+/* Read 主体：完整读取 2048 字节数据扇区，失败或取消时保护既有目标。 */
+typedef struct {
+    OpticalDrive* drive;
+    const wchar_t* imagePath;
+    HANDLE cancelEvent;            /* 借用的事件；调用者负责关闭。 */
+    unsigned retryCount;            /* 单扇区额外重试次数，最多 20 次。 */
+    bool replaceExisting;
+} ReadConfig;
+
+bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callback, void* userData);
 
 #ifdef __cplusplus
 }

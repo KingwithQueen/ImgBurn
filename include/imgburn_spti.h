@@ -61,6 +61,7 @@ typedef struct {
     bool isMcnDisabled;             /* Media Change Notification disabled */
     ScsiSenseResult lastSense;
     uint32_t lastError;
+    uint32_t lastTransferBytes;     /* 最近一次成功命令实际传输的字节数。 */
 } OpticalDrive;
 
 /**
