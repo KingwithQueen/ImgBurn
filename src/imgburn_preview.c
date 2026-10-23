@@ -34,7 +34,60 @@ done:
     if (!created) { if (*output) { CloseHandle(*output); *output = NULL; } if (errors && *errors) { CloseHandle(*errors); *errors = NULL; } } return created;
 }
 
-typedef struct { HANDLE pipe, thread, changed; CRITICAL_SECTION lock; DvdPreviewFrameInfo frames[64]; bool ended; } PreviewMetadata;
+typedef struct { HANDLE pipe, thread, changed; CRITICAL_SECTION lock; DvdPreviewFrameInfo frames[64]; uint8_t* yuv; bool ended; } PreviewMetadata;
+
+static unsigned preview_chroma_row(const uint8_t* plane, unsigned stride, unsigned rows, int row, unsigned x) {
+    if (row < 0) row = 0; if ((unsigned)row >= rows) row = (int)rows - 1; return plane[(size_t)row * stride + x];
+}
+
+static unsigned preview_chroma_sample(const uint8_t* plane, unsigned width, unsigned height, unsigned x, unsigned y, bool interlaced) {
+    unsigned stride = width / 2, rows = height / 2; int row = (int)(y / 2);
+    unsigned current = preview_chroma_row(plane, stride, rows, row, x);
+    if (!interlaced) {
+        if (!y || y + 1 == height) return current;
+        int other = y == 1 ? 1 : row - 1;
+        return (3 * current + preview_chroma_row(plane, stride, rows, other, x) + 2) / 4;
+    }
+    /* 按原版分别重建两场的色度，首尾保留其边缘采样规则。 */
+    int base = (int)(y / 4) * 2; unsigned a, c;
+    switch (y % 4) {
+        case 0: return y ? (7 * current + preview_chroma_row(plane, stride, rows, row - 2, x) + 4) / 8 : current;
+        case 1:
+            a = preview_chroma_row(plane, stride, rows, base ? base - 1 : 0, x); c = preview_chroma_row(plane, stride, rows, base + 1, x); return (3 * a + 5 * c + 4) / 8;
+        case 2:
+            a = preview_chroma_row(plane, stride, rows, base, x); return y + 2 == height ? a : (5 * a + 3 * preview_chroma_row(plane, stride, rows, base + 2, x) + 4) / 8;
+        default:
+            c = preview_chroma_row(plane, stride, rows, y + 1 == height ? row - 1 : row + 2, x); return (7 * current + c + 4) / 8;
+    }
+}
+
+static uint8_t preview_rgb_byte(int value) { return value <= 0 ? 0 : value >= 255 * 8192 ? 255 : (uint8_t)(value / 8192); }
+
+static void preview_convert_frame(const uint8_t* yuv, uint8_t* bgr, unsigned width, unsigned height, bool interlaced) {
+    size_t pixels = (size_t)width * height; const uint8_t* planes[] = {yuv + pixels,yuv + pixels + pixels / 4};
+    uint8_t chroma[2][720];
+    for (unsigned y = 0; y < height; y++) {
+        for (unsigned c = 0; c < 2; c++) for (unsigned x = 0; x < width; x += 2) {
+            unsigned a = preview_chroma_sample(planes[c], width, height, x / 2, y, interlaced); chroma[c][x] = (uint8_t)a;
+            unsigned next = x + 16 < width ? preview_chroma_sample(planes[c], width, height, x / 2 + 1, y, interlaced) : a;
+            chroma[c][x + 1] = (uint8_t)((a + next + 1) / 2);
+        }
+        for (unsigned x = 0; x < width; x += 4) {
+            uint8_t values[4][3], carry[4][3];
+            for (unsigned i = 0; i < 4; i++) {
+                int u = chroma[0][x + i] - 128, v = chroma[1][x + i] - 128, luma = (yuv[(size_t)y * width + x + i] - 16) * 9539 + 4096;
+                int rgb[] = {luma + 16525 * u,luma - 3209 * u - 6660 * v,luma + 13075 * v};
+                for (unsigned c = 0; c < 3; c++) { values[i][c] = preview_rgb_byte(rgb[c]); carry[i][c] = rgb[c] < 0 ? 7 : 0; }
+            }
+            /* 保留原版四像素打包时的低位合并结果，不能用常规钳位改变同帧BMP。 */
+            values[0][0] |= carry[0][0]; values[0][2] |= carry[0][2];
+            values[1][0] |= carry[0][0] | carry[0][1]; values[1][2] |= carry[0][2];
+            values[2][0] |= carry[2][0] | carry[1][1]; values[2][2] |= carry[2][2] | carry[2][1];
+            values[3][0] |= carry[2][0] | carry[2][1]; values[3][2] |= carry[2][2];
+            memcpy(bgr + ((size_t)y * width + x) * 3, values, sizeof(values));
+        }
+    }
+}
 
 static void preview_log_line(PreviewMetadata* m, char* line) {
     char* n = strstr(line, " n:"); char* pts = strstr(line, " pts:"); char* pos = strstr(line, " pos:"); char* type = strstr(line, " type:");
@@ -56,11 +109,12 @@ static DWORD WINAPI preview_log_worker(void* context) {
 
 bool imgburn_frame_decoder_open(DvdFrameDecoder* d, const wchar_t* video, const wchar_t* ffmpeg, unsigned width, unsigned height, uint64_t firstFrame) {
     if (!d) return false; memset(d, 0, sizeof(*d)); d->exitCode = STILL_ACTIVE;
-    if (!video || !width || width > 720 || width % 4 || !height || height > 576 || firstFrame > UINT32_MAX || wcschr(video, L'"')) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    if (!video || !width || width > 720 || width % 4 || !height || height > 576 || height % 2 || firstFrame > UINT32_MAX || wcschr(video, L'"')) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
     wchar_t executable[MAX_PATH], command[2048]; if (!preview_ffmpeg(ffmpeg, executable)) { SetLastError(ERROR_FILE_NOT_FOUND); return false; }
-    if (swprintf(command, 2048, L"\"%ls\" -nostdin -v info -threads 1 -filter_threads 1 -copyts -i \"%ls\" -map 0:v:0 -threads:v 1 -vf \"select=gte(n\\,%llu),scale=%u:%u,settb=1/90000,showinfo\" -vsync 0 -an -sn -dn -pix_fmt bgr24 -flush_packets 1 -f rawvideo pipe:1", executable, video, firstFrame, width, height) < 0) return false;
+    if (swprintf(command, 2048, L"\"%ls\" -nostdin -v info -threads 1 -filter_threads 1 -copyts -i \"%ls\" -map 0:v:0 -threads:v 1 -vf \"select=gte(n\\,%llu),scale=%u:%u,format=yuv420p,settb=1/90000,showinfo\" -vsync 0 -an -sn -dn -pix_fmt yuv420p -flush_packets 1 -f rawvideo pipe:1", executable, video, firstFrame, width, height) < 0) return false;
     PreviewMetadata* m = (PreviewMetadata*)calloc(1, sizeof(*m)); if (!m) return false; InitializeCriticalSection(&m->lock); d->metadata = m; m->changed = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (!m->changed || !preview_process(executable, command, &d->process, &d->output, &m->pipe)) goto failed;
+    m->yuv = (uint8_t*)malloc((size_t)width * height * 3 / 2);
+    if (!m->yuv || !m->changed || !preview_process(executable, command, &d->process, &d->output, &m->pipe)) goto failed;
     m->thread = CreateThread(NULL, 0, preview_log_worker, m, 0, NULL); if (!m->thread) goto failed;
     d->width = width; d->height = height; return true;
 failed:
@@ -69,20 +123,20 @@ failed:
 
 bool imgburn_frame_decoder_read(DvdFrameDecoder* d, void* bgr, size_t capacity) {
     if (!d || !d->process || !bgr || d->ended) return false;
-    size_t expected = (size_t)d->width * d->height * 3, used = 0;
-    if (capacity < expected) { d->failed = true; SetLastError(ERROR_INSUFFICIENT_BUFFER); return false; }
+    PreviewMetadata* m = (PreviewMetadata*)d->metadata; size_t expected = (size_t)d->width * d->height * 3 / 2, used = 0;
+    if (capacity < (size_t)d->width * d->height * 3) { d->failed = true; SetLastError(ERROR_INSUFFICIENT_BUFFER); return false; }
     while (used < expected) {
-        DWORD got = 0; if (!ReadFile(d->output, (uint8_t*)bgr + used, (DWORD)(expected - used), &got, NULL) || !got) break; used += got;
+        DWORD got = 0; if (!ReadFile(d->output, m->yuv + used, (DWORD)(expected - used), &got, NULL) || !got) break; used += got;
     }
     if (used == expected) {
-        PreviewMetadata* m = (PreviewMetadata*)d->metadata; memset(&d->info, 0, sizeof(d->info));
+        memset(&d->info, 0, sizeof(d->info));
         for (;;) {
             EnterCriticalSection(&m->lock); DvdPreviewFrameInfo info = m->frames[d->frameIndex % 64]; bool ended = m->ended;
             ResetEvent(m->changed); LeaveCriticalSection(&m->lock);
             if (info.valid && info.number == d->frameIndex) { d->info = info; break; }
             if (ended || WaitForSingleObject(m->changed, 5000) != WAIT_OBJECT_0) break;
         }
-        d->frameIndex++; return true;
+        preview_convert_frame(m->yuv, (uint8_t*)bgr, d->width, d->height, d->info.interlaced); d->frameIndex++; return true;
     }
     d->ended = true;
     DWORD wait = WaitForSingleObject(d->process, 5000); bool exited = wait == WAIT_OBJECT_0 && GetExitCodeProcess(d->process, &d->exitCode);
@@ -93,7 +147,7 @@ void imgburn_frame_decoder_close(DvdFrameDecoder* d) {
     if (!d) return;
     if (d->process) { if (WaitForSingleObject(d->process, 0) == WAIT_TIMEOUT) { TerminateProcess(d->process, ERROR_CANCELLED); WaitForSingleObject(d->process, 5000); } CloseHandle(d->process); }
     PreviewMetadata* m = (PreviewMetadata*)d->metadata;
-    if (m) { if (m->thread) { WaitForSingleObject(m->thread, INFINITE); CloseHandle(m->thread); } if (m->pipe) CloseHandle(m->pipe); if (m->changed) CloseHandle(m->changed); DeleteCriticalSection(&m->lock); free(m); }
+    if (m) { if (m->thread) { WaitForSingleObject(m->thread, INFINITE); CloseHandle(m->thread); } if (m->pipe) CloseHandle(m->pipe); if (m->changed) CloseHandle(m->changed); DeleteCriticalSection(&m->lock); free(m->yuv); free(m); }
     if (d->output) CloseHandle(d->output); memset(d, 0, sizeof(*d));
 }
 

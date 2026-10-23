@@ -214,8 +214,9 @@ bool imgburn_cue_parse(const wchar_t* cueFilePath, CueSheet* outCue) {
     for (unsigned i = 0; i < 99; i++) sheet->sessionLeadOut[i] = i ? 2250 : 6750;
     char* next = text;
     while (*next) {
-        char* line = next; char* end = strchr(next, '\n');
-        if (end) { *end = 0; next = end + 1; } else next += strlen(next);
+        char* line = next; char* end = strpbrk(next, "\r\n");
+        /* 原版也读取CR单独换行；CRLF作为一个行尾消费。 */
+        if (end) { char separator = *end; *end = 0; next = end + 1; if (separator == '\r' && *next == '\n') next++; } else next += strlen(next);
         if (strlen(line) >= 2048) goto done;
         char* cursor = line; if (cue_end(cursor)) continue;
         char command[32], value[1024], second[32];
