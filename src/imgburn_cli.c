@@ -24,6 +24,7 @@
 #include "imgburn_vendor.h"
 #include "imgburn_image.h"
 #include "imgburn_changer.h"
+#include "imgburn_gui.h"
 #include "imgburn_preview.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -765,6 +766,11 @@ static int run_cli(int argc, char **argv) {
 
 /* 从Windows宽字符入口读取参数，统一转换成内部UTF-8，避免系统代码页丢失中文路径。 */
 int wmain(int argc, wchar_t** wideArgs) {
+    if (argc == 1 || (argc == 2 && (!_wcsicmp(wideArgs[1], L"gui") || !_wcsicmp(wideArgs[1], L"--gui")))) return imgburn_gui_show(GetModuleHandleW(NULL), SW_SHOWNORMAL);
+    HANDLE standardOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    if ((!standardOutput || standardOutput == INVALID_HANDLE_VALUE || GetFileType(standardOutput) == FILE_TYPE_UNKNOWN) && AttachConsole(ATTACH_PARENT_PROCESS)) {
+        FILE* stream = NULL; _wfreopen_s(&stream,L"CONOUT$",L"w",stdout); _wfreopen_s(&stream,L"CONOUT$",L"w",stderr);
+    }
     char** args = (char**)calloc((size_t)argc + 1, sizeof(char*));
     if (!args) return 1;
     int result = 1;

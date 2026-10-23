@@ -43,7 +43,8 @@
       <Optimization Condition="'$(Configuration)'=='Release'">MaxSpeed</Optimization>
     </ClCompile>
     <Link>
-      <SubSystem>Console</SubSystem>
+      <SubSystem>Windows</SubSystem>
+      <EntryPointSymbol>wmainCRTStartup</EntryPointSymbol>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -53,6 +54,8 @@
     <ClCompile Include="src\imgburn_cli.c" />
     <ClCompile Include="src\imgburn_fs.c" />
     <ClCompile Include="src\imgburn_fs_layout.c" />
+    <ClCompile Include="src\imgburn_gui.c" />
+    <ClCompile Include="src\imgburn_gui_jobs.c" />
     <ClCompile Include="src\imgburn_image.c" />
     <ClCompile Include="src\imgburn_mmc.c" />
     <ClCompile Include="src\imgburn_pipeline.c" />
@@ -68,6 +71,8 @@
     <ClInclude Include="include\imgburn_changer.h" />
     <ClInclude Include="include\imgburn_fs.h" />
     <ClInclude Include="src\imgburn_fs_internal.h" />
+    <ClInclude Include="include\imgburn_gui.h" />
+    <ClInclude Include="src\imgburn_gui_internal.h" />
     <ClInclude Include="include\imgburn_image.h" />
     <ClInclude Include="include\imgburn_mmc.h" />
     <ClInclude Include="include\imgburn_pipeline.h" />

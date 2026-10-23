@@ -16,6 +16,11 @@
 static uint32_t CRC32_TABLE[256];
 static bool s_crc32_init = false;
 
+static bool fs_cancelled(const ImageBuilder* b) {
+    if (b->cancelEvent && WaitForSingleObject(b->cancelEvent, 0) == WAIT_OBJECT_0) { SetLastError(ERROR_CANCELLED); return true; }
+    return false;
+}
+
 static void init_crc32(void) {
     if (s_crc32_init) return;
     for (uint32_t i = 0; i < 256; i++) {
@@ -289,6 +294,7 @@ bool image_builder_add_file(ImageBuilder* b,
 
 bool image_builder_add_folder(ImageBuilder* b, const wchar_t* hostFolderPath, const wchar_t* discDestFolder) {
     if (!b || !b->rootDir || !hostFolderPath || wcslen(hostFolderPath) + 3 > MAX_PATH) return false;
+    if (fs_cancelled(b)) return false;
     DWORD attributes = GetFileAttributesW(hostFolderPath);
     if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
     if (!fs_ensure_directory(b, discDestFolder)) return false;
@@ -299,6 +305,7 @@ bool image_builder_add_folder(ImageBuilder* b, const wchar_t* hostFolderPath, co
     if (find == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND;
     bool success = true;
     do {
+        if (fs_cancelled(b)) { success = false; break; }
         if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) continue;
         wchar_t childHost[MAX_PATH], childDisc[MAX_PATH];
         if (swprintf(childHost, MAX_PATH, L"%ls\\%ls", hostFolderPath, data.cFileName) < 0 ||
@@ -378,6 +385,7 @@ static bool deduplicate_files(ImageBuilder* b) {
 uint32_t image_builder_calculate_layout(ImageBuilder* b) {
     if (!b || !b->rootDir) return 0;
     fs_layout_free(b);
+    if (fs_cancelled(b)) return 0;
     if (!fs_video_prepare(b) || !deduplicate_files(b) || !fs_layout_prepare(b)) { fs_layout_free(b); return 0; }
     return b->config.totalImageSectors;
 }
@@ -390,6 +398,7 @@ static bool write_all_files_data(ImageBuilder* b, HANDLE output, ImageProgressFn
     bool success = true;
     uint8_t buffer[65536];
     for (int i = 0; i < count && success; i++) {
+        if (fs_cancelled(b)) { success = false; break; }
         FsFileNode* node = files[i];
         HANDLE source = CreateFileW(node->sourceDiskPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         if (source == INVALID_HANDLE_VALUE) { success = false; break; }
@@ -400,6 +409,7 @@ static bool write_all_files_data(ImageBuilder* b, HANDLE output, ImageProgressFn
             success = SetFilePointerEx(output, position, NULL, FILE_BEGIN) != FALSE;
             uint64_t remaining = node->fileSize;
             while (remaining > 0 && success) {
+                if (fs_cancelled(b)) { success = false; break; }
                 DWORD wanted = remaining < sizeof(buffer) ? (DWORD)remaining : (DWORD)sizeof(buffer), actual = 0;
                 success = ReadFile(source, buffer, wanted, &actual, NULL) && actual > 0 && actual <= wanted;
                 if (success) { fs_video_patch(node, node->fileSize - remaining, buffer, actual); success = write_bytes(output, buffer, actual); remaining -= actual; }
@@ -446,7 +456,7 @@ bool image_builder_create_iso(ImageBuilder* b,
                               const wchar_t* outputIsoPath,
                               ImageProgressFn progressCallback,
                               void* userData) {
-    if (!b || !b->rootDir || !outputIsoPath || b->config.totalImageSectors == 0 || !image_builder_check_destination(b, outputIsoPath)) return false;
+    if (!b || !b->rootDir || !outputIsoPath || b->config.totalImageSectors == 0 || fs_cancelled(b) || !image_builder_check_destination(b, outputIsoPath)) return false;
     wchar_t destination[MAX_PATH], temporary[MAX_PATH];
     DWORD length = GetFullPathNameW(outputIsoPath, MAX_PATH, destination, NULL);
     if (length == 0 || length >= MAX_PATH) return false;
@@ -466,13 +476,15 @@ bool image_builder_create_iso(ImageBuilder* b,
     if (!fs_layout_write(b, hOut)) goto failed;
 
     /* 9. Write File Contents */
-    if (!write_all_files_data(b, hOut, progressCallback, userData) || !FlushFileBuffers(hOut)) goto failed;
+    if (!write_all_files_data(b, hOut, progressCallback, userData) || fs_cancelled(b) || !FlushFileBuffers(hOut)) goto failed;
     if (!CloseHandle(hOut)) { DeleteFileW(temporary); return false; }
     if (MoveFileExW(temporary, destination, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
     DeleteFileW(temporary);
     return false;
-failed:
+failed:;
+    DWORD error = GetLastError();
     CloseHandle(hOut);
     DeleteFileW(temporary);
+    SetLastError(error);
     return false;
 }

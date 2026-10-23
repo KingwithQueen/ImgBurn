@@ -175,6 +175,7 @@ typedef struct {
 
     uint32_t dataStartLba;
     void* layout;                   /* 内部布局计划，由销毁函数回收。 */
+    HANDLE cancelEvent;            /* 可选的借用取消事件，构建器不关闭该句柄。 */
 } ImageBuilder;
 
 /**
