@@ -143,7 +143,6 @@ static bool burn_cd_sources_valid(const BurnCdImage* image) {
 static bool burn_cd_plan(BurnCdImage* image) {
     CueSheet* sheet = &image->sheet;
     if (image->cancelEvent && WaitForSingleObject(image->cancelEvent,0) == WAIT_OBJECT_0) { SetLastError(ERROR_CANCELLED); return false; }
-    if (image->cancelEvent && WaitForSingleObject(image->cancelEvent,0) == WAIT_OBJECT_0) { SetLastError(ERROR_CANCELLED); return false; }
     if (sheet->trackCount < 1 || sheet->trackCount > MAX_CUE_TRACKS || !sheet->totalSectors || sheet->totalSectors > 359849) { SetLastError(ERROR_INVALID_DATA); return false; }
     if (sheet->sessionCount != 1 || sheet->discTitle[0] || sheet->discPerformer[0] || sheet->songwriter[0] || sheet->cdTextFile[0]) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
     if (sheet->catalogNumber[0]) {

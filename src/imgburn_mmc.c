@@ -4,6 +4,7 @@
  */
 
 #include "imgburn_mmc.h"
+#include <stdlib.h>
 #include <string.h>
 
 /* Endian helpers for SCSI CDB (SCSI uses Big-Endian) */
@@ -417,6 +418,37 @@ bool mmc_check_iso_cd(OpticalDrive* drive, uint32_t sectors) {
     return true;
 unsupported:
     drive->lastError = ERROR_NOT_SUPPORTED; SetLastError(ERROR_NOT_SUPPORTED); return false;
+}
+
+static bool mmc_cd_text_failure(OpticalDrive* drive, DWORD error) {
+    if (drive) drive->lastError = error; SetLastError(error); return false;
+}
+static bool mmc_cd_text_command(OpticalDrive* drive, uint8_t* data, uint16_t bytes) {
+    uint8_t cdb[10] = {0x43,0,5}; write_be16(cdb + 7,bytes);
+    /* 传输失败可能不刷新sense，不能把旧的“不支持”掩盖为本次结果。 */
+    memset(&drive->lastSense,0,sizeof(drive->lastSense));
+    if (spti_send_cdb(drive,cdb,10,data,bytes,true,10)) return true;
+    const ScsiSenseResult* sense = &drive->lastSense;
+    if (sense->senseKey == 5 && ((sense->asc == 0x20 && !sense->ascq) || (sense->asc == 0x24 && !sense->ascq))) return mmc_cd_text_failure(drive,ERROR_NOT_SUPPORTED);
+    return false;
+}
+bool mmc_read_cd_text(OpticalDrive* drive, uint8_t** packs, uint32_t* bytes) {
+    if (packs) *packs = NULL; if (bytes) *bytes = 0;
+    if (!drive || !packs || !bytes) return mmc_cd_text_failure(drive,ERROR_INVALID_PARAMETER);
+    uint8_t header[4] = {0};
+    if (!mmc_cd_text_command(drive,header,sizeof(header))) return false;
+    if (drive->lastTransferBytes != sizeof(header)) return mmc_cd_text_failure(drive,ERROR_READ_FAULT);
+    uint32_t total = (uint32_t)read_be16(header) + 2;
+    if (total < 4 || total > UINT16_MAX || (total - 4) % 18 || header[2] || header[3]) return mmc_cd_text_failure(drive,ERROR_INVALID_DATA);
+    if (total == 4) { SetLastError(ERROR_SUCCESS); return true; }
+    uint8_t* data = malloc(total);
+    if (!data) return mmc_cd_text_failure(drive,ERROR_NOT_ENOUGH_MEMORY);
+    if (!mmc_cd_text_command(drive,data,(uint16_t)total)) { DWORD error = GetLastError(); free(data); SetLastError(error); return false; }
+    DWORD error = ERROR_SUCCESS;
+    if (drive->lastTransferBytes != total) error = ERROR_READ_FAULT;
+    else if (memcmp(data,header,sizeof(header))) error = ERROR_MEDIA_CHANGED;
+    if (error) { free(data); return mmc_cd_text_failure(drive,error); }
+    memmove(data,data + 4,total - 4); *packs = data; *bytes = total - 4; SetLastError(ERROR_SUCCESS); return true;
 }
 
 bool mmc_read_cd_toc(OpticalDrive* drive, MmcCdToc* toc) {

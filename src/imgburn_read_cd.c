@@ -5,6 +5,7 @@
 #include "imgburn_audio.h"
 #include "imgburn_audio_source.h"
 #include "imgburn_cd_sector.h"
+#include "imgburn_cdtext.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -16,7 +17,7 @@ typedef struct {
     bool present[100], seen, modeKnown, oldGapSeen, newGapSeen, gapModeKnown, scms;
     unsigned lastIndex, mode, gapMode, copyValues, oldCopyValues, copyPhases, lastCopy;
 } CdReadTrack;
-typedef struct { MmcCdToc toc; CdReadTrack tracks[99]; unsigned lastTrack; uint32_t lastPosition; bool positioned; } CdReadPlan;
+typedef struct { MmcCdToc toc; CdReadTrack tracks[99]; unsigned lastTrack; uint32_t lastPosition; bool positioned; CdText cdText; CueSheet* metadata; } CdReadPlan;
 static bool cd_cancelled(const ReadConfig* config) { return config->cancelEvent && WaitForSingleObject(config->cancelEvent,0) == WAIT_OBJECT_0; }
 static bool cd_fail(PipelineStats* stats, DWORD error, PipelineProgressCallback callback, void* context) {
     if (!error) error = ERROR_READ_FAULT; stats->state = error == ERROR_CANCELLED ? PIPELINE_STATE_ABORTED : PIPELINE_STATE_FAILED;
@@ -148,14 +149,42 @@ static bool cd_append(char* text, size_t* used, const char* format, ...) {
     va_list args; va_start(args,format); int bytes = _vsnprintf_s(text + *used,512 * 1024 - *used,_TRUNCATE,format,args); va_end(args);
     if (bytes < 0) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return false; } *used += (size_t)bytes; return true;
 }
-static bool cd_publish(const ReadConfig* config, const CdReadPlan* plan, const wchar_t* destination, const wchar_t* binary) {
+static bool cd_append_text(char* text, size_t* used, const char* command, const char* value, bool track) {
+    if (!value[0]) return true;
+    /* CUE不能无损表示引号或控制符；这些字段只由原始CDT保留，不能擅自替换字符。 */
+    for (const unsigned char* p = (const unsigned char*)value; *p; p++) if (*p < 32 || *p == '"' || *p == 127) return true;
+    return cd_append(text,used,"%s%s \"%s\"\r\n",track ? "    " : "",command,value);
+}
+static bool cd_read_text(OpticalDrive* drive, CdText* text) {
+    uint8_t* packs = NULL; uint32_t bytes = 0;
+    if (!mmc_read_cd_text(drive,&packs,&bytes)) return false;
+    bool result = !bytes || imgburn_cdtext_parse(packs,bytes,text); DWORD error = GetLastError(); free(packs); SetLastError(error); return result;
+}
+static bool cd_text_metadata(CdReadPlan* plan) {
+    if (!plan->cdText.bytes) return true;
+    plan->metadata = calloc(1,sizeof(*plan->metadata)); if (!plan->metadata) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; }
+    plan->metadata->trackCount = (int)plan->toc.trackCount;
+    for (unsigned i = 0; i < plan->toc.trackCount; i++) plan->metadata->tracks[i].trackNumber = (int)i + 1;
+    for (unsigned block = 0; block < 8; block++) if (plan->cdText.blocks[block].packCount && plan->cdText.blocks[block].supported && imgburn_cdtext_extract(&plan->cdText,block,plan->metadata)) return true;
+    /* 未支持的语言、长字段或额外信息仍完整保存在CDT，明文字段是可选展示。 */
+    memset(plan->metadata,0,sizeof(*plan->metadata)); return true;
+}
+static bool cd_publish(const ReadConfig* config, const CdReadPlan* plan, const wchar_t* destination, const wchar_t* binary, const wchar_t* cdTextFile) {
     const wchar_t* name = wcsrchr(binary,L'\\'); if (!name) { SetLastError(ERROR_INVALID_NAME); return false; }
     char fileName[MAX_PATH * 3]; if (!WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,name + 1,-1,fileName,sizeof(fileName),NULL,NULL)) return false;
     char* text = calloc(512 * 1024,1); if (!text) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; } size_t used = 0;
-    bool ok = cd_append(text,&used,"\xEF\xBB\xBFREM SESSION 1\r\nFILE \"%s\" BINARY\r\n",fileName);
+    bool ok = cd_append(text,&used,"\xEF\xBB\xBF");
+    if (ok && cdTextFile[0]) {
+        const wchar_t* textName = wcsrchr(cdTextFile,L'\\'); char utf8[MAX_PATH * 3];
+        if (!textName || !WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,textName + 1,-1,utf8,sizeof(utf8),NULL,NULL)) ok = false;
+        else ok = cd_append(text,&used,"CDTEXTFILE \"%s\"\r\n",utf8);
+    }
+    if (ok && plan->metadata) ok = cd_append_text(text,&used,"TITLE",plan->metadata->discTitle,false) && cd_append_text(text,&used,"PERFORMER",plan->metadata->discPerformer,false) && cd_append_text(text,&used,"SONGWRITER",plan->metadata->songwriter,false);
+    if (ok) ok = cd_append(text,&used,"REM SESSION 1\r\nFILE \"%s\" BINARY\r\n",fileName);
     for (unsigned i = 0; ok && i < plan->toc.trackCount; i++) {
         const CdReadTrack* t = &plan->tracks[i]; unsigned control = plan->toc.tracks[i].control;
         ok = cd_append(text,&used,"  TRACK %02u %s\r\n",i + 1,t->mode == 1 ? "MODE1/2352" : t->mode == 2 ? "MODE2/2352" : "AUDIO");
+        if (ok && plan->metadata) ok = cd_append_text(text,&used,"TITLE",plan->metadata->tracks[i].title,true) && cd_append_text(text,&used,"PERFORMER",plan->metadata->tracks[i].performer,true) && cd_append_text(text,&used,"SONGWRITER",plan->metadata->tracks[i].songwriter,true);
         if (ok && ((control & 11) || t->scms)) ok = cd_append(text,&used,"    FLAGS%s%s%s%s\r\n",!t->scms && (control & 2) ? " DCP" : "",control & 1 ? " PRE" : "",control & 8 ? " 4CH" : "",t->scms ? " SCMS" : "");
         for (unsigned j = 0; ok && j < 100; j++) if (t->present[j]) { uint32_t lba = t->indices[j]; ok = cd_append(text,&used,"    INDEX %02u %02u:%02u:%02u\r\n",j,lba / 4500,lba / 75 % 60,lba % 75); }
     }
@@ -178,15 +207,17 @@ static bool cd_publish(const ReadConfig* config, const CdReadPlan* plan, const w
 bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callback, void* context) {
     PipelineStats stats = {0}; if (!config || !config->drive || !config->imagePath || !config->imagePath[0] || config->retryCount > 20) return cd_fail(&stats,ERROR_INVALID_PARAMETER,callback,context);
     if (cd_cancelled(config)) return cd_fail(&stats,ERROR_CANCELLED,callback,context);
-    wchar_t destination[MAX_PATH] = L"", binary[MAX_PATH] = L"", parent[MAX_PATH]; if (!cd_target(config->imagePath,destination,config->replaceExisting)) return cd_fail(&stats,GetLastError(),callback,context);
+    wchar_t destination[MAX_PATH] = L"", binary[MAX_PATH] = L"", textPath[MAX_PATH] = L"", parent[MAX_PATH]; if (!cd_target(config->imagePath,destination,config->replaceExisting)) return cd_fail(&stats,GetLastError(),callback,context);
     stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Inspecting raw CD layout..."); if (callback) callback(&stats,context);
     OpticalDrive* drive = config->drive; if (!mmc_test_unit_ready(drive)) return cd_fail(&stats,cd_error(drive),callback,context);
     MmcProfile profile = mmc_get_current_profile(drive); if (profile != MMC_PROFILE_CD_ROM && profile != MMC_PROFILE_CD_R && profile != MMC_PROFILE_CD_RW) return cd_fail(&stats,ERROR_NOT_SUPPORTED,callback,context);
-    CdReadPlan* plan = calloc(1,sizeof(*plan)); uint8_t* data = malloc(27 * 2368); HANDLE output = INVALID_HANDLE_VALUE; bool created = false, success = false; DWORD error = ERROR_SUCCESS;
+    CdReadPlan* plan = calloc(1,sizeof(*plan)); uint8_t* data = malloc(27 * 2368); HANDLE output = INVALID_HANDLE_VALUE, textOutput = INVALID_HANDLE_VALUE; bool created = false, textCreated = false, success = false; DWORD error = ERROR_SUCCESS;
     if (!plan || !data) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
     if (!mmc_read_cd_toc(drive,&plan->toc)) { error = cd_error(drive); goto done; }
     if (plan->toc.leadOutLba > 100 * 60 * 75 - 150) { error = ERROR_NOT_SUPPORTED; goto done; }
     stats.totalSectors = plan->toc.leadOutLba;
+    if (config->readCdText && (!cd_read_text(drive,&plan->cdText) || !cd_text_metadata(plan))) { error = GetLastError(); goto done; }
+    if (cd_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
     for (unsigned i = 0; i < plan->toc.trackCount; i++) { plan->tracks[i].indices[1] = plan->toc.tracks[i].startLba; plan->tracks[i].present[1] = true; plan->tracks[i].modeKnown = !(plan->toc.tracks[i].control & 4); }
     wcscpy(parent,destination); wchar_t* slash = wcsrchr(parent,L'\\'); if (!slash) { error = ERROR_INVALID_NAME; goto done; } slash[1] = 0;
     ULARGE_INTEGER available; if (!GetDiskFreeSpaceExW(parent,&available,NULL,NULL)) { error = GetLastError(); goto done; }
@@ -214,11 +245,32 @@ bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callbac
     if (cd_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
     MmcCdToc finalToc; if (!mmc_test_unit_ready(drive) || !mmc_read_cd_toc(drive,&finalToc)) { error = cd_error(drive); goto done; }
     if (mmc_get_current_profile(drive) != profile || finalToc.trackCount != plan->toc.trackCount || finalToc.leadOutLba != plan->toc.leadOutLba || memcmp(finalToc.tracks,plan->toc.tracks,finalToc.trackCount * sizeof(MmcCdTrack))) { error = ERROR_MEDIA_CHANGED; goto done; }
+    if (config->readCdText) {
+        uint8_t* finalText = NULL; uint32_t finalBytes = 0;
+        if (!mmc_read_cd_text(drive,&finalText,&finalBytes)) { error = GetLastError(); goto done; }
+        bool textChanged = finalBytes != plan->cdText.bytes || (finalBytes && memcmp(finalText,plan->cdText.packs,finalBytes)); free(finalText);
+        if (textChanged) { error = ERROR_MEDIA_CHANGED; goto done; }
+    }
     if (!FlushFileBuffers(output)) { error = GetLastError(); goto done; }
     if (!CloseHandle(output)) { error = GetLastError(); output = INVALID_HANDLE_VALUE; goto done; } output = INVALID_HANDLE_VALUE;
-    if (!cd_publish(config,plan,destination,binary)) { error = GetLastError(); goto done; } success = true;
+    if (cd_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
+    if (plan->cdText.bytes) {
+        for (unsigned i = 0; i < 1000; i++) {
+            int chars = i ? swprintf(textPath,MAX_PATH,L"%ls.%03u.cdt",parent,i) : swprintf(textPath,MAX_PATH,L"%ls.cdt",parent);
+            if (chars < 0) { error = ERROR_FILENAME_EXCED_RANGE; goto done; }
+            textOutput = CreateFileW(textPath,GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
+            if (textOutput != INVALID_HANDLE_VALUE) { textCreated = true; break; }
+            error = GetLastError(); if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) goto done;
+        }
+        if (!textCreated) goto done;
+        if (!cd_write(textOutput,plan->cdText.packs,(DWORD)plan->cdText.bytes) || !FlushFileBuffers(textOutput)) { error = GetLastError(); goto done; }
+        if (!CloseHandle(textOutput)) { error = GetLastError(); textOutput = INVALID_HANDLE_VALUE; goto done; } textOutput = INVALID_HANDLE_VALUE;
+    }
+    if (!cd_publish(config,plan,destination,binary,textPath)) { error = GetLastError(); goto done; } success = true;
 done:
-    if (output != INVALID_HANDLE_VALUE) CloseHandle(output); if (!success && created) DeleteFileW(binary); free(data); free(plan);
+    if (output != INVALID_HANDLE_VALUE) CloseHandle(output); if (textOutput != INVALID_HANDLE_VALUE) CloseHandle(textOutput);
+    if (!success && created) DeleteFileW(binary); if (!success && textCreated) DeleteFileW(textPath);
+    if (plan) { imgburn_cdtext_free(&plan->cdText); free(plan->metadata); } free(data); free(plan);
     if (!success) return cd_fail(&stats,error,callback,context);
     stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Raw CD image read successfully."); if (callback) callback(&stats,context); return true;
 }

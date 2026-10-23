@@ -55,6 +55,7 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     PipelineStats stats = {0}; HANDLE output = INVALID_HANDLE_VALUE; uint8_t* buffer = NULL; wchar_t destination[MAX_PATH], temporary[MAX_PATH] = L"";
     DWORD error = ERROR_SUCCESS; bool success = false, temporaryCreated = false;
     if (!config || !config->drive || !config->imagePath || !config->imagePath[0] || config->retryCount > 20) return read_failure(&stats,ERROR_INVALID_PARAMETER,"Invalid read configuration",callback,context);
+    if (config->readCdText) return read_failure(&stats,ERROR_NOT_SUPPORTED,"CD-TEXT requires raw CD CUE output",callback,context);
     if (read_cancelled(config)) return read_failure(&stats,ERROR_CANCELLED,"Read cancelled",callback,context);
     if (!read_target(config->imagePath,destination,config->replaceExisting)) return read_failure(&stats,GetLastError(),"Invalid image destination",callback,context);
     stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Inspecting source disc..."); if (callback) callback(&stats,context);

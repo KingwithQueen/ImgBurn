@@ -297,7 +297,8 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
             char* destination = !_stricmp(command, "TITLE") ? (track ? track->title : sheet->discTitle) : !_stricmp(command, "PERFORMER") ? (track ? track->performer : sheet->discPerformer) : (track ? track->songwriter : sheet->songwriter);
             strcpy(destination, value);
         } else if (!_stricmp(command, "CDTEXTFILE")) {
-            if (track || !cue_path(cueFilePath, value, sheet->cdTextFile) || GetFileAttributesW(sheet->cdTextFile) == INVALID_FILE_ATTRIBUTES) goto done;
+            /* 原版允许外部CDT缺失时使用CUE文字；解析保留路径，使用方决定读取或回退。 */
+            if (track || !cue_path(cueFilePath, value, sheet->cdTextFile)) goto done;
         } else if (!_stricmp(command, "PREGAP") || !_stricmp(command, "POSTGAP")) {
             uint32_t duration; if (!track || !cue_msf(value, &duration)) goto done;
             unsigned i = (unsigned)sheet->trackCount - 1;

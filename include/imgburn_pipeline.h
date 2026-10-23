@@ -110,6 +110,7 @@ typedef struct {
     HANDLE cancelEvent;            /* 借用的事件；调用者负责关闭。 */
     unsigned retryCount;            /* 单扇区额外重试次数，最多 20 次。 */
     bool replaceExisting;
+    bool readCdText;                /* 显式读取并保留原始CD-TEXT；设备不支持时返回失败，不丢弃请求。 */
 } ReadConfig;
 
 bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callback, void* userData);

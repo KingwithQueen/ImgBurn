@@ -135,7 +135,7 @@ static bool job_drive(GuiJob* job) {
         if (ready) { MmcDiscInfo disc; if (mmc_read_disc_information(&drive,&disc)) job->eraseSupported = disc.isErasable && (disc.currentProfile == MMC_PROFILE_CD_RW || disc.currentProfile == MMC_PROFILE_DVD_RW_SEQ || disc.currentProfile == MMC_PROFILE_DVD_RW_RO); }
     } else if (!ready) SetLastError(ERROR_NOT_READY);
     else if (job->operation == GUI_READ_DISC) {
-        ReadConfig config = {0}; config.drive = &drive; config.imagePath = job->destination; config.cancelEvent = job->cancel; config.retryCount = 20; config.replaceExisting = job->replaceExisting;
+        ReadConfig config = {0}; config.drive = &drive; config.imagePath = job->destination; config.cancelEvent = job->cancel; config.retryCount = 20; config.replaceExisting = job->replaceExisting; config.readCdText = job->readCdText;
         const wchar_t* extension = wcsrchr(job->destination,L'.'); ok = extension && !_wcsicmp(extension,L".cue") ? pipeline_read_cd(&config,job_pipeline_progress,job) : pipeline_read_disc(&config,job_pipeline_progress,job);
         if (ok) job_text(job,L"光盘镜像已读取：%ls\r\n",job->destination);
         else { job->error = GetLastError(); if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前光盘布局或光驱能力不支持所选镜像格式。\r\n"); else if (job->error == ERROR_DISK_FULL) job_text(job,L"目标位置的可用空间不足。\r\n"); }

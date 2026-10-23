@@ -24,6 +24,7 @@
 #include "imgburn_sector.h"
 #include "imgburn_vendor.h"
 #include "imgburn_image.h"
+#include "imgburn_cdtext.h"
 #include "imgburn_changer.h"
 #include "imgburn_gui.h"
 #include "imgburn_preview.h"
@@ -69,6 +70,9 @@ static void print_usage(void) {
     printf("        [--l0-min <sectors>] [--l0-max <sectors>] [--capacity <sectors>]\n");
     printf("                                 Build ISO9660 + Joliet + UDF disc image\n");
     printf("  cue <file.cue>                 Parse and display CUE sheet tracks & CD-Text\n");
+    printf("  cdtext-info <file.cdt>         Inspect raw CD-TEXT packs and supported text blocks\n");
+    printf("  cdtext-build <file.cue> <out.cdt> [--replace]\n");
+    printf("                                 Export CDTEXTFILE or encode supported CUE text\n");
     printf("  mds <file.mds>                 Parse and display MDS metadata & Layer Break\n\n");
     printf("  dvd-layers <folder> [--show-interleaved] [--l0-min <n>] [--l0-max <n>] [--capacity <n>]\n");
     printf("                                 Inspect DVD navigation and layer break cells\n\n");
@@ -76,7 +80,7 @@ static void print_usage(void) {
     printf("Burning & Verification Commands:\n");
     printf("  sector <drive> <lba|--last> [--raw|--raw-sub]\n");
     printf("                                 Inspect one sector as hexadecimal and ASCII\n");
-    printf("  read <drive> <out.iso|out.cue> [--retries <0..20>] [--replace]\n");
+    printf("  read <drive> <out.iso|out.cue> [--retries <0..20>] [--replace] [--cdtext]\n");
     printf("                                 Read data ISO or raw CD BIN/CUE with Q indexes\n");
     printf("  burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle] [--opc]\n");
     printf("                                 Burn disc image with real-time telemetry\n");
@@ -442,21 +446,24 @@ static BOOL WINAPI cli_read_control(DWORD type) {
     AcquireSRWLockShared(&cliReadLock); BOOL handled = cliReadCancel != NULL; if (handled) SetEvent(cliReadCancel); ReleaseSRWLockShared(&cliReadLock); return handled;
 }
 static int cmd_read(int argc, char** argv) {
-    if (argc < 4) { printf("Usage: imgburn read <drive> <out.iso|out.cue> [--retries <0..20>] [--replace]\n"); return 1; }
+    if (argc < 4) { printf("Usage: imgburn read <drive> <out.iso|out.cue> [--retries <0..20>] [--replace] [--cdtext]\n"); return 1; }
     ReadConfig config = {0}; config.retryCount = 20;
     for (int i = 4; i < argc; i++) {
         if (!_stricmp(argv[i],"--replace")) config.replaceExisting = true;
+        else if (!_stricmp(argv[i],"--cdtext")) config.readCdText = true;
         else if (!_stricmp(argv[i],"--retries") && i + 1 < argc) { char* end; const char* value = argv[++i]; unsigned long n = strtoul(value,&end,10); if (!value[0] || *end || n > 20 || value[0] == '-') { printf("Error: Retry count must be 0..20.\n"); return 1; } config.retryCount = (unsigned)n; }
         else { printf("Error: Unknown or incomplete read option: %s\n",argv[i]); return 1; }
     }
     wchar_t device[MAX_PATH], image[MAX_PATH]; if (!parse_drive_path(argv[2],device,MAX_PATH) || !utf8_path(argv[3],image,MAX_PATH)) return 1;
+    const wchar_t* extension = wcsrchr(image,L'.'); bool rawCd = extension && !_wcsicmp(extension,L".cue");
+    if (config.readCdText && !rawCd) { printf("Error: --cdtext requires a CUE destination.\n"); return 1; }
     OpticalDrive drive; if (!spti_open_drive(&drive,device,false)) { printf("Error: Cannot open source drive (%lu).\n",drive.lastError); return 1; }
     if (drive.accessKnown && (drive.deviceAccess & (GENERIC_READ | GENERIC_WRITE)) != (GENERIC_READ | GENERIC_WRITE)) { printf("Error: Source device opened without read/write command access. SPTI requires both access rights; try running as administrator.\n"); spti_close_drive(&drive); return 1; }
     HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; }
     AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock);
     bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
     config.drive = &drive; config.imagePath = image; config.cancelEvent = cancel;
-    const wchar_t* extension = wcsrchr(image,L'.'); bool ok = extension && !_wcsicmp(extension,L".cue") ? pipeline_read_cd(&config,on_cli_burn_progress,NULL) : pipeline_read_disc(&config,on_cli_burn_progress,NULL); DWORD error = GetLastError();
+    bool ok = rawCd ? pipeline_read_cd(&config,on_cli_burn_progress,NULL) : pipeline_read_disc(&config,on_cli_burn_progress,NULL); DWORD error = GetLastError();
     if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock); spti_close_drive(&drive);
     printf(ok ? "\nDisc image read successfully.\n" : "\nDisc read failed (error %lu).\n",error); return ok ? 0 : 1;
 }
@@ -770,6 +777,97 @@ static int cmd_cue(const char* cueFile) {
     free(cue); return 0;
 }
 
+/* CDT使用不带READ TOC响应头的18字节pack流；锁定输入，禁止发布时覆盖CUE、音源或已有CDTEXTFILE。 */
+static bool cli_cdtext_load(HANDLE file, CdText* text) {
+    if (GetFileType(file) != FILE_TYPE_DISK) { SetLastError(ERROR_INVALID_DATA); return false; }
+    LARGE_INTEGER length; if (!GetFileSizeEx(file,&length)) return false;
+    if (length.QuadPart < IMGBURN_CDTEXT_PACK_BYTES || length.QuadPart > IMGBURN_CDTEXT_MAX_BYTES || length.QuadPart % IMGBURN_CDTEXT_PACK_BYTES) { SetLastError(ERROR_INVALID_DATA); return false; }
+    DWORD bytes = (DWORD)length.QuadPart, got = 0; uint8_t* data = (uint8_t*)malloc(bytes); if (!data) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; }
+    bool ok = ReadFile(file,data,bytes,&got,NULL) != FALSE; DWORD error = GetLastError();
+    if (ok && got != bytes) { ok = false; error = ERROR_HANDLE_EOF; }
+    if (ok) { ok = imgburn_cdtext_parse(data,bytes,text); error = GetLastError(); }
+    free(data); SetLastError(error); return ok;
+}
+
+static bool cli_cdtext_same_file(const wchar_t* source, HANDLE locked, const wchar_t* output) {
+    wchar_t a[MAX_PATH], b[MAX_PATH]; DWORD na = GetFullPathNameW(source,MAX_PATH,a,NULL), nb = GetFullPathNameW(output,MAX_PATH,b,NULL);
+    if (!na || na >= MAX_PATH || !nb || nb >= MAX_PATH) return true;
+    if (!_wcsicmp(a,b)) return true;
+    HANDLE other = CreateFileW(output,FILE_READ_ATTRIBUTES,FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,NULL,OPEN_EXISTING,0,NULL);
+    if (other == INVALID_HANDLE_VALUE) return GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND;
+    BY_HANDLE_FILE_INFORMATION first = {0}, second = {0}; bool known = GetFileInformationByHandle(locked,&first) && GetFileInformationByHandle(other,&second); CloseHandle(other);
+    return !known || (first.dwVolumeSerialNumber == second.dwVolumeSerialNumber && first.nFileIndexHigh == second.nFileIndexHigh && first.nFileIndexLow == second.nFileIndexLow);
+}
+
+static bool cli_cdtext_publish(const wchar_t* output, const CdText* text, bool replace) {
+    static LONG serial; wchar_t temporary[MAX_PATH]; HANDLE file = INVALID_HANDLE_VALUE;
+    if (wcslen(output) + 48 >= MAX_PATH) { SetLastError(ERROR_FILENAME_EXCED_RANGE); return false; }
+    for (unsigned attempt = 0; attempt < 32; attempt++) {
+        if (swprintf(temporary,MAX_PATH,L"%ls.partial.%lu.%ld",output,GetCurrentProcessId(),InterlockedIncrement(&serial)) < 0) { SetLastError(ERROR_FILENAME_EXCED_RANGE); return false; }
+        file = CreateFileW(temporary,GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
+        if (file != INVALID_HANDLE_VALUE) break;
+        if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS) return false;
+    }
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0; bool ok = WriteFile(file,text->packs,(DWORD)text->bytes,&written,NULL) != FALSE; DWORD error = GetLastError();
+    if (ok && written != text->bytes) { ok = false; error = ERROR_WRITE_FAULT; }
+    if (ok && !FlushFileBuffers(file)) { ok = false; error = GetLastError(); }
+    if (!CloseHandle(file) && ok) { ok = false; error = GetLastError(); }
+    if (ok) { ok = MoveFileExW(temporary,output,MOVEFILE_WRITE_THROUGH | (replace ? MOVEFILE_REPLACE_EXISTING : 0)) != FALSE; error = GetLastError(); }
+    if (!ok) DeleteFileW(temporary); SetLastError(error); return ok;
+}
+
+static int cmd_cdtext_info(int argc, char** argv) {
+    if (argc != 3) { printf("Usage: imgburn cdtext-info <file.cdt>\n"); return 1; }
+    wchar_t path[MAX_PATH]; if (!utf8_path(argv[2],path,MAX_PATH)) return 1;
+    HANDLE file = CreateFileW(path,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL);
+    if (file == INVALID_HANDLE_VALUE) { printf("Error: Cannot open CDT (%lu).\n",GetLastError()); return 1; }
+    CdText text = {0}; bool ok = cli_cdtext_load(file,&text); DWORD error = GetLastError(); CloseHandle(file);
+    if (!ok) { printf("Error: Invalid or unsupported CDT pack stream (%lu).\n",error); return 1; }
+    printf("CD-TEXT: %zu packs, %u blocks\n",text.bytes / IMGBURN_CDTEXT_PACK_BYTES,text.blockCount);
+    CueSheet* sheet = (CueSheet*)calloc(1,sizeof(*sheet)); if (!sheet) { imgburn_cdtext_free(&text); return 1; }
+    for (unsigned block = 0; block < 8; block++) {
+        const CdTextBlock* info = &text.blocks[block]; if (!info->packCount) continue;
+        printf("  Block %u: language %u, character code %u, tracks %u..%u, %u packs, %u omitted CRCs%s%s\n",block,info->language,info->characterCode,info->firstTrack,info->lastTrack,info->packCount,info->omittedCrcCount,info->doubleByte ? ", double byte" : "",info->hasUnmapped ? ", extra pack types preserved" : "");
+        memset(sheet,0,sizeof(*sheet)); sheet->trackCount = info->lastTrack - info->firstTrack + 1;
+        for (int i = 0; i < sheet->trackCount; i++) sheet->tracks[i].trackNumber = (uint8_t)(info->firstTrack + i);
+        if (!imgburn_cdtext_extract(&text,block,sheet)) { printf("    Text conversion unavailable; raw packs retained.\n"); continue; }
+        printf("    TITLE '%s' | PERFORMER '%s' | SONGWRITER '%s' | CATALOG '%s'\n",sheet->discTitle,sheet->discPerformer,sheet->songwriter,sheet->catalogNumber);
+        for (int i = 0; i < sheet->trackCount; i++) printf("    Track %02u: TITLE '%s' | PERFORMER '%s' | SONGWRITER '%s' | ISRC '%s'\n",sheet->tracks[i].trackNumber,sheet->tracks[i].title,sheet->tracks[i].performer,sheet->tracks[i].songwriter,sheet->tracks[i].isrc);
+    }
+    free(sheet); imgburn_cdtext_free(&text); return 0;
+}
+
+static int cmd_cdtext_build(int argc, char** argv) {
+    if (argc < 4 || argc > 5 || (argc == 5 && _stricmp(argv[4],"--replace"))) { printf("Usage: imgburn cdtext-build <file.cue> <out.cdt> [--replace]\n"); return 1; }
+    wchar_t source[MAX_PATH], output[MAX_PATH]; if (!utf8_path(argv[2],source,MAX_PATH) || !utf8_path(argv[3],output,MAX_PATH)) return 1;
+    const wchar_t* extension = wcsrchr(output,L'.'); if (!extension || _wcsicmp(extension,L".cdt")) { printf("Error: CD-TEXT output must use .cdt.\n"); return 1; }
+    HANDLE locks[101]; unsigned count = 0; CdText text = {0}; CueSheet* sheet = (CueSheet*)calloc(1,sizeof(*sheet)); bool ok = false; DWORD error = ERROR_NOT_ENOUGH_MEMORY;
+    if (!sheet) goto done;
+    locks[count] = CreateFileW(source,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL);
+    if (locks[count] == INVALID_HANDLE_VALUE) { error = GetLastError(); goto done; } count++;
+    if (!imgburn_cue_parse(source,sheet)) { error = GetLastError(); goto done; }
+    if (cli_cdtext_same_file(source,locks[0],output)) { error = ERROR_INVALID_PARAMETER; goto done; }
+    for (int i = 0; i < sheet->trackCount; i++) {
+        locks[count] = CreateFileW(sheet->tracks[i].sourceFilePath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL);
+        if (locks[count] == INVALID_HANDLE_VALUE) { error = GetLastError(); goto done; } count++;
+        if (cli_cdtext_same_file(sheet->tracks[i].sourceFilePath,locks[count - 1],output)) { error = ERROR_INVALID_PARAMETER; goto done; }
+    }
+    if (sheet->cdTextFile[0]) {
+        locks[count] = CreateFileW(sheet->cdTextFile,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL);
+        if (locks[count] != INVALID_HANDLE_VALUE) {
+            count++; if (cli_cdtext_same_file(sheet->cdTextFile,locks[count - 1],output)) { error = ERROR_INVALID_PARAMETER; goto done; }
+            if (!cli_cdtext_load(locks[count - 1],&text)) { error = GetLastError(); goto done; }
+        } else { error = GetLastError(); if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) goto done; sheet->cdTextFile[0] = 0; }
+    }
+    if (!text.packs && !imgburn_cdtext_generate(sheet,&text)) { error = GetLastError(); goto done; }
+    ok = cli_cdtext_publish(output,&text,argc == 5); error = GetLastError();
+done:
+    for (unsigned i = 0; i < count; i++) CloseHandle(locks[i]);
+    imgburn_cdtext_free(&text); free(sheet);
+    if (ok) printf("CD-TEXT exported successfully.\n"); else printf("Error: CD-TEXT export failed (%lu).\n",error); SetLastError(error); return ok ? 0 : 1;
+}
+
 static int cmd_mds(const char* mdsFile) {
     wchar_t path[MAX_PATH];
     if (!utf8_path(mdsFile, path, MAX_PATH)) return 1;
@@ -824,6 +922,10 @@ static int run_cli(int argc, char **argv) {
         return cmd_changer(argc, argv);
     } else if (_stricmp(cmd, "cue") == 0 && argc >= 3) {
         return cmd_cue(argv[2]);
+    } else if (_stricmp(cmd, "cdtext-info") == 0) {
+        return cmd_cdtext_info(argc,argv);
+    } else if (_stricmp(cmd, "cdtext-build") == 0) {
+        return cmd_cdtext_build(argc,argv);
     } else if (_stricmp(cmd, "mds") == 0 && argc >= 3) {
         return cmd_mds(argv[2]);
     } else if (_stricmp(cmd, "dvd-layers") == 0) {
