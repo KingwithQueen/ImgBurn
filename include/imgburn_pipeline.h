@@ -53,6 +53,7 @@ typedef struct {
 
     uint32_t miscomparesCount;      /* For Verify mode */
     uint32_t retriesCount;
+    uint32_t comparedSectors, readableOnlySectors; /* 分开记录内容比较与仅检查可读性的扇区。 */
     char statusMessage[128];
 } PipelineStats;
 
@@ -107,9 +108,10 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
 /* 原始 CD：2352 字节主通道和经 Q 校验的索引，最后发布 CUE。 */
 bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callback, void* userData);
 
-/* 数据 Verify：imagePath 为空时检查可读性，否则与 2048 字节扇区镜像比较。 */
-typedef struct { OpticalDrive* drive; const wchar_t* imagePath; HANDLE cancelEvent; unsigned retryCount; } VerifyConfig;
+/* Verify：空镜像检查可读性，ISO/BIN 比较数据扇区，CUE 比较受支持的原始 CD。 */
+typedef struct { OpticalDrive* drive; const wchar_t* imagePath; HANDLE cancelEvent; unsigned retryCount; bool compareAudio; } VerifyConfig;
 bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallback callback, void* userData);
+bool pipeline_verify_cd(const VerifyConfig* config, PipelineProgressCallback callback, void* userData);
 
 #ifdef __cplusplus
 }

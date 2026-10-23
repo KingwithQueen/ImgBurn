@@ -23,7 +23,10 @@ static void job_progress(int percent, uint32_t current, uint32_t total, void* co
     (void)current; (void)total; GuiJob* job = (GuiJob*)context;
     if (job->owner) PostMessageW(job->owner, GUI_JOB_PROGRESS, (WPARAM)percent, (LPARAM)job);
 }
-static void job_pipeline_progress(const PipelineStats* stats, void* context) { job_progress(stats->progressPercent, stats->currentLba, stats->totalSectors, context); }
+static void job_pipeline_progress(const PipelineStats* stats, void* context) {
+    GuiJob* job = context; if (job->operation == GUI_VERIFY_DISC) { job->comparedSectors = stats->comparedSectors; job->readableOnlySectors = stats->readableOnlySectors; job->miscompares = stats->miscomparesCount; }
+    job_progress(stats->progressPercent, stats->currentLba, stats->totalSectors, context);
+}
 
 static bool job_prepare(GuiJob* job) {
     char label[512]; if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, job->label, -1, label, sizeof(label), NULL, NULL) || !image_builder_init(&job->builder, label)) return false;
@@ -137,7 +140,8 @@ static bool job_drive(GuiJob* job) {
     else if (job->operation == GUI_VERIFY_DISC) {
         VerifyConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.cancelEvent = job->cancel;
         ok = pipeline_verify_disc_ex(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
-        if (ok) job_text(job,job->sources[0].path[0] ? L"光盘数据与所选镜像一致。\r\n" : L"光盘数据扇区可读性检查通过。\r\n");
+        if (ok) job_text(job,L"校验通过：已比较 %u 扇区，仅检查可读性 %u 扇区。\r\n",job->comparedSectors,job->readableOnlySectors);
+        else if (job->miscompares) job_text(job,L"发现 %u 个内容不一致的扇区。\r\n",job->miscompares);
     }
     else if (mmc_read_capacity(&drive, &last, &bytes) && bytes == 2048) {
         WIN32_FILE_ATTRIBUTE_DATA data; const wchar_t* image = job->sources[0].path; DiscImageType type = imgburn_image_detect_type(image);

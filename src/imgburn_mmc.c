@@ -280,11 +280,13 @@ invalid:
     memset(toc,0,sizeof(*toc)); drive->lastError = ERROR_INVALID_DATA; SetLastError(ERROR_INVALID_DATA); return false;
 }
 
-bool mmc_read_cd_blocks(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer) {
+static bool mmc_read_cd_transfer(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer, bool withQ) {
     if (!buffer || !count || count > 27 || lba > UINT32_MAX - ((uint32_t)count - 1)) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
-    uint8_t cdb[12] = {0xBE}; write_be32(cdb + 2,lba); cdb[7] = (uint8_t)(count >> 8); cdb[8] = (uint8_t)count; cdb[9] = 0xF8; cdb[10] = 2;
-    uint32_t bytes = (uint32_t)count * 2368;
+    uint8_t cdb[12] = {0xBE}; write_be32(cdb + 2,lba); cdb[7] = (uint8_t)(count >> 8); cdb[8] = (uint8_t)count; cdb[9] = 0xF8; cdb[10] = withQ ? 2 : 0;
+    uint32_t bytes = (uint32_t)count * (withQ ? 2368 : 2352);
     if (!spti_send_cdb(drive,cdb,12,buffer,bytes,true,30)) return false;
     if (drive->lastTransferBytes != bytes) { drive->lastError = ERROR_READ_FAULT; SetLastError(ERROR_READ_FAULT); return false; }
     return true;
 }
+bool mmc_read_cd_blocks(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer) { return mmc_read_cd_transfer(drive,lba,count,buffer,true); }
+bool mmc_read_cd_main_blocks(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer) { return mmc_read_cd_transfer(drive,lba,count,buffer,false); }

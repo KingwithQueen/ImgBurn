@@ -76,8 +76,8 @@ static void print_usage(void) {
     printf("                                 Read data ISO or raw CD BIN/CUE with Q indexes\n");
     printf("  burn <drive> <image> [--speed <Nx>] [--test] [--verify]\n");
     printf("                                 Burn disc image with real-time telemetry\n");
-    printf("  verify <drive> <image|--readable> [--retries <0..20>]\n");
-    printf("                                 Compare or check 2048-byte disc data\n\n");
+    printf("  verify <drive> <image|--readable> [--retries <0..20>] [--compare-audio]\n");
+    printf("                                 Verify data ISO/BIN or raw CD CUE; audio defaults to readability\n\n");
     printf("Examples:\n");
     printf("  imgburn devices\n");
     printf("  imgburn info I:\n");
@@ -512,12 +512,14 @@ static int cmd_burn(int argc, char **argv) {
     return ok ? 0 : 1;
 }
 
-/* Verify 共用有界重试和取消机制；没有镜像时只检查数据扇区可读性。 */
+/* Verify 共用有界重试和取消机制；没有镜像时只检查光盘可读性。 */
+static void on_cli_verify_progress(const PipelineStats* stats, void* context) { *(PipelineStats*)context = *stats; on_cli_burn_progress(stats,NULL); }
 static int cmd_verify(int argc, char **argv) {
-    if (argc < 4) { printf("Usage: imgburn verify <drive> <image|--readable> [--retries <0..20>]\n"); return 1; }
+    if (argc < 4) { printf("Usage: imgburn verify <drive> <image|--readable> [--retries <0..20>] [--compare-audio]\n"); return 1; }
     VerifyConfig config = {0};
     for (int i = 4; i < argc; i++) {
         if (!_stricmp(argv[i],"--retries") && i + 1 < argc) { char* end; const char* value = argv[++i]; unsigned long n = strtoul(value,&end,10); if (!value[0] || *end || n > 20 || value[0] == '-') { printf("Error: Retry count must be 0..20.\n"); return 1; } config.retryCount = (unsigned)n; }
+        else if (!_stricmp(argv[i],"--compare-audio")) config.compareAudio = true;
         else { printf("Error: Unknown or incomplete verify option: %s\n",argv[i]); return 1; }
     }
     wchar_t device[MAX_PATH], image[MAX_PATH]; bool readable = !_stricmp(argv[3],"--readable");
@@ -528,10 +530,10 @@ static int cmd_verify(int argc, char **argv) {
     AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock);
     bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
     config.drive = &drive; config.imagePath = readable ? NULL : image; config.cancelEvent = cancel;
-    bool ok = pipeline_verify_disc_ex(&config,on_cli_burn_progress,NULL); DWORD error = GetLastError();
+    PipelineStats report = {0}; bool ok = pipeline_verify_disc_ex(&config,on_cli_verify_progress,&report); DWORD error = GetLastError();
     if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock); spti_close_drive(&drive);
-    if (ok) printf(readable ? "\nDisc data readability check passed.\n" : "\nDisc data matches image.\n");
-    else printf("\nVerify %s (error %lu).\n",error == ERROR_CANCELLED ? "cancelled" : error == ERROR_CRC ? "found mismatched sectors" : "failed",error);
+    if (ok) printf("\nVerify passed: %u sectors compared, %u sectors checked for readability only.\n",report.comparedSectors,report.readableOnlySectors);
+    else printf("\nVerify %s (error %lu, %u mismatched sectors).\n",error == ERROR_CANCELLED ? "cancelled" : error == ERROR_CRC ? "found mismatched sectors" : "failed",error,report.miscomparesCount);
     return ok ? 0 : 1;
 }
 

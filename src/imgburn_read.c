@@ -118,6 +118,7 @@ bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallbac
     bool compare = config->imagePath && config->imagePath[0];
     if (compare) {
         const wchar_t* extension = wcsrchr(config->imagePath,L'.');
+        if (extension && !_wcsicmp(extension,L".cue")) return pipeline_verify_cd(config,callback,context);
         if (!extension || (_wcsicmp(extension,L".iso") && _wcsicmp(extension,L".bin"))) return read_failure(&stats,ERROR_NOT_SUPPORTED,"Require a data ISO or BIN",callback,context);
         image = CreateFileW(config->imagePath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL); if (image == INVALID_HANDLE_VALUE) return read_failure(&stats,GetLastError(),"Cannot open comparison image",callback,context);
         LARGE_INTEGER size; if (!GetFileSizeEx(image,&size) || size.QuadPart <= 0 || size.QuadPart % 2048 || (uint64_t)size.QuadPart / 2048 > UINT32_MAX) { error = ERROR_INVALID_DATA; goto verify_done; }
@@ -125,6 +126,7 @@ bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallbac
     }
     OpticalDrive* drive = config->drive; if (!mmc_test_unit_ready(drive)) { error = read_device_error(drive); goto verify_done; }
     MmcProfile profile = mmc_get_current_profile(drive); if (!read_profile(profile)) { error = ERROR_NOT_SUPPORTED; goto verify_done; }
+    if (!compare && profile <= MMC_PROFILE_CD_RW) return pipeline_verify_cd(config,callback,context);
     uint32_t last = 0, bytes = 0;
     if (!mmc_read_capacity(drive,&last,&bytes)) { error = read_device_error(drive); goto verify_done; }
     if (last == UINT32_MAX || bytes != 2048 || (compare && stats.totalSectors > last + 1)) { error = ERROR_INVALID_DATA; goto verify_done; }
@@ -141,7 +143,8 @@ bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallbac
             DWORD wanted = (DWORD)count * 2048, offset = 0;
             while (offset < wanted) { DWORD actual = 0; if (!ReadFile(image,reference + offset,wanted - offset,&actual,NULL)) { error = GetLastError(); goto verify_done; } if (!actual || actual > wanted - offset) { error = ERROR_HANDLE_EOF; goto verify_done; } offset += actual; }
             for (unsigned i = 0; i < count; i++) if (memcmp(data + (size_t)i * 2048,reference + (size_t)i * 2048,2048)) stats.miscomparesCount++;
-        }
+            stats.comparedSectors += count;
+        } else stats.readableOnlySectors += count;
         lba += count; stats.currentLba = lba; stats.progressPercent = (int)((uint64_t)lba * 99 / stats.totalSectors); ULONGLONG elapsed = GetTickCount64() - started;
         stats.elapsedTimeSec = (uint32_t)(elapsed / 1000); if (elapsed) { stats.currentSpeedKBps = (double)lba * 2000 / elapsed; stats.speedMultiplier = stats.currentSpeedKBps / (profile <= MMC_PROFILE_CD_RW ? 150.0 : profile >= MMC_PROFILE_BD_ROM ? 4495.5 : 1385.0); stats.remainingTimeSec = (uint32_t)((stats.totalSectors - lba) * 2.0 / stats.currentSpeedKBps); }
         if (callback) callback(&stats,context);

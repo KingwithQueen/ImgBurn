@@ -170,6 +170,8 @@ typedef struct { unsigned trackCount; uint32_t leadOutLba; MmcCdTrack tracks[99]
 /* 单会话 CD 的完整 TOC；READ CD 同时返回原始主通道与格式化 Q。 */
 bool mmc_read_cd_toc(OpticalDrive* drive, MmcCdToc* toc);
 bool mmc_read_cd_blocks(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer);
+/* Verify 只请求 2352 字节主通道，不要求设备额外返回 Q。 */
+bool mmc_read_cd_main_blocks(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer);
 
 #ifdef __cplusplus
 }

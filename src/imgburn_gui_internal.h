@@ -21,6 +21,7 @@ typedef struct {
     bool dvdVideo, bluray, optimize, verify, seamless, oppositeTrackPath, replaceExisting;
     uint16_t speed;
     uint32_t layerBreak;
+    uint32_t comparedSectors, readableOnlySectors, miscompares;
     bool succeeded, builderReady, mediaReady;
     DWORD error;
     wchar_t result[8192];
