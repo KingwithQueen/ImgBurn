@@ -288,6 +288,35 @@ bool mmc_set_write_parameters(OpticalDrive* drive, const MmcWriteParameters* par
 }
 bool mmc_perform_opc(OpticalDrive* drive) { uint8_t cdb[10] = {0x54,1}; return spti_send_cdb(drive,cdb,10,NULL,0,true,180); }
 
+bool mmc_get_bd_write_features(OpticalDrive* drive, bool* verifyNotRequired) {
+    if (!verifyNotRequired) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER); *verifyNotRequired = false;
+    uint8_t cdb[10] = {0x46,2,0,0x41}, data[32] = {0}; cdb[8] = sizeof(data);
+    if (!spti_send_cdb(drive,cdb,10,data,sizeof(data),true,10)) return false;
+    if (drive->lastTransferBytes == 8 && read_be32(data) == 4) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    if (drive->lastTransferBytes != sizeof(data) || read_be32(data) < 28) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
+    if (read_be16(data + 6) != MMC_PROFILE_BD_R_SRM || read_be16(data + 8) != 0x41 || !(data[10] & 1) || data[11] != 20) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    bool writable = false; for (unsigned i = 24; i < 32; i++) writable = writable || data[i] != 0;
+    if (!writable) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED); *verifyNotRequired = (data[12] & 1) != 0; return true;
+}
+bool mmc_set_burn_speed(OpticalDrive* drive, MmcProfile profile, uint32_t writeSpeedKbps) {
+    if (profile != MMC_PROFILE_BD_R_SRM && profile != MMC_PROFILE_DVD_R_SEQ && profile != MMC_PROFILE_DVD_PLUS_R) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    uint32_t speed = !writeSpeedKbps || writeSpeedKbps == 0xFFFF ? UINT32_MAX : writeSpeedKbps;
+    if (profile != MMC_PROFILE_BD_R_SRM) {
+        if (speed != UINT32_MAX && speed >= 0xFFFF) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+        return mmc_set_speed(drive,0xFFFF,speed == UINT32_MAX ? 0xFFFF : (uint16_t)speed);
+    }
+    uint8_t cdb[12] = {0xB6}, data[28] = {0}; write_be16(cdb + 9,sizeof(data)); write_be32(data + 8,UINT32_MAX); write_be32(data + 12,UINT32_MAX); write_be32(data + 16,1000); write_be32(data + 20,speed); write_be32(data + 24,1000);
+    if (!spti_send_cdb(drive,cdb,12,data,sizeof(data),false,10)) return false;
+    if (drive->lastTransferBytes != sizeof(data)) return mmc_write_parameter_error(drive,ERROR_WRITE_FAULT); return true;
+}
+bool mmc_write_bd_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, const void* buffer, bool verifyNotRequired) {
+    if (!verifyNotRequired) return mmc_write_blocks(drive,startLba,blockCount,buffer);
+    if (!buffer || !blockCount || blockCount > 32 || startLba > UINT32_MAX - ((uint32_t)blockCount - 1)) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    uint8_t cdb[12] = {0xAA}; write_be32(cdb + 2,startLba); write_be32(cdb + 6,blockCount); cdb[10] = 0x40;
+    uint32_t size = (uint32_t)blockCount * 2048; if (!spti_send_cdb(drive,cdb,12,(void*)buffer,size,false,30)) return false;
+    if (drive->lastTransferBytes != size) return mmc_write_parameter_error(drive,ERROR_WRITE_FAULT); return true;
+}
+
 bool mmc_write_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, const void* buffer) {
     if (!buffer || blockCount == 0 || blockCount > 32 || startLba > UINT32_MAX - ((uint32_t)blockCount - 1)) { if (drive) drive->lastError = ERROR_INVALID_PARAMETER; SetLastError(ERROR_INVALID_PARAMETER); return false; }
 

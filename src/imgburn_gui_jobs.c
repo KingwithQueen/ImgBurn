@@ -156,7 +156,7 @@ static bool job_drive(GuiJob* job) {
         ok = pipeline_burn_image(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
         if (ok && job->testMode) job_text(job,L"设备测试写入完成；未执行记录数据的回读校验。\r\n");
         else if (ok) job_text(job,L"数据镜像写入完成%ls。\r\n",job->verify ? L"并通过回读校验" : L"");
-        else if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前支持空白单层 DVD-R/+R 和 2048 字节 ISO/BIN；测试写入还要求 DVD-R 驱动器能力支持。\r\n");
+        else if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前支持空白单层 DVD-R/+R、BD-R SRM 和 2048 字节 ISO/BIN；测试写入仅支持具备相应能力的 DVD-R。\r\n");
         else if (job->error == ERROR_DISK_FULL) job_text(job,L"光盘的可写扇区不足。\r\n");
     }
     if (!ok && !job->error) job->error = drive.lastError ? drive.lastError : GetLastError();

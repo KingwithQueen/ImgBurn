@@ -124,6 +124,11 @@ bool mmc_read_track_information(OpticalDrive* drive, uint32_t lbaOrTrack, bool i
  * @param writeSpeedKbps 0xFFFF for Maximum
  */
 bool mmc_set_speed(OpticalDrive* drive, uint16_t readSpeedKbps, uint16_t writeSpeedKbps);
+/* 蓝光使用 SET STREAMING 的 32 位速率，DVD 保留 SET CD SPEED。 */
+bool mmc_set_burn_speed(OpticalDrive* drive, MmcProfile profile, uint32_t writeSpeedKbps);
+/* 当前 BD Write 能力；返回设备是否支持 WRITE (12) 的 VNR 位。 */
+bool mmc_get_bd_write_features(OpticalDrive* drive, bool* verifyNotRequired);
+bool mmc_write_bd_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, const void* buffer, bool verifyNotRequired);
 
 /**
  * @brief Synchronize Cache / Flush FIFO (SCSI 0x35)
@@ -132,7 +137,7 @@ bool mmc_synchronize_cache(OpticalDrive* drive);
 
 /**
  * @brief Close Track or Session (SCSI 0x5B)
- * @param closeType 1 为关闭轨道，2 为关闭会话，6 为结束 DVD+R 光盘；含义需按介质区分。
+ * @param closeType 1 为关闭轨道，2 为关闭会话，6 为结束 DVD+R/BD-R 光盘；含义需按介质区分。
  */
 bool mmc_close_track_session(OpticalDrive* drive, uint8_t closeType, uint16_t trackNumber);
 

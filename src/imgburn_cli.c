@@ -494,7 +494,7 @@ static int cmd_burn(int argc, char **argv) {
         else if (_stricmp(argv[i], "--opc") == 0) opc = true;
         else if (_stricmp(argv[i], "--speed") == 0 && i + 1 < argc) {
             const char* value = argv[++i]; if (!_stricmp(value,"MAX")) speed = 0;
-            else { char* end; speed = strtod(value,&end); if ((*end == 'x' || *end == 'X') && !end[1]) end++; if (!value[0] || *end || !isfinite(speed) || speed < 1 || speed * 1385 + 0.5 >= 65535) { printf("Error: Invalid DVD write speed.\n"); return 1; } }
+            else { char* end; speed = strtod(value,&end); if ((*end == 'x' || *end == 'X') && !end[1]) end++; if (!value[0] || *end || !isfinite(speed) || speed < 1 || speed * 4495.5 + 0.5 >= UINT32_MAX) { printf("Error: Invalid write speed.\n"); return 1; } }
         } else { printf("Error: Unknown or incomplete burn option.\n"); return 1; }
     }
 
@@ -518,7 +518,9 @@ static int cmd_burn(int argc, char **argv) {
     config.imagePath = imagePath;
     config.testMode = testMode;
     config.verifyAfterWrite = verifyAfter;
-    config.writeSpeedKbps = speed > 0 ? (uint16_t)(speed * 1385 + 0.5) : 0xFFFF;
+    MmcProfile speedProfile = speed > 0 ? mmc_get_current_profile(&drive) : MMC_PROFILE_NONE;
+    if (speed > 0 && speedProfile == MMC_PROFILE_UNKNOWN) { printf("Error: Cannot identify media for write speed.\n"); spti_close_drive(&drive); return 1; }
+    config.writeSpeedKbps = speed > 0 ? (uint32_t)(speed * (speedProfile == MMC_PROFILE_BD_R_SRM ? 4495.5 : 1385.0) + 0.5) : UINT32_MAX;
     config.ringBufferBytes = 32 * 1024 * 1024;
     config.reserveTrack = reserve; config.cycleTrayBeforeVerify = cycle; config.performOpc = opc;
     HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; } config.cancelEvent = cancel;
