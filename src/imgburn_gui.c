@@ -1,6 +1,8 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "imgburn_gui.h"
 #include "imgburn_gui_internal.h"
+#include "imgburn_gui_assets.h"
+#include "imgburn_gui_sector.h"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -58,6 +60,7 @@ struct GuiWindow {
     int driveCount, selectedDrive;
     GuiJob* job;
     GuiTool* tool;
+    GuiAssets assets;
 };
 
 static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp);
@@ -70,7 +73,9 @@ static void gui_refresh(GuiWindow* ui);
 static void gui_tool_open(GuiWindow* ui, GuiOperation operation);
 
 static int px(const GuiWindow* ui, int value) { return MulDiv(value, (int)ui->dpi, 96); }
+static GuiAssetId gui_control_asset(UINT id) { return id == UI_SOURCE_FILE || id == UI_DESTINATION ? ASSET_BROWSE : id == UI_SOURCE_FOLDER ? ASSET_FOLDER : id == UI_REMOVE_SOURCE ? ASSET_REMOVE : id == UI_IMAGE_INFO ? ASSET_INFO : ASSET_COUNT; }
 static HWND ctl(GuiWindow* ui, HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style, int id, int x, int y, int w, int h) {
+    GuiAssetId asset = gui_control_asset((UINT)id); if (!wcscmp(cls,L"BUTTON") && asset != ASSET_COUNT && ui->assets.images[asset]) style |= BS_OWNERDRAW;
     HWND child = CreateWindowExW(!wcscmp(cls, L"EDIT") || !wcscmp(cls, L"LISTBOX") ? WS_EX_CLIENTEDGE : 0, cls, text, WS_CHILD | WS_VISIBLE | style, px(ui,x), px(ui,y), px(ui,w), px(ui,h), parent, (HMENU)(INT_PTR)id, ui->instance, NULL);
     if (child) { SendMessageW(child, WM_SETFONT, (WPARAM)ui->font, TRUE); SetWindowPos(child,HWND_TOP,0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); } return child;
 }
@@ -152,7 +157,7 @@ static void gui_menu(GuiWindow* ui) {
     item(device, UI_DEVICE_LOAD, L"关闭托盘(&L)", false); item(device, UI_DEVICE_EJECT, L"弹出托盘(&E)", false); item(device, UI_DEVICE_LOCK, L"锁定托盘(&K)", false); item(device, UI_DEVICE_UNLOCK, L"解锁托盘(&U)", false); separator(device);
     item(erase, UI_DEVICE_ERASE_QUICK, L"快速(&Q)", false); item(erase, UI_DEVICE_ERASE_FULL, L"完整(&F)", false); popup(device, erase, L"擦除光盘(&E)"); item(device, UI_DEVICE_SYNC, L"同步缓存(&S)", false);
     item(close, UI_DEVICE_CLOSE_TRACK, L"轨道(&T)", false); item(close, UI_DEVICE_CLOSE_SESSION, L"区段(&S)", false); item(close, UI_DEVICE_CLOSE_DISC, L"光盘(&D)", false); popup(device, close, L"关闭(&C)"); separator(device);
-    item(device, UI_DEVICE_ADVANCED, L"更改高级设置(&A)...", false); item(device, UI_DEVICE_BOOKTYPE, L"更改 Book Type(&B)...", false); item(device, UI_DEVICE_SECTORS, L"扇区查看器(&V)...", false); item(device, UI_DEVICE_REGION, L"地区码(&R)...", false); item(device, UI_DEVICE_CAPABILITIES, L"功能(&C)...", idle && drive); item(device, UI_DEVICE_FAMILY, L"设备关系(&F)...", false); item(device, UI_DEVICE_FIRMWARE, L"检查固件更新(&U)...", false); popup(tools, device, L"驱动器(&V)");
+    item(device, UI_DEVICE_ADVANCED, L"更改高级设置(&A)...", false); item(device, UI_DEVICE_BOOKTYPE, L"更改 Book Type(&B)...", false); item(device, UI_DEVICE_SECTORS, L"扇区查看器(&V)...", idle && drive); item(device, UI_DEVICE_REGION, L"地区码(&R)...", false); item(device, UI_DEVICE_CAPABILITIES, L"功能(&C)...", idle && drive); item(device, UI_DEVICE_FAMILY, L"设备关系(&F)...", false); item(device, UI_DEVICE_FIRMWARE, L"检查固件更新(&U)...", false); popup(tools, device, L"驱动器(&V)");
     HMENU changer = CreatePopupMenu(); item(changer, 180, L"状态", false); item(changer, 181, L"装载", false); item(changer, 182, L"卸载", false); popup(tools, changer, L"换盘器(&W)"); separator(tools);
     item(tools, UI_TOOL_CUE, L"生成 CUE 文件(&C)...", idle); item(tools, UI_TOOL_DVD, L"创建 DVD 文件(&D)...", false); item(tools, UI_TOOL_MDS, L"生成 MDS 文件(&M)...", idle); separator(tools); item(tools, UI_SEARCH, L"寻找 SCSI / ATAPI 设备(&S)", idle); item(tools, 151, L"自动判断刻录速度(&X)...", false); item(tools, 152, L"驱动程序载入规则(&Y)...", false); item(tools, 153, L"重置 DMA(&A)", false); separator(tools); item(tools, UI_SETTINGS, L"选项(&Z)...", false);
     item(help, UI_HELP_GUIDES, L"查看 ImgBurn 使用指南(&G)", true); item(help, UI_HELP_SITE, L"访问 ImgBurn 网站(&W)", true); item(help, UI_HELP_FORUM, L"访问 ImgBurn 支持论坛(&F)", true); separator(help); item(help, UI_ABOUT, L"关于 ImgBurn(&A)...", true);
@@ -348,6 +353,8 @@ static void gui_disc(HDC dc, int x, int y, int size, bool recording) {
 }
 static void gui_ez_draw(GuiWindow* ui, DRAWITEMSTRUCT* draw) {
     RECT r = draw->rcItem; HDC dc = draw->hDC; FillRect(dc, &r, GetSysColorBrush(COLOR_BTNFACE)); SetBkMode(dc, TRANSPARENT);
+    unsigned asset = draw->CtlID - UI_EZ_FIRST; bool original = asset < 6 && imgburn_gui_asset_draw(&ui->assets,(GuiAssetId)asset,dc,(r.left + r.right - px(ui,128)) / 2,r.top + px(ui,12),px(ui,128),px(ui,48),!(draw->itemState & ODS_DISABLED));
+    if (!original) {
     int center = (r.right + r.left) / 2, y = r.top + px(ui,12), size = px(ui,46); HPEN pen = CreatePen(PS_SOLID, px(ui,1), RGB(138,145,151)); HGDIOBJ oldPen = SelectObject(dc, pen), oldBrush = SelectObject(dc, GetStockObject(WHITE_BRUSH));
     for (int i = 0; i < 2; i++) {
         int x = center + (i ? px(ui,26) : -px(ui,70)); bool folder = draw->CtlID == UI_EZ_FIRST + 1 || draw->CtlID == UI_EZ_FIRST + 3;
@@ -363,6 +370,7 @@ static void gui_ez_draw(GuiWindow* ui, DRAWITEMSTRUCT* draw) {
     }
     POINT arrow[] = {{center - px(ui,15),y + px(ui,19)},{center + px(ui,3),y + px(ui,19)},{center + px(ui,3),y + px(ui,12)},{center + px(ui,18),y + px(ui,25)},{center + px(ui,3),y + px(ui,38)},{center + px(ui,3),y + px(ui,31)},{center - px(ui,15),y + px(ui,31)}};
     HBRUSH blue = CreateSolidBrush(RGB(73,157,203)); SelectObject(dc,blue); Polygon(dc,arrow,7); SelectObject(dc,oldBrush); DeleteObject(blue); SelectObject(dc,oldPen); DeleteObject(pen);
+    }
     wchar_t text[128]; GetWindowTextW(draw->hwndItem,text,128); RECT caption = {r.left,r.top + px(ui,70),r.right,r.bottom}; HGDIOBJ oldFont = SelectObject(dc,ui->bold); SetTextColor(dc,GetSysColor(COLOR_BTNTEXT)); DrawTextW(dc,text,-1,&caption,DT_CENTER | DT_VCENTER | DT_SINGLELINE); SelectObject(dc,oldFont); if (draw->itemState & ODS_FOCUS) { InflateRect(&r,-3,-3); DrawFocusRect(dc,&r); }
 }
 
@@ -416,6 +424,7 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
     if (message == WM_CREATE) { ui->status = CreateWindowW(STATUSCLASSNAMEW,L"Ready",WS_CHILD | WS_VISIBLE,0,0,0,0,window,NULL,ui->instance,NULL); gui_mode(ui,GUI_EZ); DragAcceptFiles(window,TRUE); return 0; }
     if (message == WM_SIZE) { SendMessageW(ui->status,WM_SIZE,0,0); return 0; }
     if (message == WM_DRAWITEM && wp >= UI_EZ_FIRST && wp < UI_EZ_FIRST + 6) { gui_ez_draw(ui,(DRAWITEMSTRUCT*)lp); return TRUE; }
+    if (message == WM_DRAWITEM && gui_control_asset((UINT)wp) != ASSET_COUNT && imgburn_gui_asset_button(&ui->assets,gui_control_asset((UINT)wp),(DRAWITEMSTRUCT*)lp)) return TRUE;
     if (message == WM_NOTIFY && ((NMHDR*)lp)->idFrom == UI_TAB && ((NMHDR*)lp)->code == TCN_SELCHANGE) { gui_build_page(ui); return 0; }
     if (message == GUI_JOB_PROGRESS) { if (ui->job == (GuiJob*)lp && ui->progress) SendMessageW(ui->progress,PBM_SETPOS,wp,0); return 0; }
     if (message == GUI_JOB_DONE) { gui_complete(ui,(GuiJob*)lp); return 0; }
@@ -444,6 +453,7 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
             case UI_OUTPUT_IMAGE: ui->outputDevice = false; gui_mode(ui,GUI_BUILD); break; case UI_OUTPUT_DEVICE: ui->outputDevice = true; gui_mode(ui,GUI_BUILD); break;
             case UI_REFRESH: case UI_SEARCH: gui_refresh(ui); break;
             case UI_DEVICE_REFRESH: case UI_DEVICE_CAPABILITIES: if (ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount) gui_start(ui,GUI_DRIVE_INFO); break;
+            case UI_DEVICE_SECTORS: imgburn_gui_sector_show(window,ui->instance,ui->devices,ui->driveCount,ui->selectedDrive,&ui->assets); break;
             case UI_TOOL_CUE: gui_tool_open(ui,GUI_CREATE_CUE); break; case UI_TOOL_MDS: gui_tool_open(ui,GUI_CREATE_MDS); break;
             case UI_DVD: if (ui->bd && SendMessageW(ui->dvd,BM_GETCHECK,0,0) == BST_CHECKED) SendMessageW(ui->bd,BM_SETCHECK,BST_UNCHECKED,0); break;
             case UI_BD: if (ui->dvd && SendMessageW(ui->bd,BM_GETCHECK,0,0) == BST_CHECKED) SendMessageW(ui->dvd,BM_SETCHECK,BST_UNCHECKED,0); break;
@@ -466,12 +476,13 @@ int imgburn_gui_show(HINSTANCE instance, int show) {
     ui->instance = instance; ui->dpi = 96; ui->fsTypes = FS_TYPE_ALL; ui->revision = UDF_REV_102; ui->deduplicate = true; ui->verifyAfter = true; ui->verifyAgainstImage = true; ui->selectedDrive = -1; wcscpy(ui->volumeLabel,L"IMGBURN_DISC");
     HDC screen = GetDC(NULL); if (screen) { ui->dpi = (unsigned)GetDeviceCaps(screen,LOGPIXELSX); ReleaseDC(NULL,screen); }
     ui->font = CreateFontW(-MulDiv(9,(int)ui->dpi,72),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,DEFAULT_PITCH,L"Segoe UI"); ui->bold = CreateFontW(-MulDiv(10,(int)ui->dpi,72),0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,DEFAULT_PITCH,L"Segoe UI");
-    HRESULT comResult = CoInitializeEx(NULL,COINIT_APARTMENTTHREADED); INITCOMMONCONTROLSEX controls = {sizeof(controls),ICC_WIN95_CLASSES}; InitCommonControlsEx(&controls);
-    WNDCLASSW cls = {0}; cls.hInstance = instance; cls.hCursor = LoadCursorW(NULL,MAKEINTRESOURCEW(32512)); cls.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); cls.lpszClassName = L"ImgBurnMainWindow"; cls.lpfnWndProc = gui_proc; cls.hIcon = LoadIconW(NULL,MAKEINTRESOURCEW(32512)); bool ok = RegisterClassW(&cls) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    HRESULT comResult = CoInitializeEx(NULL,COINIT_APARTMENTTHREADED); imgburn_gui_assets_load(&ui->assets,NULL); INITCOMMONCONTROLSEX controls = {sizeof(controls),ICC_WIN95_CLASSES}; InitCommonControlsEx(&controls);
+    WNDCLASSW cls = {0}; cls.hInstance = instance; cls.hCursor = LoadCursorW(NULL,MAKEINTRESOURCEW(32512)); cls.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); cls.lpszClassName = L"ImgBurnMainWindow"; cls.lpfnWndProc = gui_proc; cls.hIcon = LoadIconW(instance,MAKEINTRESOURCEW(1)); if (!cls.hIcon) cls.hIcon = LoadIconW(NULL,MAKEINTRESOURCEW(32512)); bool ok = RegisterClassW(&cls) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
     cls.lpszClassName = L"ImgBurnCommand"; cls.lpfnWndProc = gui_tool_proc; ok = ok && (RegisterClassW(&cls) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS); cls.lpszClassName = L"ImgBurnLogWindow"; cls.lpfnWndProc = gui_log_proc; ok = ok && (RegisterClassW(&cls) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS);
     RECT rect = {0,0,px(ui,660),px(ui,400)}; DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX; AdjustWindowRect(&rect,style,TRUE);
     HWND window = ok ? CreateWindowW(L"ImgBurnMainWindow",L"ImgBurn",style,CW_USEDEFAULT,CW_USEDEFAULT,rect.right - rect.left,rect.bottom - rect.top,NULL,NULL,instance,ui) : NULL;
     if (window) {
+        if (ui->assets.largeIcon) SendMessageW(window,WM_SETICON,ICON_BIG,(LPARAM)ui->assets.largeIcon); if (ui->assets.smallIcon) SendMessageW(window,WM_SETICON,ICON_SMALL,(LPARAM)ui->assets.smallIcon);
         RECT main; GetWindowRect(window,&main); ui->logWindow = CreateWindowW(L"ImgBurnLogWindow",L"ImgBurn 日志",WS_OVERLAPPEDWINDOW,main.left,main.bottom,rect.right - rect.left,px(ui,180),window,NULL,instance,ui);
         ui->logVisible = true; ShowWindow(window,show); ShowWindow(ui->logWindow,SW_SHOWNOACTIVATE); gui_log(ui,L"ImgBurn C17 桌面界面已启动。"); gui_refresh(ui);
         ACCEL keys[] = {{FVIRTKEY | FCONTROL | FSHIFT,'P',UI_MODE_EZ},{FVIRTKEY | FCONTROL | FSHIFT,'R',UI_MODE_READ},{FVIRTKEY | FCONTROL | FSHIFT,'B',UI_MODE_BUILD},{FVIRTKEY | FCONTROL | FSHIFT,'W',UI_MODE_WRITE},{FVIRTKEY | FCONTROL | FSHIFT,'V',UI_MODE_VERIFY},{FVIRTKEY | FCONTROL | FSHIFT,'D',UI_MODE_DISCOVERY},{FVIRTKEY | FCONTROL,'O',UI_SOURCE_FILE},{FVIRTKEY,VK_F5,UI_REFRESH}};
@@ -479,5 +490,5 @@ int imgburn_gui_show(HINSTANCE instance, int show) {
         while (GetMessageW(&msg,NULL,0,0) > 0) { if (!ui->tool && msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN && msg.hwnd == ui->sourceEdit && ui->mode == GUI_BUILD) { wchar_t path[MAX_PATH]; GetWindowTextW(ui->sourceEdit,path,MAX_PATH); if (gui_paths_add(&ui->paths,&ui->pathCount,path)) gui_mode(ui,GUI_BUILD); else MessageBoxW(window,L"无法添加该路径。",L"ImgBurn",MB_OK | MB_ICONERROR); continue; } if (ui->tool && IsDialogMessageW(ui->tool->window,&msg)) continue; if ((ui->tool || !TranslateAcceleratorW(window,accel,&msg)) && !IsDialogMessageW(window,&msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); } }
         if (accel) DestroyAcceleratorTable(accel);
     }
-    free(ui->paths); if (ui->font) DeleteObject(ui->font); if (ui->bold) DeleteObject(ui->bold); if (SUCCEEDED(comResult)) CoUninitialize(); free(ui); return window ? 0 : 1;
+    free(ui->paths); imgburn_gui_assets_free(&ui->assets); if (ui->font) DeleteObject(ui->font); if (ui->bold) DeleteObject(ui->bold); if (SUCCEEDED(comResult)) CoUninitialize(); free(ui); return window ? 0 : 1;
 }

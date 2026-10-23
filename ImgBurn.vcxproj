@@ -28,6 +28,7 @@
     <IntDir>$(OutDir)obj\</IntDir>
     <TargetName>ImgBurn</TargetName>
     <LinkIncremental>false</LinkIncremental>
+    <ImgBurnResourceSource Condition="'$(ImgBurnResourceSource)'==''">$(MSBuildProjectDirectory)\.local\reference\extracted_resources</ImgBurnResourceSource>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
@@ -55,6 +56,8 @@
     <ClCompile Include="src\imgburn_fs.c" />
     <ClCompile Include="src\imgburn_fs_layout.c" />
     <ClCompile Include="src\imgburn_gui.c" />
+    <ClCompile Include="src\imgburn_gui_assets.c" />
+    <ClCompile Include="src\imgburn_gui_sector.c" />
     <ClCompile Include="src\imgburn_gui_jobs.c" />
     <ClCompile Include="src\imgburn_image.c" />
     <ClCompile Include="src\imgburn_mmc.c" />
@@ -64,6 +67,7 @@
     <ClCompile Include="src\imgburn_read_cd.c" />
     <ClCompile Include="src\imgburn_ringbuffer.c" />
     <ClCompile Include="src\imgburn_spti.c" />
+    <ClCompile Include="src\imgburn_sector.c" />
     <ClCompile Include="src\imgburn_udf.c" />
     <ClCompile Include="src\imgburn_vendor.c" />
     <ClCompile Include="src\imgburn_video.c" />
@@ -75,6 +79,9 @@
     <ClInclude Include="src\imgburn_fs_internal.h" />
     <ClInclude Include="include\imgburn_gui.h" />
     <ClInclude Include="src\imgburn_gui_internal.h" />
+    <ClInclude Include="src\imgburn_gui_assets.h" />
+    <ClInclude Include="src\imgburn_gui_sector.h" />
+    <ClInclude Include="include\imgburn_sector.h" />
     <ClInclude Include="include\imgburn_image.h" />
     <ClInclude Include="include\imgburn_mmc.h" />
     <ClInclude Include="include\imgburn_pipeline.h" />
@@ -85,4 +92,15 @@
     <ClInclude Include="include\imgburn_vendor.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ItemGroup Condition="Exists('$(ImgBurnResourceSource)')">
+    <ImgBurnReferenceAsset Include="$(ImgBurnResourceSource)\**\*.png;$(ImgBurnResourceSource)\**\*.ico;$(ImgBurnResourceSource)\**\*.bmp" />
+  </ItemGroup>
+  <ItemGroup Condition="Exists('$(ImgBurnResourceSource)\icons\MAINICON.ico')">
+    <ResourceCompile Include="src\imgburn_app.rc">
+      <AdditionalIncludeDirectories>$(ImgBurnResourceSource);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+  </ItemGroup>
+  <Target Name="CopyImgBurnReferenceAssets" AfterTargets="Build" Condition="'@(ImgBurnReferenceAsset)'!=''">
+    <Copy SourceFiles="@(ImgBurnReferenceAsset)" DestinationFiles="@(ImgBurnReferenceAsset->'$(OutDir)resources\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

@@ -21,6 +21,7 @@
 #include "imgburn_fs.h"
 #include "imgburn_udf.h"
 #include "imgburn_pipeline.h"
+#include "imgburn_sector.h"
 #include "imgburn_vendor.h"
 #include "imgburn_image.h"
 #include "imgburn_changer.h"
@@ -72,6 +73,8 @@ static void print_usage(void) {
     printf("                                 Inspect DVD navigation and layer break cells\n\n");
     printf("  dvd-preview <folder> --title <VTS:PGC:Cell> | --menu <VTS:LU:PGC:Cell> [--ffmpeg <path>]\n");
     printf("Burning & Verification Commands:\n");
+    printf("  sector <drive> <lba|--last> [--raw|--raw-sub]\n");
+    printf("                                 Inspect one sector as hexadecimal and ASCII\n");
     printf("  read <drive> <out.iso|out.cue> [--retries <0..20>] [--replace]\n");
     printf("                                 Read data ISO or raw CD BIN/CUE with Q indexes\n");
     printf("  burn <drive> <image> [--speed <Nx>] [--test] [--verify]\n");
@@ -537,9 +540,22 @@ static int cmd_verify(int argc, char **argv) {
     return ok ? 0 : 1;
 }
 
-/* -------------------------------------------------------------------------
- * Command: booktype <drive> [query|set <dvd_rom|default> [dvd+r|dvd+r_dl]]
- * ------------------------------------------------------------------------- */
+/* 与扇区查看器窗口使用同一只读接口，输出支持原始 CD 的 96 字节子通道。 */
+static int cmd_sector(int argc, char** argv) {
+    if (argc < 4 || argc > 5) { printf("Usage: imgburn sector <drive> <lba|--last> [--raw|--raw-sub]\n"); return 1; }
+    SectorRequest request = {0}; request.useLast = !_stricmp(argv[3],"--last");
+    if (!request.useLast) { char* end; unsigned long long n = _strtoui64(argv[3],&end,10); if (!argv[3][0] || *end || strspn(argv[3],"0123456789") != strlen(argv[3]) || n > UINT32_MAX) { printf("Error: Invalid LBA.\n"); return 1; } request.lba = (uint32_t)n; }
+    if (argc == 5) { if (!_stricmp(argv[4],"--raw")) request.mode = SECTOR_RAW; else if (!_stricmp(argv[4],"--raw-sub")) request.mode = SECTOR_RAW_SUBCHANNEL; else { printf("Error: Unknown sector option.\n"); return 1; } }
+    wchar_t device[MAX_PATH]; if (!parse_drive_path(argv[2],device,MAX_PATH)) return 1; OpticalDrive drive;
+    if (!spti_open_drive(&drive,device,false)) { printf("Error: Cannot open source drive (%lu).\n",drive.lastError); return 1; }
+    HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; } request.cancelEvent = cancel;
+    AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock); bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
+    SectorData data; bool ok = imgburn_sector_read(&drive,&request,&data); DWORD error = GetLastError();
+    if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock); spti_close_drive(&drive);
+    if (ok) { wchar_t* wide = malloc(16384 * sizeof(wchar_t)); char* utf8 = malloc(16384); ok = wide && utf8 && imgburn_sector_format(&data,wide,16384) && WideCharToMultiByte(CP_UTF8,0,wide,-1,utf8,16384,NULL,NULL) != 0; if (ok) printf("LBA %u / %u, %u bytes\n%s",data.lba,data.lastLba,data.bytes,utf8); else printf("Error: Cannot format sector for display.\n"); free(wide); free(utf8); }
+    else printf(error == ERROR_ACCESS_DENIED ? "Error: SPTI requires device read/write access; try running as administrator (%lu).\n" : "Error: Sector read failed (%lu).\n",error); return ok ? 0 : 1;
+}
+/* 查询或更改支持的驱动器 Book Type。 */
 static int cmd_booktype(int argc, char **argv) {
     if (argc < 3) {
         printf("Usage: imgburn booktype <drive> [query | set <dvd_rom|default> [dvd+r|dvd+r_dl]]\n");
@@ -770,6 +786,8 @@ static int run_cli(int argc, char **argv) {
         return cmd_read(argc,argv);
     } else if (_stricmp(cmd, "verify") == 0) {
         return cmd_verify(argc, argv);
+    } else if (_stricmp(cmd, "sector") == 0) {
+        return cmd_sector(argc,argv);
     } else if (_stricmp(cmd, "booktype") == 0) {
         return cmd_booktype(argc, argv);
     } else if (_stricmp(cmd, "pioneer") == 0) {

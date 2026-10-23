@@ -172,6 +172,7 @@ bool mmc_read_cd_toc(OpticalDrive* drive, MmcCdToc* toc);
 bool mmc_read_cd_blocks(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer);
 /* Verify 只请求 2352 字节主通道，不要求设备额外返回 Q。 */
 bool mmc_read_cd_main_blocks(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer);
+bool mmc_read_cd_raw_sector(OpticalDrive* drive, uint32_t lba, bool withSubChannel, void* buffer);
 
 #ifdef __cplusplus
 }

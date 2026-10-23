@@ -1,0 +1,13 @@
+#ifndef IMGBURN_GUI_ASSETS_H
+#define IMGBURN_GUI_ASSETS_H
+#include <windows.h>
+#include <stdbool.h>
+
+typedef enum { ASSET_WRITE, ASSET_BUILD_DEVICE, ASSET_READ, ASSET_BUILD_IMAGE, ASSET_VERIFY, ASSET_DISCOVERY, ASSET_BROWSE, ASSET_FOLDER, ASSET_REMOVE, ASSET_INFO, ASSET_SECTOR_PREVIOUS, ASSET_SECTOR_NEXT, ASSET_SECTOR_REFRESH, ASSET_SECTOR_LAST, ASSET_COUNT } GuiAssetId;
+typedef struct { HBITMAP images[ASSET_COUNT]; HICON largeIcon, smallIcon; unsigned loaded; } GuiAssets;
+/* root 为空时只从程序目录的 resources 子目录加载，不依赖当前工作目录。 */
+void imgburn_gui_assets_load(GuiAssets* assets, const wchar_t* root);
+void imgburn_gui_assets_free(GuiAssets* assets);
+bool imgburn_gui_asset_draw(const GuiAssets* assets, GuiAssetId id, HDC dc, int x, int y, int width, int height, bool enabled);
+bool imgburn_gui_asset_button(const GuiAssets* assets, GuiAssetId id, const DRAWITEMSTRUCT* draw);
+#endif

@@ -48,6 +48,7 @@ MmcProfile mmc_get_current_profile(OpticalDrive* drive) {
     if (!spti_send_cdb(drive, cdb, 10, buffer, 8, true, 5)) {
         return MMC_PROFILE_UNKNOWN;
     }
+    if (drive->lastTransferBytes != sizeof(buffer)) { drive->lastError = ERROR_READ_FAULT; SetLastError(ERROR_READ_FAULT); return MMC_PROFILE_UNKNOWN; }
 
     uint16_t profile = read_be16(&buffer[6]);
     return (MmcProfile)profile;
@@ -280,13 +281,15 @@ invalid:
     memset(toc,0,sizeof(*toc)); drive->lastError = ERROR_INVALID_DATA; SetLastError(ERROR_INVALID_DATA); return false;
 }
 
-static bool mmc_read_cd_transfer(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer, bool withQ) {
-    if (!buffer || !count || count > 27 || lba > UINT32_MAX - ((uint32_t)count - 1)) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
-    uint8_t cdb[12] = {0xBE}; write_be32(cdb + 2,lba); cdb[7] = (uint8_t)(count >> 8); cdb[8] = (uint8_t)count; cdb[9] = 0xF8; cdb[10] = withQ ? 2 : 0;
-    uint32_t bytes = (uint32_t)count * (withQ ? 2368 : 2352);
+static bool mmc_read_cd_transfer(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer, unsigned subChannel) {
+    uint32_t stride = subChannel == 1 ? 2448 : subChannel == 2 ? 2368 : 2352;
+    if (!buffer || !count || subChannel > 2 || count > 65536 / stride || lba > UINT32_MAX - ((uint32_t)count - 1)) { if (drive) drive->lastError = ERROR_INVALID_PARAMETER; SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    uint8_t cdb[12] = {0xBE}; write_be32(cdb + 2,lba); cdb[7] = (uint8_t)(count >> 8); cdb[8] = (uint8_t)count; cdb[9] = 0xF8; cdb[10] = (uint8_t)subChannel;
+    uint32_t bytes = (uint32_t)count * stride;
     if (!spti_send_cdb(drive,cdb,12,buffer,bytes,true,30)) return false;
     if (drive->lastTransferBytes != bytes) { drive->lastError = ERROR_READ_FAULT; SetLastError(ERROR_READ_FAULT); return false; }
     return true;
 }
-bool mmc_read_cd_blocks(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer) { return mmc_read_cd_transfer(drive,lba,count,buffer,true); }
-bool mmc_read_cd_main_blocks(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer) { return mmc_read_cd_transfer(drive,lba,count,buffer,false); }
+bool mmc_read_cd_blocks(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer) { return mmc_read_cd_transfer(drive,lba,count,buffer,2); }
+bool mmc_read_cd_main_blocks(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer) { return mmc_read_cd_transfer(drive,lba,count,buffer,0); }
+bool mmc_read_cd_raw_sector(OpticalDrive* drive, uint32_t lba, bool withSubChannel, void* buffer) { return mmc_read_cd_transfer(drive,lba,1,buffer,withSubChannel ? 1 : 0); }
