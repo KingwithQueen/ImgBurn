@@ -78,7 +78,7 @@ static void print_usage(void) {
     printf("                                 Inspect one sector as hexadecimal and ASCII\n");
     printf("  read <drive> <out.iso|out.cue> [--retries <0..20>] [--replace]\n");
     printf("                                 Read data ISO or raw CD BIN/CUE with Q indexes\n");
-    printf("  burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle]\n");
+    printf("  burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle] [--opc]\n");
     printf("                                 Burn disc image with real-time telemetry\n");
     printf("  verify <drive> <image|--readable> [--retries <0..20>] [--compare-audio]\n");
     printf("                                 Verify data ISO/BIN or raw CD CUE; audio defaults to readability\n\n");
@@ -460,7 +460,7 @@ static int cmd_read(int argc, char** argv) {
 
 static int cmd_burn(int argc, char **argv) {
     if (argc < 4) {
-        printf("Usage: imgburn burn <drive> <image> [--speed <Nx>] [--test] [--verify]\n");
+        printf("Usage: imgburn burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle] [--opc]\n");
         return 1;
     }
 
@@ -468,27 +468,27 @@ static int cmd_burn(int argc, char **argv) {
     const char *imageArg = argv[3];
     bool testMode = false;
     bool verifyAfter = false;
-    double speed = 0; bool reserve = false, cycle = true;
+    double speed = 0; bool reserve = false, cycle = true, opc = false;
 
     for (int i = 4; i < argc; i++) {
         if (_stricmp(argv[i], "--test") == 0) testMode = true;
         else if (_stricmp(argv[i], "--verify") == 0) verifyAfter = true;
         else if (_stricmp(argv[i], "--reserve") == 0) reserve = true;
         else if (_stricmp(argv[i], "--no-cycle") == 0) cycle = false;
+        else if (_stricmp(argv[i], "--opc") == 0) opc = true;
         else if (_stricmp(argv[i], "--speed") == 0 && i + 1 < argc) {
             const char* value = argv[++i]; if (!_stricmp(value,"MAX")) speed = 0;
             else { char* end; speed = strtod(value,&end); if ((*end == 'x' || *end == 'X') && !end[1]) end++; if (!value[0] || *end || !isfinite(speed) || speed < 1 || speed * 1385 + 0.5 >= 65535) { printf("Error: Invalid DVD write speed.\n"); return 1; } }
         } else { printf("Error: Unknown or incomplete burn option.\n"); return 1; }
     }
 
-    if (testMode) { printf("Error: Device test-write mode is not implemented yet.\n"); return 1; }
     wchar_t drivePath[MAX_PATH], imagePath[MAX_PATH];
     if (!parse_drive_path(driveArg, drivePath, MAX_PATH) || !utf8_path(imageArg, imagePath, MAX_PATH)) return 1;
 
     wprintf(L"Target Drive: %ls\n", drivePath);
     wprintf(L"Source Image: %ls\n", imagePath);
     printf("Options: TestMode=%s, VerifyAfterBurn=%s, Speed=%.2fx (0=MAX)\n\n",
-           testMode ? "YES" : "NO", verifyAfter ? "YES" : "NO", speed);
+           testMode ? "YES" : "NO", verifyAfter && !testMode ? "YES" : "NO", speed);
 
     OpticalDrive drive;
     if (!spti_open_drive(&drive, drivePath, true)) {
@@ -504,7 +504,7 @@ static int cmd_burn(int argc, char **argv) {
     config.verifyAfterWrite = verifyAfter;
     config.writeSpeedKbps = speed > 0 ? (uint16_t)(speed * 1385 + 0.5) : 0xFFFF;
     config.ringBufferBytes = 32 * 1024 * 1024;
-    config.reserveTrack = reserve; config.cycleTrayBeforeVerify = cycle;
+    config.reserveTrack = reserve; config.cycleTrayBeforeVerify = cycle; config.performOpc = opc;
     HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; } config.cancelEvent = cancel;
     AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock); bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
 
@@ -514,7 +514,7 @@ static int cmd_burn(int argc, char **argv) {
     printf("\n");
 
     if (ok) {
-        printf("Burn operation completed successfully!\n");
+        printf(testMode ? "Device test write completed; recorded-data verification was skipped.\n" : "Burn operation completed successfully!\n");
     } else {
         printf("Burn operation failed (error %lu).\n",error);
     }

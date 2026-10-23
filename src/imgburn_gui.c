@@ -55,7 +55,7 @@ struct GuiWindow {
     wchar_t sourceImage[MAX_PATH], destinationImage[MAX_PATH], readImage[MAX_PATH], volumeLabel[127];
     FsTypeFlags fsTypes;
     UdfRevision revision;
-    bool dvdVideo, bluray, deduplicate, verifyAfter, verifyAgainstImage;
+    bool dvdVideo, bluray, deduplicate, verifyAfter, verifyAgainstImage, testMode, testWriteSupported;
     OpticalDriveInfo devices[MAX_OPTICAL_DRIVES];
     int driveCount, selectedDrive;
     GuiJob* job;
@@ -123,9 +123,17 @@ static void gui_read_controls(GuiWindow* ui) {
     if (ui->dvd) ui->dvdVideo = SendMessageW(ui->dvd, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (ui->bd) ui->bluray = SendMessageW(ui->bd, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (ui->optimize) ui->deduplicate = SendMessageW(ui->optimize, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    if (ui->verify) ui->verifyAfter = SendMessageW(ui->verify, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    if (ui->mode == GUI_WRITE && GetDlgItem(ui->window,UI_TEST)) ui->testMode = ui->testWriteSupported && SendMessageW(GetDlgItem(ui->window,UI_TEST),BM_GETCHECK,0,0) == BST_CHECKED;
+    if (ui->verify && !ui->testMode) ui->verifyAfter = SendMessageW(ui->verify, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (ui->compare) ui->verifyAgainstImage = SendMessageW(ui->compare, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (ui->drives) ui->selectedDrive = (int)SendMessageW(ui->drives, CB_GETCURSEL, 0, 0);
+}
+
+static void gui_write_checks(GuiWindow* ui) {
+    if (ui->mode != GUI_WRITE) return; HWND test = GetDlgItem(ui->window,UI_TEST); if (!test) return;
+    if (!ui->testWriteSupported) ui->testMode = false;
+    SendMessageW(test,BM_SETCHECK,ui->testMode ? BST_CHECKED : BST_UNCHECKED,0); EnableWindow(test,!ui->job && ui->testWriteSupported);
+    if (ui->verify) { SendMessageW(ui->verify,BM_SETCHECK,!ui->testMode && ui->verifyAfter ? BST_CHECKED : BST_UNCHECKED,0); EnableWindow(ui->verify,!ui->job && !ui->testMode); }
 }
 
 static void gui_menu(GuiWindow* ui) {
@@ -203,7 +211,7 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
         SetWindowPos(ui->tabs, HWND_BOTTOM, 0,0,0,0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         ctl(ui, ui->window, L"BUTTON", L"计算", WS_TABSTOP, UI_CALCULATE, 450, 326, 90, 30);
     }
-    if (mode == GUI_WRITE) { ui->verify = ctl(ui, ui->window, L"BUTTON", L"验证", WS_TABSTOP | BS_AUTOCHECKBOX, UI_VERIFY_CHECK, 110, 246, 65, 22); SendMessageW(ui->verify, BM_SETCHECK, ui->verifyAfter ? BST_CHECKED : BST_UNCHECKED, 0); HWND test = ctl(ui, ui->window, L"BUTTON", L"测试模式", BS_AUTOCHECKBOX, UI_TEST, 16, 246, 85, 22); EnableWindow(test, FALSE); }
+    if (mode == GUI_WRITE) { ui->verify = ctl(ui, ui->window, L"BUTTON", L"验证", WS_TABSTOP | BS_AUTOCHECKBOX, UI_VERIFY_CHECK, 110, 246, 65, 22); ctl(ui, ui->window, L"BUTTON", L"测试模式", WS_TABSTOP | BS_AUTOCHECKBOX, UI_TEST, 16, 246, 85, 22); gui_write_checks(ui); }
     const wchar_t* start = build ? L"构建" : mode == GUI_READ ? L"读取" : mode == GUI_VERIFY ? L"验证" : mode == GUI_DISCOVERY ? L"品质测试" : L"刻录";
     ui->go = ctl(ui, ui->window, L"BUTTON", start, WS_TABSTOP | BS_DEFPUSHBUTTON, UI_GO, 98, 292, 140, 58);
     ui->cancel = ctl(ui, ui->window, L"BUTTON", L"取消", WS_TABSTOP, UI_CANCEL, 246, 328, 70, 24); EnableWindow(ui->cancel, FALSE);
@@ -257,7 +265,7 @@ static GuiJob* gui_job(GuiWindow* ui, GuiOperation operation, const GuiPath* pat
     job->sources = (GuiPath*)calloc(count, sizeof(*paths)); job->cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!job->sources || !job->cancel) { imgburn_gui_job_free(job); return NULL; }
     memcpy(job->sources, paths, count * sizeof(*paths)); job->sourceCount = count; job->owner = ui->window; job->operation = operation;
-    wcscpy(job->destination, ui->mode == GUI_READ ? ui->readImage : ui->destinationImage); wcscpy(job->label, ui->volumeLabel); job->fsTypes = ui->fsTypes; job->revision = ui->revision; job->dvdVideo = ui->dvdVideo; job->bluray = ui->bluray; job->optimize = ui->deduplicate; job->verify = ui->verifyAfter; job->speed = 0xFFFF; job->oppositeTrackPath = true;
+    wcscpy(job->destination, ui->mode == GUI_READ ? ui->readImage : ui->destinationImage); wcscpy(job->label, ui->volumeLabel); job->fsTypes = ui->fsTypes; job->revision = ui->revision; job->dvdVideo = ui->dvdVideo; job->bluray = ui->bluray; job->optimize = ui->deduplicate; job->testMode = operation == GUI_WRITE_DISC && ui->testMode; job->verify = ui->verifyAfter && !job->testMode; job->speed = 0xFFFF; job->oppositeTrackPath = true;
     if (ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount) wcscpy(job->drive, ui->devices[ui->selectedDrive].devicePath); return job;
 }
 static bool gui_launch(GuiWindow* ui, GuiJob* job) {
@@ -266,7 +274,7 @@ static bool gui_launch(GuiWindow* ui, GuiJob* job) {
     if (!job->thread) { ui->job = NULL; imgburn_gui_job_free(job); return false; }
     if (ui->go) EnableWindow(ui->go, FALSE); if (ui->cancel) EnableWindow(ui->cancel, job->operation == GUI_CALCULATE || job->operation == GUI_BUILD_IMAGE || job->operation == GUI_CREATE_CUE || job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC);
     if (job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC) { EnableWindow(ui->destination,FALSE); EnableWindow(ui->drives,FALSE); }
-    gui_status(ui, L"正在执行..."); gui_menu(ui); return true;
+    gui_write_checks(ui); gui_status(ui, L"正在执行..."); gui_menu(ui); return true;
 }
 
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
@@ -281,7 +289,7 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
         if (!gui_file(ui->window, ui->destinationImage, true, L"ISO 镜像 (*.iso)\0*.iso\0\0", L"iso")) return;
         if (ui->destination) SetWindowTextW(ui->destination, ui->destinationImage);
     } else if (operation == GUI_BUILD_IMAGE && GetFileAttributesW(ui->destinationImage) != INVALID_FILE_ATTRIBUTES && MessageBoxW(ui->window, L"目标文件已存在，是否替换？", L"ImgBurn", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
-    if (operation == GUI_WRITE_DISC && MessageBoxW(ui->window, L"将开始向所选光驱写入镜像，是否继续？", L"ImgBurn", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+    if (operation == GUI_WRITE_DISC && MessageBoxW(ui->window,ui->testMode ? L"将以设备测试模式执行镜像写入流程，是否继续？" : L"将开始向所选光驱写入镜像，是否继续？", L"ImgBurn", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
     bool replace = false;
     if (operation == GUI_READ_DISC) {
         if (!ui->readImage[0]) { if (!gui_file(ui->window,ui->readImage,true,readFilter,L"iso")) return; if (ui->destination) SetWindowTextW(ui->destination,ui->readImage); replace = GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES; }
@@ -376,7 +384,7 @@ static void gui_ez_draw(GuiWindow* ui, DRAWITEMSTRUCT* draw) {
 
 static void gui_complete(GuiWindow* ui, GuiJob* job) {
     if (ui->job != job) return; WaitForSingleObject(job->thread, INFINITE); ui->job = NULL;
-    if (job->operation == GUI_DRIVE_INFO) ui->mediaReady = job->mediaReady;
+    if (job->operation == GUI_DRIVE_INFO) { ui->mediaReady = job->mediaReady; ui->testWriteSupported = job->testWriteSupported; }
     if (job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC) { EnableWindow(ui->destination,TRUE); EnableWindow(ui->drives,TRUE); }
     if (ui->progress) SendMessageW(ui->progress, PBM_SETPOS, job->succeeded && job->operation != GUI_DRIVE_INFO ? 100 : 0, 0); if (ui->info) SetWindowTextW(ui->info,job->result); gui_log(ui,job->result);
     const wchar_t* completed = job->operation == GUI_DRIVE_INFO ? (job->mediaReady ? L"介质已就绪" : L"介质未就绪或未插入光盘") : job->operation == GUI_CALCULATE ? L"计算完成" : job->operation == GUI_INSPECT ? L"镜像信息已载入" : L"操作成功完成";
@@ -387,7 +395,7 @@ static void gui_complete(GuiWindow* ui, GuiJob* job) {
         else { HWND toolWindow = ui->tool->window; for (HWND child = GetWindow(toolWindow,GW_CHILD); child; child = GetWindow(child,GW_HWNDNEXT)) EnableWindow(child,TRUE); SetWindowTextW(toolWindow,ui->tool->operation == GUI_CREATE_CUE ? L"生成 CUE 文件" : L"创建 MDS 文件"); if (ui->tool->layer) SendMessageW(toolWindow,WM_COMMAND,UI_TOOL_LAYER,0); MessageBoxW(toolWindow,job->result,L"ImgBurn",MB_OK | MB_ICONERROR); }
     }
     else if (!job->succeeded && job->error != ERROR_CANCELLED) MessageBoxW(ui->window,job->result,L"ImgBurn",MB_OK | MB_ICONERROR);
-    imgburn_gui_job_free(job); gui_menu(ui);
+    imgburn_gui_job_free(job); gui_write_checks(ui); gui_menu(ui);
 }
 
 static LRESULT CALLBACK gui_log_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
@@ -440,6 +448,8 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
             case UI_MODE_EZ: gui_mode(ui,GUI_EZ); break; case UI_MODE_READ: gui_mode(ui,GUI_READ); break; case UI_MODE_BUILD: gui_mode(ui,GUI_BUILD); break; case UI_MODE_WRITE: gui_mode(ui,GUI_WRITE); break; case UI_MODE_VERIFY: gui_mode(ui,GUI_VERIFY); break; case UI_MODE_DISCOVERY: gui_mode(ui,GUI_DISCOVERY); break;
             case UI_SOURCE_FILE: gui_source(ui,false); break; case UI_SOURCE_FOLDER: gui_source(ui,true); break;
             case UI_VERIFY_COMPARE: gui_read_controls(ui); gui_menu(ui); break;
+            case UI_TEST: ui->testMode = ui->testWriteSupported && SendMessageW(GetDlgItem(window,UI_TEST),BM_GETCHECK,0,0) == BST_CHECKED; gui_write_checks(ui); break;
+            case UI_VERIFY_CHECK: gui_read_controls(ui); gui_write_checks(ui); break;
             case UI_DEST_EDIT: if (HIWORD(wp) == EN_CHANGE && ui->mode == GUI_VERIFY && ui->destination) { gui_read_controls(ui); gui_menu(ui); } break;
             case UI_CLEAR: free(ui->paths); ui->paths = NULL; ui->pathCount = 0; gui_mode(ui,ui->mode); break;
             case UI_REMOVE_SOURCE: if (ui->sources) { for (size_t i = ui->pathCount; i > 0; i--) if (SendMessageW(ui->sources,LB_GETSEL,i - 1,0) > 0) { memmove(ui->paths + i - 1,ui->paths + i,(ui->pathCount - i) * sizeof(*ui->paths)); ui->pathCount--; } gui_mode(ui,GUI_BUILD); } break;

@@ -154,6 +154,13 @@ bool mmc_load_eject(OpticalDrive* drive, bool eject);
 bool mmc_reserve_track(OpticalDrive* drive, uint32_t reservationSizeLba);
 /* 刻录期间禁止手动弹出托盘，结束后恢复。 */
 bool mmc_prevent_removal(OpticalDrive* drive, bool prevent);
+/* DVD-R DAO 的能力和可恢复写入参数页；数据不包含 MODE SELECT 头。 */
+typedef struct { bool testWrite, bufferUnderrunFree; } MmcDvdWriteFeatures;
+typedef struct { uint16_t size; uint8_t page[56]; } MmcWriteParameters;
+bool mmc_get_dvd_write_features(OpticalDrive* drive, MmcDvdWriteFeatures* features);
+bool mmc_get_write_parameters(OpticalDrive* drive, MmcWriteParameters* parameters);
+bool mmc_set_write_parameters(OpticalDrive* drive, const MmcWriteParameters* parameters);
+bool mmc_perform_opc(OpticalDrive* drive);
 
 /**
  * @brief WRITE (10) 写入 2048 字节数据扇区，每次最多 32 扇区。

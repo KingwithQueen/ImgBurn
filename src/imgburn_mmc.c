@@ -223,6 +223,36 @@ bool mmc_reserve_track(OpticalDrive* drive, uint32_t reservationSizeLba) {
 
 bool mmc_prevent_removal(OpticalDrive* drive, bool prevent) { uint8_t cdb[6] = {0x1E}; cdb[4] = prevent ? 1 : 0; return spti_send_cdb(drive,cdb,6,NULL,0,true,10); }
 
+static bool mmc_write_parameter_error(OpticalDrive* drive, DWORD error) { if (drive) drive->lastError = error; SetLastError(error); return false; }
+bool mmc_get_dvd_write_features(OpticalDrive* drive, MmcDvdWriteFeatures* features) {
+    if (!features) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER); memset(features,0,sizeof(*features));
+    uint8_t cdb[10] = {0x46,2,0,0x2F}, data[16] = {0}; cdb[8] = sizeof(data);
+    if (!spti_send_cdb(drive,cdb,10,data,sizeof(data),true,10)) return false;
+    if (drive->lastTransferBytes == 8 && read_be32(data) == 4) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    if (drive->lastTransferBytes != sizeof(data) || read_be32(data) < 12) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
+    if (read_be16(data + 6) != MMC_PROFILE_DVD_R_SEQ || read_be16(data + 8) != 0x2F || !(data[10] & 1) || data[11] != 4) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    features->testWrite = (data[12] & 4) != 0; features->bufferUnderrunFree = (data[12] & 0x40) != 0; return true;
+}
+bool mmc_get_write_parameters(OpticalDrive* drive, MmcWriteParameters* parameters) {
+    if (!parameters) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER); memset(parameters,0,sizeof(*parameters));
+    uint8_t cdb[10] = {0x5A,8,5}, data[128] = {0}; cdb[8] = sizeof(data);
+    if (!spti_send_cdb(drive,cdb,10,data,sizeof(data),true,10)) return false;
+    if (drive->lastTransferBytes < 10 || drive->lastTransferBytes > sizeof(data)) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
+    uint32_t declared = (uint32_t)read_be16(data) + 2;
+    if (declared < 10 || declared > drive->lastTransferBytes) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
+    /* MMC 不使用块描述符或模式子页；只接受完整的标准长度或带厂商尾部的页。 */
+    if (read_be16(data + 6) || (data[8] & 0x7F) != 5 || (data[9] != 0x32 && data[9] != 0x36)) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+    uint16_t size = (uint16_t)(data[9] + 2); if ((uint32_t)size + 8 > declared) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
+    parameters->size = size; memcpy(parameters->page,data + 8,size); return true;
+}
+bool mmc_set_write_parameters(OpticalDrive* drive, const MmcWriteParameters* parameters) {
+    if (!parameters || (parameters->size != 52 && parameters->size != 56) || (parameters->page[0] & 0x7F) != 5 || parameters->page[1] + 2 != parameters->size) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    uint8_t cdb[10] = {0x55,0x10}, data[64] = {0}; uint16_t size = (uint16_t)(parameters->size + 8); write_be16(cdb + 7,size); memcpy(data + 8,parameters->page,parameters->size); data[8] &= 0x7F;
+    if (!spti_send_cdb(drive,cdb,10,data,size,false,10)) return false;
+    if (drive->lastTransferBytes != size) return mmc_write_parameter_error(drive,ERROR_WRITE_FAULT); return true;
+}
+bool mmc_perform_opc(OpticalDrive* drive) { uint8_t cdb[10] = {0x54,1}; return spti_send_cdb(drive,cdb,10,NULL,0,true,180); }
+
 bool mmc_write_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, const void* buffer) {
     if (!buffer || blockCount == 0 || blockCount > 32 || startLba > UINT32_MAX - ((uint32_t)blockCount - 1)) { if (drive) drive->lastError = ERROR_INVALID_PARAMETER; SetLastError(ERROR_INVALID_PARAMETER); return false; }
 
