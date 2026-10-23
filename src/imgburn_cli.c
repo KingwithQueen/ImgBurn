@@ -80,6 +80,7 @@ static void print_usage(void) {
     printf("                                 Read data ISO or raw CD BIN/CUE with Q indexes\n");
     printf("  burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle] [--opc]\n");
     printf("                                 Burn disc image with real-time telemetry\n");
+    printf("  erase <drive> [--quick|--full]   Erase CD-RW/DVD-RW; cancellation waits for the device\n");
     printf("  verify <drive> <image|--readable> [--retries <0..20>] [--compare-audio]\n");
     printf("                                 Verify data ISO/BIN or raw CD CUE; audio defaults to readability\n\n");
     printf("Examples:\n");
@@ -103,6 +104,8 @@ static bool parse_drive_path(const char *arg, wchar_t *outPath, size_t maxLen) {
     if (strlen(arg) == 1 && isalpha((unsigned char)arg[0])) {
         letter = (char)toupper((unsigned char)arg[0]);
     } else if (strlen(arg) >= 2 && isalpha((unsigned char)arg[0]) && arg[1] == ':') {
+        /* 完整文件路径不能被截断为卷设备，避免向错误的盘符发送命令。 */
+        if (strlen(arg) != 2) { printf("Error: Invalid drive path; use a drive letter or an explicit device path.\n"); return false; }
         letter = (char)toupper((unsigned char)arg[0]);
     }
 
@@ -458,6 +461,19 @@ static int cmd_read(int argc, char** argv) {
     printf(ok ? "\nDisc image read successfully.\n" : "\nDisc read failed (error %lu).\n",error); return ok ? 0 : 1;
 }
 
+/* 整盘擦除使用同一后台命令流程；Ctrl+C 不打断正在进行的物理擦除。 */
+static int cmd_erase(int argc, char** argv) {
+    if (argc < 3 || argc > 4 || (argc == 4 && _stricmp(argv[3],"--quick") && _stricmp(argv[3],"--full"))) { printf("Usage: imgburn erase <drive> [--quick|--full]\n"); return 1; }
+    wchar_t path[MAX_PATH]; if (!parse_drive_path(argv[2],path,MAX_PATH)) return 1;
+    OpticalDrive drive; if (!spti_open_drive(&drive,path,false)) { printf("Error: Failed to open drive (error %lu).\n",GetLastError()); return 1; }
+    HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; }
+    EraseConfig config = {&drive,cancel,argc == 4 && !_stricmp(argv[3],"--full")};
+    AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock); bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
+    bool ok = pipeline_erase_disc(&config,on_cli_burn_progress,NULL); DWORD error = GetLastError();
+    if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock); spti_close_drive(&drive);
+    printf(ok ? "\nDisc erase completed.\n" : "\nDisc erase failed or was cancelled (error %lu).\n",error); return ok ? 0 : 1;
+}
+
 static int cmd_burn(int argc, char **argv) {
     if (argc < 4) {
         printf("Usage: imgburn burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle] [--opc]\n");
@@ -790,6 +806,8 @@ static int run_cli(int argc, char **argv) {
         return cmd_build(argc, argv);
     } else if (_stricmp(cmd, "burn") == 0) {
         return cmd_burn(argc, argv);
+    } else if (_stricmp(cmd, "erase") == 0) {
+        return cmd_erase(argc,argv);
     } else if (_stricmp(cmd, "read") == 0) {
         return cmd_read(argc,argv);
     } else if (_stricmp(cmd, "verify") == 0) {

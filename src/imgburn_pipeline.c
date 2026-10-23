@@ -279,6 +279,60 @@ cleanup:
     SetLastError(success ? ERROR_SUCCESS : error); return success;
 }
 
+static bool erase_supported(MmcProfile profile) { return profile == MMC_PROFILE_CD_RW || profile == MMC_PROFILE_DVD_RW_SEQ || profile == MMC_PROFILE_DVD_RW_RO; }
+static bool erase_requested(const EraseConfig* config) { return config->cancelEvent && WaitForSingleObject(config->cancelEvent,0) == WAIT_OBJECT_0; }
+static bool erase_aborted(PipelineStats* stats, bool started, PipelineProgressCallback callback, void* userData) {
+    stats->state = PIPELINE_STATE_ABORTED; snprintf(stats->statusMessage,sizeof(stats->statusMessage),started ? "Cancelled after device erase finished; disc contents were erased." : "Erase cancelled before the device command."); if (callback) callback(stats,userData); SetLastError(ERROR_CANCELLED); return false;
+}
+bool pipeline_erase_disc(const EraseConfig* config, PipelineProgressCallback callback, void* userData) {
+    PipelineStats stats = {0};
+    if (!config || !config->drive) return burn_failure(&stats,ERROR_INVALID_PARAMETER,"Invalid erase configuration.",callback,userData);
+    if (erase_requested(config)) return erase_aborted(&stats,false,callback,userData);
+    bool success = false, ownedLock = false, prevented = false, cancelled = false; DWORD error; MmcDiscInfo initial, checked;
+    stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Checking rewritable CD/DVD media..."); if (callback) callback(&stats,userData);
+    if (!mmc_test_unit_ready(config->drive) || !mmc_read_disc_information(config->drive,&initial)) return pipeline_failure(&stats,"Cannot inspect media before erase.",callback,userData);
+    if (!erase_supported(initial.currentProfile) || !initial.isErasable) return burn_failure(&stats,ERROR_NOT_SUPPORTED,"Erase currently supports CD-RW and single-layer DVD-RW.",callback,userData);
+    if (initial.discStatus == DISC_STATUS_OTHER) return burn_failure(&stats,ERROR_INVALID_DATA,"Invalid disc state before erase.",callback,userData);
+    if (erase_requested(config)) return erase_aborted(&stats,false,callback,userData);
+    if (!config->drive->isLocked) { if (!spti_lock_drive(config->drive,true)) { pipeline_failure(&stats,"Cannot lock the volume for erase.",callback,userData); goto cleanup; } ownedLock = true; }
+    if (!mmc_prevent_removal(config->drive,true)) { pipeline_failure(&stats,"Cannot prevent medium removal during erase.",callback,userData); goto cleanup; } prevented = true;
+    if (!mmc_test_unit_ready(config->drive) || !mmc_read_disc_information(config->drive,&checked)) { pipeline_failure(&stats,"Cannot recheck media before erase.",callback,userData); goto cleanup; }
+    if (checked.currentProfile != initial.currentProfile || !checked.isErasable || checked.discStatus != initial.discStatus || checked.numSessions != initial.numSessions || checked.lastTrack != initial.lastTrack) { burn_failure(&stats,ERROR_MEDIA_CHANGED,"Media layout changed before erase.",callback,userData); goto cleanup; }
+    if (erase_requested(config)) { erase_aborted(&stats,false,callback,userData); goto cleanup; }
+    stats.state = PIPELINE_STATE_ERASING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),config->full ? "Starting full disc erase..." : "Starting quick disc erase..."); if (callback) callback(&stats,userData);
+    if (erase_requested(config)) { erase_aborted(&stats,false,callback,userData); goto cleanup; }
+    if (!mmc_start_blank_disc(config->drive,config->full)) { pipeline_failure(&stats,"Device rejected the erase command.",callback,userData); goto cleanup; }
+    ULONGLONG start = GetTickCount64();
+    for (;;) {
+        cancelled = cancelled || erase_requested(config);
+        /* 传输失败可能不更新 sense，不能沿用上一次忙碌响应继续等待。 */
+        memset(&config->drive->lastSense,0,sizeof(config->drive->lastSense)); bool ready = mmc_test_unit_ready(config->drive);
+        ScsiSenseResult* sense = &config->drive->lastSense;
+        if (!ready && !(sense->senseKey == 2 && sense->asc == 4 && sense->ascq == 7)) { pipeline_failure(&stats,"Device failed while erasing.",callback,userData); goto cleanup; }
+        MmcEraseProgress progress; if (!mmc_read_erase_progress(config->drive,&progress)) { pipeline_failure(&stats,"Cannot read device erase status.",callback,userData); goto cleanup; }
+        stats.elapsedTimeSec = (uint32_t)((GetTickCount64() - start) / 1000);
+        if (ready && !progress.active) {
+            if (mmc_read_disc_information(config->drive,&checked)) break;
+            sense = &config->drive->lastSense;
+            if (!(sense->senseKey == 2 && sense->asc == 4 && sense->ascq == 7)) { pipeline_failure(&stats,"Cannot inspect erased media.",callback,userData); goto cleanup; }
+        }
+        if (progress.valid) { int percent = (int)((uint32_t)progress.value * 100 / 65536); if (percent > stats.progressPercent) stats.progressPercent = percent; }
+        snprintf(stats.statusMessage,sizeof(stats.statusMessage),cancelled ? "Cancellation requested; waiting for device erase to finish..." : "Device erase in progress..."); if (callback) callback(&stats,userData);
+        if (stats.elapsedTimeSec >= 7200) { burn_failure(&stats,ERROR_TIMEOUT,"Device erase timed out; its physical operation may continue.",callback,userData); goto cleanup; }
+        /* 取消事件已触发时仍须等待物理操作结束，避免忙循环或提前解除托盘保护。 */
+        Sleep(1000);
+    }
+    MmcProfile expected = initial.currentProfile == MMC_PROFILE_CD_RW ? MMC_PROFILE_CD_RW : MMC_PROFILE_DVD_RW_SEQ;
+    if (checked.currentProfile != expected || !checked.isErasable || checked.discStatus != DISC_STATUS_EMPTY || checked.lastSessionStatus) { burn_failure(&stats,ERROR_INVALID_DATA,"Device did not report blank media after erase.",callback,userData); goto cleanup; }
+    if (cancelled || erase_requested(config)) { erase_aborted(&stats,true,callback,userData); goto cleanup; } success = true;
+cleanup:
+    error = GetLastError();
+    if (prevented && !mmc_prevent_removal(config->drive,false) && success) { error = GetLastError(); success = burn_failure(&stats,error,"Cannot restore medium removal after erase.",callback,userData); }
+    if (ownedLock && !spti_lock_drive(config->drive,false) && success) { error = GetLastError(); success = burn_failure(&stats,error,"Cannot unlock the erased volume.",callback,userData); }
+    if (success) { stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Disc erase completed."); if (callback) callback(&stats,userData); }
+    SetLastError(success ? ERROR_SUCCESS : error); return success;
+}
+
 bool pipeline_verify_disc(OpticalDrive* drive, const wchar_t* sourceImagePath, PipelineProgressCallback callback, void* userData) {
     PipelineStats stats = {0};
     if (!drive || !sourceImagePath) return pipeline_failure(&stats, "Invalid verify configuration.", callback, userData);

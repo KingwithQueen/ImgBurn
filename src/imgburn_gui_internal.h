@@ -5,7 +5,7 @@
 #include "imgburn_spti.h"
 
 typedef enum { GUI_EZ, GUI_READ, GUI_BUILD, GUI_WRITE, GUI_VERIFY, GUI_DISCOVERY } GuiMode;
-typedef enum { GUI_CALCULATE, GUI_BUILD_IMAGE, GUI_INSPECT, GUI_CREATE_CUE, GUI_CREATE_MDS, GUI_DRIVE_INFO, GUI_VERIFY_DISC, GUI_WRITE_DISC, GUI_DVD_INFO, GUI_DVD_PREVIEW, GUI_READ_DISC } GuiOperation;
+typedef enum { GUI_CALCULATE, GUI_BUILD_IMAGE, GUI_INSPECT, GUI_CREATE_CUE, GUI_CREATE_MDS, GUI_DRIVE_INFO, GUI_VERIFY_DISC, GUI_WRITE_DISC, GUI_DVD_INFO, GUI_DVD_PREVIEW, GUI_READ_DISC, GUI_ERASE_QUICK, GUI_ERASE_FULL } GuiOperation;
 typedef struct { wchar_t path[MAX_PATH]; } GuiPath;
 enum { GUI_JOB_PROGRESS = WM_APP + 40, GUI_JOB_DONE };
 
@@ -22,7 +22,7 @@ typedef struct {
     uint16_t speed;
     uint32_t layerBreak;
     uint32_t comparedSectors, readableOnlySectors, miscompares;
-    bool succeeded, builderReady, mediaReady;
+    bool succeeded, builderReady, mediaReady, eraseSupported;
     DWORD error;
     wchar_t result[8192];
     ImageBuilder builder;

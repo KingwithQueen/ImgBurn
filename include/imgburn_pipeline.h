@@ -30,7 +30,8 @@ typedef enum {
     PIPELINE_STATE_COMPLETED,
     PIPELINE_STATE_ABORTED,
     PIPELINE_STATE_FAILED,
-    PIPELINE_STATE_READING
+    PIPELINE_STATE_READING,
+    PIPELINE_STATE_ERASING
 } PipelineState;
 
 /**
@@ -89,6 +90,10 @@ typedef struct {
 bool pipeline_burn_image(const BurnConfig* config,
                          PipelineProgressCallback callback,
                          void* userData);
+
+/* CD-RW/DVD-RW 的整盘擦除。命令开始后的取消须等待设备结束，不能中断物理擦除。 */
+typedef struct { OpticalDrive* drive; HANDLE cancelEvent; bool full; } EraseConfig;
+bool pipeline_erase_disc(const EraseConfig* config, PipelineProgressCallback callback, void* userData);
 
 /**
  * @brief Execute Verify Mode: verify optical disc against an image file

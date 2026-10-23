@@ -141,6 +141,10 @@ bool mmc_close_track_session(OpticalDrive* drive, uint8_t closeType, uint16_t tr
  * @param blankType 0 = Blank entire disc, 1 = Minimal / Quick blank
  */
 bool mmc_blank_disc(OpticalDrive* drive, uint8_t blankType);
+/* 后台擦除仅支持整盘/最小擦除；进度使用 REQUEST SENSE，兼容忙时 TUR 返回成功的旧设备。 */
+typedef struct { bool active, valid; uint16_t value; } MmcEraseProgress;
+bool mmc_start_blank_disc(OpticalDrive* drive, bool full);
+bool mmc_read_erase_progress(OpticalDrive* drive, MmcEraseProgress* progress);
 
 /**
  * @brief Eject or Load Disc Tray (SCSI 0x1B START STOP UNIT)

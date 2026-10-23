@@ -49,7 +49,7 @@ struct GuiWindow {
     HFONT font, bold;
     GuiMode mode;
     unsigned dpi;
-    bool outputDevice, logVisible, mediaReady;
+    bool outputDevice, logVisible, mediaReady, eraseSupported;
     GuiPath* paths;
     size_t pathCount;
     wchar_t sourceImage[MAX_PATH], destinationImage[MAX_PATH], readImage[MAX_PATH], volumeLabel[127];
@@ -163,7 +163,7 @@ static void gui_menu(GuiWindow* ui) {
     item(iso, UI_ISO_LABEL, L"更改卷标(&V)...", false); item(iso, UI_ISO_IFO, L"显示 IFO 换层信息(&I)...", false); popup(tools, iso, L"ISO");
     item(device, UI_DEVICE_REFRESH, L"刷新(&R)", idle && drive); separator(device);
     item(device, UI_DEVICE_LOAD, L"关闭托盘(&L)", false); item(device, UI_DEVICE_EJECT, L"弹出托盘(&E)", false); item(device, UI_DEVICE_LOCK, L"锁定托盘(&K)", false); item(device, UI_DEVICE_UNLOCK, L"解锁托盘(&U)", false); separator(device);
-    item(erase, UI_DEVICE_ERASE_QUICK, L"快速(&Q)", false); item(erase, UI_DEVICE_ERASE_FULL, L"完整(&F)", false); popup(device, erase, L"擦除光盘(&E)"); item(device, UI_DEVICE_SYNC, L"同步缓存(&S)", false);
+    item(erase, UI_DEVICE_ERASE_QUICK, L"快速(&Q)", idle && drive && ui->mediaReady && ui->eraseSupported); item(erase, UI_DEVICE_ERASE_FULL, L"完整(&F)", idle && drive && ui->mediaReady && ui->eraseSupported); popup(device, erase, L"擦除光盘(&E)"); item(device, UI_DEVICE_SYNC, L"同步缓存(&S)", false);
     item(close, UI_DEVICE_CLOSE_TRACK, L"轨道(&T)", false); item(close, UI_DEVICE_CLOSE_SESSION, L"区段(&S)", false); item(close, UI_DEVICE_CLOSE_DISC, L"光盘(&D)", false); popup(device, close, L"关闭(&C)"); separator(device);
     item(device, UI_DEVICE_ADVANCED, L"更改高级设置(&A)...", false); item(device, UI_DEVICE_BOOKTYPE, L"更改 Book Type(&B)...", false); item(device, UI_DEVICE_SECTORS, L"扇区查看器(&V)...", idle && drive); item(device, UI_DEVICE_REGION, L"地区码(&R)...", false); item(device, UI_DEVICE_CAPABILITIES, L"功能(&C)...", idle && drive); item(device, UI_DEVICE_FAMILY, L"设备关系(&F)...", false); item(device, UI_DEVICE_FIRMWARE, L"检查固件更新(&U)...", false); popup(tools, device, L"驱动器(&V)");
     HMENU changer = CreatePopupMenu(); item(changer, 180, L"状态", false); item(changer, 181, L"装载", false); item(changer, 182, L"卸载", false); popup(tools, changer, L"换盘器(&W)"); separator(tools);
@@ -246,7 +246,7 @@ static void gui_build_page(GuiWindow* ui) {
 }
 
 static void gui_refresh(GuiWindow* ui) {
-    ui->driveCount = spti_enumerate_drives(ui->devices, MAX_OPTICAL_DRIVES); ui->selectedDrive = ui->driveCount > 0 ? 0 : -1; ui->mediaReady = false;
+    ui->driveCount = spti_enumerate_drives(ui->devices, MAX_OPTICAL_DRIVES); ui->selectedDrive = ui->driveCount > 0 ? 0 : -1; ui->mediaReady = ui->eraseSupported = ui->testWriteSupported = false;
     if (ui->drives) { SendMessageW(ui->drives, CB_RESETCONTENT, 0, 0); for (int i = 0; i < ui->driveCount; i++) { wchar_t text[128]; swprintf(text, 128, L"%c:  %hs %hs", ui->devices[i].driveLetter ? ui->devices[i].driveLetter : L'?', ui->devices[i].vendorId, ui->devices[i].productId); SendMessageW(ui->drives, CB_ADDSTRING, 0, (LPARAM)text); } SendMessageW(ui->drives, CB_SETCURSEL, ui->selectedDrive, 0); }
     wchar_t text[80]; swprintf(text, 80, L"找到 %d 个光驱。", ui->driveCount); gui_log(ui, text); gui_menu(ui);
     if (ui->drives && ui->selectedDrive >= 0) gui_start(ui,GUI_DRIVE_INFO);
@@ -272,17 +272,18 @@ static bool gui_launch(GuiWindow* ui, GuiJob* job) {
     if (!job || ui->job) { imgburn_gui_job_free(job); return false; }
     ui->job = job; job->thread = CreateThread(NULL, 0, imgburn_gui_job_run, job, 0, NULL);
     if (!job->thread) { ui->job = NULL; imgburn_gui_job_free(job); return false; }
-    if (ui->go) EnableWindow(ui->go, FALSE); if (ui->cancel) EnableWindow(ui->cancel, job->operation == GUI_CALCULATE || job->operation == GUI_BUILD_IMAGE || job->operation == GUI_CREATE_CUE || job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC);
-    if (job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC) { EnableWindow(ui->destination,FALSE); EnableWindow(ui->drives,FALSE); }
+    if (ui->go) EnableWindow(ui->go, FALSE); if (ui->cancel) EnableWindow(ui->cancel, job->operation == GUI_CALCULATE || job->operation == GUI_BUILD_IMAGE || job->operation == GUI_CREATE_CUE || job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC || job->operation == GUI_ERASE_QUICK || job->operation == GUI_ERASE_FULL);
+    if (job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC || job->operation == GUI_ERASE_QUICK || job->operation == GUI_ERASE_FULL) { EnableWindow(ui->destination,FALSE); EnableWindow(ui->drives,FALSE); }
     gui_write_checks(ui); gui_status(ui, L"正在执行..."); gui_menu(ui); return true;
 }
 
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
     if (ui->job) return; gui_read_controls(ui);
+    bool erase = operation == GUI_ERASE_QUICK || operation == GUI_ERASE_FULL;
     if (ui->mode == GUI_VERIFY && ui->destination) GetWindowTextW(ui->destination, ui->sourceImage, MAX_PATH);
     GuiPath single = {0}; const GuiPath* sources = ui->paths; size_t count = ui->pathCount;
-    if (operation == GUI_DRIVE_INFO || operation == GUI_READ_DISC || operation == GUI_VERIFY_DISC || operation == GUI_WRITE_DISC) { if (ui->selectedDrive < 0 || ui->selectedDrive >= ui->driveCount) return; }
-    if (operation == GUI_INSPECT || operation == GUI_VERIFY_DISC || operation == GUI_WRITE_DISC || operation == GUI_DRIVE_INFO || operation == GUI_READ_DISC) { wcscpy(single.path, operation == GUI_DRIVE_INFO || operation == GUI_READ_DISC ? ui->devices[ui->selectedDrive].devicePath : ui->sourceImage); sources = &single; count = 1; }
+    if (erase || operation == GUI_DRIVE_INFO || operation == GUI_READ_DISC || operation == GUI_VERIFY_DISC || operation == GUI_WRITE_DISC) { if (ui->selectedDrive < 0 || ui->selectedDrive >= ui->driveCount) return; }
+    if (erase || operation == GUI_INSPECT || operation == GUI_VERIFY_DISC || operation == GUI_WRITE_DISC || operation == GUI_DRIVE_INFO || operation == GUI_READ_DISC) { wcscpy(single.path, erase || operation == GUI_DRIVE_INFO || operation == GUI_READ_DISC ? ui->devices[ui->selectedDrive].devicePath : ui->sourceImage); sources = &single; count = 1; }
     if (operation == GUI_VERIFY_DISC && !ui->verifyAgainstImage) single.path[0] = 0;
     if (!count || (!single.path[0] && sources == &single && (operation != GUI_VERIFY_DISC || ui->verifyAgainstImage))) { MessageBoxW(ui->window, L"请先选择来源。", L"ImgBurn", MB_OK | MB_ICONINFORMATION); return; }
     if (operation == GUI_BUILD_IMAGE && !ui->destinationImage[0]) {
@@ -290,6 +291,7 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
         if (ui->destination) SetWindowTextW(ui->destination, ui->destinationImage);
     } else if (operation == GUI_BUILD_IMAGE && GetFileAttributesW(ui->destinationImage) != INVALID_FILE_ATTRIBUTES && MessageBoxW(ui->window, L"目标文件已存在，是否替换？", L"ImgBurn", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
     if (operation == GUI_WRITE_DISC && MessageBoxW(ui->window,ui->testMode ? L"将以设备测试模式执行镜像写入流程，是否继续？" : L"将开始向所选光驱写入镜像，是否继续？", L"ImgBurn", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+    if (erase && MessageBoxW(ui->window,operation == GUI_ERASE_FULL ? L"完整擦除将清除所选光盘的内容。开始后取消仍须等待设备结束。是否继续？" : L"快速擦除将使所选光盘重新可写，数据区可能仍保留原内容。开始后取消仍须等待设备结束。是否继续？",L"ImgBurn",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
     bool replace = false;
     if (operation == GUI_READ_DISC) {
         if (!ui->readImage[0]) { if (!gui_file(ui->window,ui->readImage,true,readFilter,L"iso")) return; if (ui->destination) SetWindowTextW(ui->destination,ui->readImage); replace = GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES; }
@@ -384,8 +386,8 @@ static void gui_ez_draw(GuiWindow* ui, DRAWITEMSTRUCT* draw) {
 
 static void gui_complete(GuiWindow* ui, GuiJob* job) {
     if (ui->job != job) return; WaitForSingleObject(job->thread, INFINITE); ui->job = NULL;
-    if (job->operation == GUI_DRIVE_INFO) { ui->mediaReady = job->mediaReady; ui->testWriteSupported = job->testWriteSupported; }
-    if (job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC) { EnableWindow(ui->destination,TRUE); EnableWindow(ui->drives,TRUE); }
+    if (job->operation == GUI_DRIVE_INFO) { ui->mediaReady = job->mediaReady; ui->testWriteSupported = job->testWriteSupported; ui->eraseSupported = job->eraseSupported; }
+    if (job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC || job->operation == GUI_ERASE_QUICK || job->operation == GUI_ERASE_FULL) { EnableWindow(ui->destination,TRUE); EnableWindow(ui->drives,TRUE); }
     if (ui->progress) SendMessageW(ui->progress, PBM_SETPOS, job->succeeded && job->operation != GUI_DRIVE_INFO ? 100 : 0, 0); if (ui->info) SetWindowTextW(ui->info,job->result); gui_log(ui,job->result);
     const wchar_t* completed = job->operation == GUI_DRIVE_INFO ? (job->mediaReady ? L"介质已就绪" : L"介质未就绪或未插入光盘") : job->operation == GUI_CALCULATE ? L"计算完成" : job->operation == GUI_INSPECT ? L"镜像信息已载入" : L"操作成功完成";
     gui_status(ui, job->succeeded ? completed : job->error == ERROR_CANCELLED ? L"操作已取消" : L"操作失败；请查看日志");
@@ -395,7 +397,8 @@ static void gui_complete(GuiWindow* ui, GuiJob* job) {
         else { HWND toolWindow = ui->tool->window; for (HWND child = GetWindow(toolWindow,GW_CHILD); child; child = GetWindow(child,GW_HWNDNEXT)) EnableWindow(child,TRUE); SetWindowTextW(toolWindow,ui->tool->operation == GUI_CREATE_CUE ? L"生成 CUE 文件" : L"创建 MDS 文件"); if (ui->tool->layer) SendMessageW(toolWindow,WM_COMMAND,UI_TOOL_LAYER,0); MessageBoxW(toolWindow,job->result,L"ImgBurn",MB_OK | MB_ICONERROR); }
     }
     else if (!job->succeeded && job->error != ERROR_CANCELLED) MessageBoxW(ui->window,job->result,L"ImgBurn",MB_OK | MB_ICONERROR);
-    imgburn_gui_job_free(job); gui_write_checks(ui); gui_menu(ui);
+    bool erased = job->operation == GUI_ERASE_QUICK || job->operation == GUI_ERASE_FULL;
+    imgburn_gui_job_free(job); gui_write_checks(ui); gui_menu(ui); if (erased) gui_start(ui,GUI_DRIVE_INFO);
 }
 
 static LRESULT CALLBACK gui_log_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
@@ -443,7 +446,7 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
         UINT command = LOWORD(wp);
         if (command >= UI_EZ_FIRST && command < UI_EZ_FIRST + 6) { static const GuiMode modes[] = {GUI_WRITE,GUI_BUILD,GUI_READ,GUI_BUILD,GUI_VERIFY,GUI_DISCOVERY}; ui->outputDevice = command == UI_EZ_FIRST + 1; gui_mode(ui,modes[command - UI_EZ_FIRST]); return 0; }
         if (command == UI_LOG) { ui->logVisible = !ui->logVisible; ShowWindow(ui->logWindow,ui->logVisible ? SW_SHOWNOACTIVATE : SW_HIDE); gui_menu(ui); return 0; }
-        if (ui->job) { if (command == UI_CANCEL) { SetEvent(ui->job->cancel); EnableWindow(ui->cancel,FALSE); gui_status(ui,L"正在取消..."); } return 0; }
+        if (ui->job) { if (command == UI_CANCEL) { SetEvent(ui->job->cancel); EnableWindow(ui->cancel,FALSE); gui_status(ui,ui->job->operation == GUI_ERASE_QUICK || ui->job->operation == GUI_ERASE_FULL ? L"正在取消；已经开始的擦除须等待设备结束..." : L"正在取消..."); } return 0; }
         switch (command) {
             case UI_MODE_EZ: gui_mode(ui,GUI_EZ); break; case UI_MODE_READ: gui_mode(ui,GUI_READ); break; case UI_MODE_BUILD: gui_mode(ui,GUI_BUILD); break; case UI_MODE_WRITE: gui_mode(ui,GUI_WRITE); break; case UI_MODE_VERIFY: gui_mode(ui,GUI_VERIFY); break; case UI_MODE_DISCOVERY: gui_mode(ui,GUI_DISCOVERY); break;
             case UI_SOURCE_FILE: gui_source(ui,false); break; case UI_SOURCE_FOLDER: gui_source(ui,true); break;
@@ -463,12 +466,13 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
             case UI_OUTPUT_IMAGE: ui->outputDevice = false; gui_mode(ui,GUI_BUILD); break; case UI_OUTPUT_DEVICE: ui->outputDevice = true; gui_mode(ui,GUI_BUILD); break;
             case UI_REFRESH: case UI_SEARCH: gui_refresh(ui); break;
             case UI_DEVICE_REFRESH: case UI_DEVICE_CAPABILITIES: if (ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount) gui_start(ui,GUI_DRIVE_INFO); break;
+            case UI_DEVICE_ERASE_QUICK: gui_start(ui,GUI_ERASE_QUICK); break; case UI_DEVICE_ERASE_FULL: gui_start(ui,GUI_ERASE_FULL); break;
             case UI_DEVICE_SECTORS: imgburn_gui_sector_show(window,ui->instance,ui->devices,ui->driveCount,ui->selectedDrive,&ui->assets); break;
             case UI_TOOL_CUE: gui_tool_open(ui,GUI_CREATE_CUE); break; case UI_TOOL_MDS: gui_tool_open(ui,GUI_CREATE_MDS); break;
             case UI_DVD: if (ui->bd && SendMessageW(ui->dvd,BM_GETCHECK,0,0) == BST_CHECKED) SendMessageW(ui->bd,BM_SETCHECK,BST_UNCHECKED,0); break;
             case UI_BD: if (ui->dvd && SendMessageW(ui->bd,BM_GETCHECK,0,0) == BST_CHECKED) SendMessageW(ui->dvd,BM_SETCHECK,BST_UNCHECKED,0); break;
             case UI_IMAGE_INFO: if (ui->sourceImage[0]) gui_start(ui,GUI_INSPECT); break;
-            case UI_DRIVE: if (HIWORD(wp) == CBN_SELCHANGE) { gui_read_controls(ui); ui->mediaReady = false; gui_menu(ui); if (ui->selectedDrive >= 0) gui_start(ui,GUI_DRIVE_INFO); } break;
+            case UI_DRIVE: if (HIWORD(wp) == CBN_SELCHANGE) { gui_read_controls(ui); ui->mediaReady = ui->eraseSupported = ui->testWriteSupported = false; gui_menu(ui); if (ui->selectedDrive >= 0) gui_start(ui,GUI_DRIVE_INFO); } break;
             case UI_HELP_GUIDES: ShellExecuteW(window,L"open",L"https://forum.imgburn.com/forum/4-guides/",NULL,NULL,SW_SHOWNORMAL); break;
             case UI_HELP_SITE: ShellExecuteW(window,L"open",L"https://www.imgburn.com/",NULL,NULL,SW_SHOWNORMAL); break;
             case UI_HELP_FORUM: ShellExecuteW(window,L"open",L"https://forum.imgburn.com/",NULL,NULL,SW_SHOWNORMAL); break;

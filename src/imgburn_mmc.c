@@ -202,6 +202,41 @@ bool mmc_blank_disc(OpticalDrive* drive, uint8_t blankType) {
     return spti_send_cdb(drive, cdb, 12, NULL, 0, true, 900);
 }
 
+bool mmc_start_blank_disc(OpticalDrive* drive, bool full) { uint8_t cdb[12] = {0xA1}; cdb[1] = (uint8_t)(0x10 | (full ? 0 : 1)); return spti_send_cdb(drive,cdb,12,NULL,0,true,30); }
+
+bool mmc_read_erase_progress(OpticalDrive* drive, MmcEraseProgress* progress) {
+    if (!progress) { SetLastError(ERROR_INVALID_PARAMETER); return false; } memset(progress,0,sizeof(*progress));
+    uint8_t cdb[6] = {3,0,0,0,252}, data[252] = {0};
+    if (!spti_send_cdb(drive,cdb,6,data,sizeof(data),true,10)) return false;
+    DWORD error = ERROR_INVALID_DATA; uint32_t size = drive->lastTransferBytes; uint8_t key = 0, asc = 0, ascq = 0;
+    if (size < 8 || size > sizeof(data)) { error = ERROR_READ_FAULT; goto invalid; }
+    uint32_t declared = (uint32_t)data[7] + 8; if (declared > size) { error = ERROR_READ_FAULT; goto invalid; }
+    uint8_t format = data[0] & 0x7F;
+    if (format == 0x70 || format == 0x71) {
+        if (declared < 18) { error = ERROR_READ_FAULT; goto invalid; } key = data[2] & 15; asc = data[12]; ascq = data[13];
+        if (data[15] & 0x80) { progress->valid = true; progress->value = read_be16(data + 16); }
+    } else if (format == 0x72 || format == 0x73) {
+        key = data[1] & 15; asc = data[2]; ascq = data[3];
+        for (uint32_t offset = 8; offset < declared;) {
+            if (declared - offset < 2 || (uint32_t)data[offset + 1] + 2 > declared - offset) goto invalid;
+            if (data[offset] == 2) {
+                if (data[offset + 1] != 6 || progress->valid || !(data[offset + 4] & 0x80)) goto invalid;
+                progress->valid = true; progress->value = read_be16(data + offset + 5);
+            } else if (data[offset] == 0x0A) {
+                if (data[offset + 1] != 6) goto invalid;
+                /* 另一操作的进度有独立 SK/ASC/ASCQ，不能仅由响应头判断已经结束。 */
+                if ((data[offset + 2] & 15) == 2 && data[offset + 3] == 4 && data[offset + 4] == 7) { if (progress->valid) goto invalid; progress->active = progress->valid = true; progress->value = read_be16(data + offset + 6); }
+            }
+            offset += (uint32_t)data[offset + 1] + 2;
+        }
+    } else goto invalid;
+    if (!key && !asc && !ascq) { progress->active = progress->valid; return true; }
+    if (key == 2 && asc == 4 && ascq == 7) { progress->active = true; return true; }
+    error = key == 7 ? ERROR_WRITE_PROTECT : key == 2 ? ERROR_NOT_READY : ERROR_IO_DEVICE;
+invalid:
+    memset(progress,0,sizeof(*progress)); drive->lastError = error; SetLastError(error); return false;
+}
+
 bool mmc_load_eject(OpticalDrive* drive, bool eject) {
     uint8_t cdb[6] = { 0 };
     cdb[0] = 0x1B; /* START STOP UNIT */

@@ -131,6 +131,7 @@ static bool job_drive(GuiJob* job) {
         if (ok) { char text[29]; memcpy(text, inquiry + 8, 28); text[28] = 0; wchar_t wide[29]; MultiByteToWideChar(CP_ACP, 0, text, -1, wide, 29); job_text(job, L"%ls\r\n%ls\r\n", wide, ready ? L"介质已就绪" : L"介质未就绪或未插入光盘"); }
         if (ready && mmc_read_capacity(&drive, &last, &bytes)) job_text(job, L"容量：%llu 扇区，每扇区 %u 字节\r\n", (uint64_t)last + 1, bytes);
         if (ready && mmc_get_current_profile(&drive) == MMC_PROFILE_DVD_R_SEQ) { MmcDvdWriteFeatures features; if (mmc_get_dvd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
+        if (ready) { MmcDiscInfo disc; if (mmc_read_disc_information(&drive,&disc)) job->eraseSupported = disc.isErasable && (disc.currentProfile == MMC_PROFILE_CD_RW || disc.currentProfile == MMC_PROFILE_DVD_RW_SEQ || disc.currentProfile == MMC_PROFILE_DVD_RW_RO); }
     } else if (!ready) SetLastError(ERROR_NOT_READY);
     else if (job->operation == GUI_READ_DISC) {
         ReadConfig config = {0}; config.drive = &drive; config.imagePath = job->destination; config.cancelEvent = job->cancel; config.retryCount = 20; config.replaceExisting = job->replaceExisting;
@@ -143,6 +144,12 @@ static bool job_drive(GuiJob* job) {
         ok = pipeline_verify_disc_ex(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
         if (ok) job_text(job,L"校验通过：已比较 %u 扇区，仅检查可读性 %u 扇区。\r\n",job->comparedSectors,job->readableOnlySectors);
         else if (job->miscompares) job_text(job,L"发现 %u 个内容不一致的扇区。\r\n",job->miscompares);
+    }
+    else if (job->operation == GUI_ERASE_QUICK || job->operation == GUI_ERASE_FULL) {
+        EraseConfig config = {&drive,job->cancel,job->operation == GUI_ERASE_FULL}; ok = pipeline_erase_disc(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
+        if (ok) job_text(job,config.full ? L"完整擦除完成，设备已报告空白介质。\r\n" : L"快速擦除完成，设备已报告空白介质。\r\n");
+        else if (job->error == ERROR_CANCELLED) job_text(job,L"取消不会中断已经开始的物理擦除；若已开始，已等待设备结束。\r\n");
+        else if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前擦除流程支持 CD-RW 和单层 DVD-RW。\r\n");
     }
     else if (job->operation == GUI_WRITE_DISC) {
         BurnConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.writeSpeedKbps = job->speed; config.verifyAfterWrite = job->verify; config.ringBufferBytes = 32 * 1024 * 1024; config.cancelEvent = job->cancel; config.cycleTrayBeforeVerify = true; config.testMode = job->testMode;
@@ -167,11 +174,11 @@ DWORD WINAPI imgburn_gui_job_run(void* context) {
         case GUI_INSPECT: job->succeeded = job_inspect(job); break;
         case GUI_CREATE_CUE: job->succeeded = job_cue(job); break;
         case GUI_CREATE_MDS: job->succeeded = job_mds(job); break;
-        case GUI_DRIVE_INFO: case GUI_VERIFY_DISC: case GUI_WRITE_DISC: case GUI_READ_DISC: job->succeeded = job_drive(job); break;
+        case GUI_DRIVE_INFO: case GUI_VERIFY_DISC: case GUI_WRITE_DISC: case GUI_READ_DISC: case GUI_ERASE_QUICK: case GUI_ERASE_FULL: job->succeeded = job_drive(job); break;
         case GUI_DVD_INFO: job->dvdVideo = true; job->succeeded = job_prepare(job) && imgburn_dvd_read_navigation(&job->builder, &job->navigation); break;
         case GUI_DVD_PREVIEW: job->succeeded = imgburn_dvd_preview_show(&job->builder, &job->preview, NULL) == 0; break;
     }
-    if (!job->succeeded && job_cancelled(job)) job->error = ERROR_CANCELLED;
+    if (!job->succeeded && job_cancelled(job) && (!job->error || (job->operation != GUI_ERASE_QUICK && job->operation != GUI_ERASE_FULL))) job->error = ERROR_CANCELLED;
     if (!job->succeeded) { if (!job->error) job->error = GetLastError(); if (!job->error) job->error = ERROR_INVALID_DATA; job_text(job, job->error == ERROR_CANCELLED ? L"操作已取消。\r\n" : L"操作失败（错误 %lu）。\r\n", job->error); }
     if (job->owner) PostMessageW(job->owner, GUI_JOB_DONE, 0, (LPARAM)job); return job->succeeded ? 0 : 1;
 }
