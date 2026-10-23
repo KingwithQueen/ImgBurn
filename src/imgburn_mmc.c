@@ -258,3 +258,33 @@ bool mmc_check_iso_cd(OpticalDrive* drive, uint32_t sectors) {
 unsupported:
     drive->lastError = ERROR_NOT_SUPPORTED; SetLastError(ERROR_NOT_SUPPORTED); return false;
 }
+
+bool mmc_read_cd_toc(OpticalDrive* drive, MmcCdToc* toc) {
+    if (!toc) { SetLastError(ERROR_INVALID_PARAMETER); return false; } memset(toc,0,sizeof(*toc));
+    uint8_t cdb[10] = {0x43,0,1}, session[12] = {0}, data[804] = {0}; cdb[8] = sizeof(session);
+    if (!spti_send_cdb(drive,cdb,10,session,sizeof(session),true,10)) return false;
+    if (drive->lastTransferBytes != sizeof(session) || read_be16(session) != 10) goto invalid;
+    if (session[2] != 1 || session[3] != 1) { drive->lastError = ERROR_NOT_SUPPORTED; SetLastError(ERROR_NOT_SUPPORTED); return false; }
+    cdb[2] = 0; write_be16(cdb + 7,sizeof(data));
+    if (!spti_send_cdb(drive,cdb,10,data,sizeof(data),true,10)) return false;
+    unsigned bytes = (unsigned)read_be16(data) + 2, count = data[3];
+    if (data[2] != 1 || !count || count > 99 || bytes != 4 + (count + 1) * 8 || drive->lastTransferBytes < bytes || drive->lastTransferBytes > sizeof(data)) goto invalid;
+    for (unsigned i = 0; i <= count; i++) {
+        const uint8_t* entry = data + 4 + i * 8; uint32_t start = read_be32(entry + 4);
+        if ((entry[1] >> 4) != 1 || entry[2] != (i == count ? 0xAA : i + 1) || start >= 100 * 60 * 75 || (i && start <= toc->tracks[i - 1].startLba)) goto invalid;
+        if (i == count) toc->leadOutLba = start;
+        else { toc->tracks[i].number = (uint8_t)i + 1; toc->tracks[i].control = entry[1] & 15; toc->tracks[i].startLba = start; }
+    }
+    toc->trackCount = count; return true;
+invalid:
+    memset(toc,0,sizeof(*toc)); drive->lastError = ERROR_INVALID_DATA; SetLastError(ERROR_INVALID_DATA); return false;
+}
+
+bool mmc_read_cd_blocks(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer) {
+    if (!buffer || !count || count > 27 || lba > UINT32_MAX - ((uint32_t)count - 1)) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    uint8_t cdb[12] = {0xBE}; write_be32(cdb + 2,lba); cdb[7] = (uint8_t)(count >> 8); cdb[8] = (uint8_t)count; cdb[9] = 0xF8; cdb[10] = 2;
+    uint32_t bytes = (uint32_t)count * 2368;
+    if (!spti_send_cdb(drive,cdb,12,buffer,bytes,true,30)) return false;
+    if (drive->lastTransferBytes != bytes) { drive->lastError = ERROR_READ_FAULT; SetLastError(ERROR_READ_FAULT); return false; }
+    return true;
+}

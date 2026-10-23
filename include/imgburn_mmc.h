@@ -164,6 +164,13 @@ bool mmc_read_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount
 /* 核对单会话、单轨 MODE1 CD 的 TOC、结束位置及原始扇区头。 */
 bool mmc_check_iso_cd(OpticalDrive* drive, uint32_t sectors);
 
+typedef struct { uint32_t startLba; uint8_t number, control; } MmcCdTrack;
+typedef struct { unsigned trackCount; uint32_t leadOutLba; MmcCdTrack tracks[99]; } MmcCdToc;
+
+/* 单会话 CD 的完整 TOC；READ CD 同时返回原始主通道与格式化 Q。 */
+bool mmc_read_cd_toc(OpticalDrive* drive, MmcCdToc* toc);
+bool mmc_read_cd_blocks(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer);
+
 #ifdef __cplusplus
 }
 #endif

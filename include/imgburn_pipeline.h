@@ -104,6 +104,13 @@ typedef struct {
 
 bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callback, void* userData);
 
+/* 原始 CD：2352 字节主通道和经 Q 校验的索引，最后发布 CUE。 */
+bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callback, void* userData);
+
+/* 数据 Verify：imagePath 为空时检查可读性，否则与 2048 字节扇区镜像比较。 */
+typedef struct { OpticalDrive* drive; const wchar_t* imagePath; HANDLE cancelEvent; unsigned retryCount; } VerifyConfig;
+bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallback callback, void* userData);
+
 #ifdef __cplusplus
 }
 #endif

@@ -62,6 +62,8 @@ typedef struct {
     ScsiSenseResult lastSense;
     uint32_t lastError;
     uint32_t lastTransferBytes;     /* 最近一次成功命令实际传输的字节数。 */
+    DWORD deviceAccess;             /* 打开设备时实际采用的访问标志。 */
+    bool accessKnown;               /* 外部自行提供句柄时，访问标志可能未知。 */
 } OpticalDrive;
 
 /**

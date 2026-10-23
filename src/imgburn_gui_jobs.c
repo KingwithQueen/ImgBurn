@@ -130,11 +130,15 @@ static bool job_drive(GuiJob* job) {
     } else if (!ready) SetLastError(ERROR_NOT_READY);
     else if (job->operation == GUI_READ_DISC) {
         ReadConfig config = {0}; config.drive = &drive; config.imagePath = job->destination; config.cancelEvent = job->cancel; config.retryCount = 20; config.replaceExisting = job->replaceExisting;
-        ok = pipeline_read_disc(&config,job_pipeline_progress,job);
+        const wchar_t* extension = wcsrchr(job->destination,L'.'); ok = extension && !_wcsicmp(extension,L".cue") ? pipeline_read_cd(&config,job_pipeline_progress,job) : pipeline_read_disc(&config,job_pipeline_progress,job);
         if (ok) job_text(job,L"光盘镜像已读取：%ls\r\n",job->destination);
-        else { job->error = GetLastError(); if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前光盘布局不能保存为 ISO 数据镜像。\r\n"); else if (job->error == ERROR_DISK_FULL) job_text(job,L"目标位置的可用空间不足。\r\n"); }
+        else { job->error = GetLastError(); if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前光盘布局或光驱能力不支持所选镜像格式。\r\n"); else if (job->error == ERROR_DISK_FULL) job_text(job,L"目标位置的可用空间不足。\r\n"); }
     }
-    else if (job->operation == GUI_VERIFY_DISC) ok = pipeline_verify_disc(&drive, job->sources[0].path, job_pipeline_progress, job);
+    else if (job->operation == GUI_VERIFY_DISC) {
+        VerifyConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.cancelEvent = job->cancel;
+        ok = pipeline_verify_disc_ex(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
+        if (ok) job_text(job,job->sources[0].path[0] ? L"光盘数据与所选镜像一致。\r\n" : L"光盘数据扇区可读性检查通过。\r\n");
+    }
     else if (mmc_read_capacity(&drive, &last, &bytes) && bytes == 2048) {
         WIN32_FILE_ATTRIBUTE_DATA data; const wchar_t* image = job->sources[0].path; DiscImageType type = imgburn_image_detect_type(image);
         if ((type == IMAGE_TYPE_ISO || type == IMAGE_TYPE_BIN) && GetFileAttributesExW(image, GetFileExInfoStandard, &data)) {
@@ -142,7 +146,9 @@ static bool job_drive(GuiJob* job) {
             if (length && length % 2048 == 0 && length / 2048 <= (uint64_t)last + 1) { BurnConfig config = {0}; config.drive = &drive; config.imagePath = image; config.writeSpeedKbps = job->speed; config.verifyAfterWrite = job->verify; config.ringBufferBytes = 32 * 1024 * 1024; ok = pipeline_burn_image(&config, job_pipeline_progress, job); }
         }
     }
-    if (!ok && !job->error) job->error = drive.lastError ? drive.lastError : GetLastError(); spti_close_drive(&drive); return ok;
+    if (!ok && !job->error) job->error = drive.lastError ? drive.lastError : GetLastError();
+    if (!ok && job->error == ERROR_ACCESS_DENIED && drive.lastError == ERROR_ACCESS_DENIED) job_text(job,drive.accessKnown && (drive.deviceAccess & (GENERIC_READ | GENERIC_WRITE)) != (GENERIC_READ | GENERIC_WRITE) ? L"未取得 SPTI 所需的设备读写访问权，请尝试以管理员身份运行。\r\n" : L"光驱或驱动程序拒绝了设备命令。\r\n");
+    spti_close_drive(&drive); return ok;
 }
 
 DWORD WINAPI imgburn_gui_job_run(void* context) {

@@ -259,6 +259,7 @@ int spti_enumerate_drives(OpticalDriveInfo* drives, int maxDrives) {
 bool spti_open_drive(OpticalDrive* drive, const wchar_t* devicePath, bool exclusiveLock) {
     if (!drive || !devicePath || wcslen(devicePath) >= sizeof(drive->info.devicePath) / sizeof(drive->info.devicePath[0])) return false;
     memset(drive, 0, sizeof(*drive));
+    DWORD access = GENERIC_READ | GENERIC_WRITE;
 
     drive->hDevice = CreateFileW(devicePath,
                                  GENERIC_READ | GENERIC_WRITE,
@@ -280,7 +281,8 @@ bool spti_open_drive(OpticalDrive* drive, const wchar_t* devicePath, bool exclus
     }
 
     if (drive->hDevice == INVALID_HANDLE_VALUE) {
-        /* Fallback 2: try Read-Only access (allows inquiry/read on standard user tokens) */
+        /* 只读句柄仅供允许此权限的设备查询，不能满足 SPTI 的读写访问要求。 */
+        access = GENERIC_READ;
         drive->hDevice = CreateFileW(devicePath,
                                      GENERIC_READ,
                                      FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -292,6 +294,7 @@ bool spti_open_drive(OpticalDrive* drive, const wchar_t* devicePath, bool exclus
 
     if (drive->hDevice == INVALID_HANDLE_VALUE) {
         /* Fallback 3: try with 0 access (query permissions) */
+        access = 0;
         drive->hDevice = CreateFileW(devicePath,
                                      0,
                                      FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -323,6 +326,7 @@ bool spti_open_drive(OpticalDrive* drive, const wchar_t* devicePath, bool exclus
         }
     }
 
+    drive->deviceAccess = access; drive->accessKnown = true;
     return true;
 }
 
@@ -429,6 +433,7 @@ bool spti_send_cdb(OpticalDrive* drive,
         SetLastError(ERROR_INVALID_PARAMETER);
         return false;
     }
+    if (drive->accessKnown && (drive->deviceAccess & (GENERIC_READ | GENERIC_WRITE)) != (GENERIC_READ | GENERIC_WRITE)) { drive->lastError = ERROR_ACCESS_DENIED; SetLastError(ERROR_ACCESS_DENIED); return false; }
 
     SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER sptdwb;
     memset(&sptdwb, 0, sizeof(sptdwb));

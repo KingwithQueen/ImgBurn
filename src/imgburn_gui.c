@@ -97,9 +97,16 @@ static bool gui_folder(HWND owner, wchar_t* result) {
     PIDLIST_ABSOLUTE id = SHBrowseForFolderW(&browse); if (!id) return false;
     bool ok = SHGetPathFromIDListW(id, result) != FALSE; CoTaskMemFree(id); return ok;
 }
+static const wchar_t readFilter[] = L"数据镜像 (*.iso)\0*.iso\0原始 CD 镜像 (*.cue)\0*.cue\0\0";
+static UINT_PTR CALLBACK gui_read_file_hook(HWND window, UINT message, WPARAM wp, LPARAM lp) {
+    (void)wp;
+    if (message == WM_NOTIFY) { const OFNOTIFYW* notice = (const OFNOTIFYW*)lp; if (notice->hdr.code == CDN_TYPECHANGE || notice->hdr.code == CDN_INITDONE) SendMessageW(GetParent(window),CDM_SETDEFEXT,0,(LPARAM)(notice->lpOFN->nFilterIndex == 2 ? L"cue" : L"iso")); }
+    return 0;
+}
 static bool gui_file(HWND owner, wchar_t* result, bool save, const wchar_t* filter, const wchar_t* extension) {
     OPENFILENAMEW file = {0}; file.lStructSize = sizeof(file); file.hwndOwner = owner; file.lpstrFilter = filter; file.lpstrFile = result; file.nMaxFile = MAX_PATH; file.lpstrDefExt = extension;
     file.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
+    if (save && filter == readFilter) { file.Flags |= OFN_ENABLEHOOK; file.lpfnHook = gui_read_file_hook; }
     return (save ? GetSaveFileNameW(&file) : GetOpenFileNameW(&file)) != FALSE;
 }
 static const wchar_t imageFilter[] = L"镜像文件 (*.iso;*.bin;*.cue;*.mds)\0*.iso;*.bin;*.cue;*.mds\0所有文件\0*.*\0\0";
@@ -118,7 +125,7 @@ static void gui_read_controls(GuiWindow* ui) {
 static void gui_menu(GuiWindow* ui) {
     bool build = ui->mode == GUI_BUILD, write = ui->mode == GUI_WRITE, read = ui->mode == GUI_READ, verify = ui->mode == GUI_VERIFY;
     bool busy = ui->job != NULL, idle = !busy, source = ui->pathCount != 0, drive = ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount;
-    bool discAction = idle && drive && ui->mediaReady && ui->sourceImage[0];
+    bool discAction = idle && drive && ui->mediaReady && (verify || ui->sourceImage[0]);
     bool readAction = idle && drive && ui->mediaReady;
     if (ui->go) EnableWindow(ui->go, build ? idle && source && !ui->outputDevice : read ? readAction : (write || verify) && discAction);
     HMENU bar = CreateMenu(), file = CreatePopupMenu(), view = CreatePopupMenu(), mode = CreatePopupMenu(), tools = CreatePopupMenu(), help = CreatePopupMenu();
@@ -170,7 +177,7 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
         ctl(ui, ui->window, L"BUTTON", L"+", WS_TABSTOP, UI_SOURCE_FILE, 300, 25, 23, 23); ctl(ui, ui->window, L"BUTTON", L"…", WS_TABSTOP, UI_SOURCE_FOLDER, 300, 52, 23, 23); ctl(ui, ui->window, L"BUTTON", L"×", WS_TABSTOP, UI_REMOVE_SOURCE, 300, 80, 23, 23);
     } else if (mode == GUI_READ || mode == GUI_VERIFY) {
         ui->drives = ctl(ui, ui->window, L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, UI_DRIVE, 16, 28, 302, 180);
-        ctl(ui, ui->window, L"STATIC", mode == GUI_READ ? L"将数据光盘读取为 ISO 镜像文件" : L"将光盘与选定镜像逐扇区比较", 0, 0, 18, 64, 290, 45);
+        ctl(ui, ui->window, L"STATIC", mode == GUI_READ ? L"读取为 ISO 或原始 CD 的 CUE/BIN" : L"选择镜像可逐扇区比较；留空时检查数据光盘可读性。", 0, 0, 18, 64, 290, 55);
     } else {
         ui->sourceEdit = ctl(ui, ui->window, L"EDIT", ui->sourceImage, WS_TABSTOP | ES_AUTOHSCROLL | ES_READONLY, UI_SOURCE_EDIT, 16, 28, 276, 24);
         ctl(ui, ui->window, L"BUTTON", L"…", WS_TABSTOP, UI_SOURCE_FILE, 297, 28, 23, 24);
@@ -248,8 +255,8 @@ static bool gui_launch(GuiWindow* ui, GuiJob* job) {
     if (!job || ui->job) { imgburn_gui_job_free(job); return false; }
     ui->job = job; job->thread = CreateThread(NULL, 0, imgburn_gui_job_run, job, 0, NULL);
     if (!job->thread) { ui->job = NULL; imgburn_gui_job_free(job); return false; }
-    if (ui->go) EnableWindow(ui->go, FALSE); if (ui->cancel) EnableWindow(ui->cancel, job->operation == GUI_CALCULATE || job->operation == GUI_BUILD_IMAGE || job->operation == GUI_CREATE_CUE || job->operation == GUI_READ_DISC);
-    if (job->operation == GUI_READ_DISC) { EnableWindow(ui->destination,FALSE); EnableWindow(ui->drives,FALSE); }
+    if (ui->go) EnableWindow(ui->go, FALSE); if (ui->cancel) EnableWindow(ui->cancel, job->operation == GUI_CALCULATE || job->operation == GUI_BUILD_IMAGE || job->operation == GUI_CREATE_CUE || job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC);
+    if (job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC) { EnableWindow(ui->destination,FALSE); EnableWindow(ui->drives,FALSE); }
     gui_status(ui, L"正在执行..."); gui_menu(ui); return true;
 }
 
@@ -259,7 +266,7 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
     GuiPath single = {0}; const GuiPath* sources = ui->paths; size_t count = ui->pathCount;
     if (operation == GUI_DRIVE_INFO || operation == GUI_READ_DISC || operation == GUI_VERIFY_DISC || operation == GUI_WRITE_DISC) { if (ui->selectedDrive < 0 || ui->selectedDrive >= ui->driveCount) return; }
     if (operation == GUI_INSPECT || operation == GUI_VERIFY_DISC || operation == GUI_WRITE_DISC || operation == GUI_DRIVE_INFO || operation == GUI_READ_DISC) { wcscpy(single.path, operation == GUI_DRIVE_INFO || operation == GUI_READ_DISC ? ui->devices[ui->selectedDrive].devicePath : ui->sourceImage); sources = &single; count = 1; }
-    if (!count || (!single.path[0] && sources == &single)) { MessageBoxW(ui->window, L"请先选择来源。", L"ImgBurn", MB_OK | MB_ICONINFORMATION); return; }
+    if (!count || (!single.path[0] && sources == &single && operation != GUI_VERIFY_DISC)) { MessageBoxW(ui->window, L"请先选择来源。", L"ImgBurn", MB_OK | MB_ICONINFORMATION); return; }
     if (operation == GUI_BUILD_IMAGE && !ui->destinationImage[0]) {
         if (!gui_file(ui->window, ui->destinationImage, true, L"ISO 镜像 (*.iso)\0*.iso\0\0", L"iso")) return;
         if (ui->destination) SetWindowTextW(ui->destination, ui->destinationImage);
@@ -267,7 +274,7 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
     if (operation == GUI_WRITE_DISC && MessageBoxW(ui->window, L"将开始向所选光驱写入镜像，是否继续？", L"ImgBurn", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
     bool replace = false;
     if (operation == GUI_READ_DISC) {
-        if (!ui->readImage[0]) { if (!gui_file(ui->window,ui->readImage,true,L"ISO 镜像 (*.iso)\0*.iso\0\0",L"iso")) return; if (ui->destination) SetWindowTextW(ui->destination,ui->readImage); replace = GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES; }
+        if (!ui->readImage[0]) { if (!gui_file(ui->window,ui->readImage,true,readFilter,L"iso")) return; if (ui->destination) SetWindowTextW(ui->destination,ui->readImage); replace = GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES; }
         else if (GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES) { if (MessageBoxW(ui->window,L"目标文件已存在，是否替换？",L"ImgBurn",MB_YESNO | MB_ICONQUESTION) != IDYES) return; replace = true; }
     }
     GuiJob* job = gui_job(ui,operation,sources,count); if (job) job->replaceExisting = replace;
@@ -357,7 +364,7 @@ static void gui_ez_draw(GuiWindow* ui, DRAWITEMSTRUCT* draw) {
 static void gui_complete(GuiWindow* ui, GuiJob* job) {
     if (ui->job != job) return; WaitForSingleObject(job->thread, INFINITE); ui->job = NULL;
     if (job->operation == GUI_DRIVE_INFO) ui->mediaReady = job->mediaReady;
-    if (job->operation == GUI_READ_DISC) { EnableWindow(ui->destination,TRUE); EnableWindow(ui->drives,TRUE); }
+    if (job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC) { EnableWindow(ui->destination,TRUE); EnableWindow(ui->drives,TRUE); }
     if (ui->progress) SendMessageW(ui->progress, PBM_SETPOS, job->succeeded && job->operation != GUI_DRIVE_INFO ? 100 : 0, 0); if (ui->info) SetWindowTextW(ui->info,job->result); gui_log(ui,job->result);
     const wchar_t* completed = job->operation == GUI_DRIVE_INFO ? (job->mediaReady ? L"介质已就绪" : L"介质未就绪或未插入光盘") : job->operation == GUI_CALCULATE ? L"计算完成" : job->operation == GUI_INSPECT ? L"镜像信息已载入" : L"操作成功完成";
     gui_status(ui, job->succeeded ? completed : job->error == ERROR_CANCELLED ? L"操作已取消" : L"操作失败；请查看日志");
@@ -423,7 +430,7 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
             case UI_NEW:
                 gui_read_controls(ui); free(ui->paths); ui->paths = NULL; ui->pathCount = 0; ui->destinationImage[0] = 0; ui->fsTypes = FS_TYPE_ALL; ui->revision = UDF_REV_102; ui->dvdVideo = ui->bluray = false; ui->deduplicate = true; wcscpy(ui->volumeLabel,L"IMGBURN_DISC");
                 ui->fs = ui->udf = ui->label = ui->dvd = ui->bd = ui->optimize = NULL; if (ui->destination) SetWindowTextW(ui->destination,L""); gui_mode(ui,GUI_BUILD); break;
-            case UI_DESTINATION: { wchar_t path[MAX_PATH]; wchar_t* target = ui->mode == GUI_READ ? ui->readImage : ui->destinationImage; wcscpy(path,target); if (gui_file(window,path,true,L"ISO 镜像\0*.iso\0\0",L"iso")) { wcscpy(target,path); if (ui->destination) SetWindowTextW(ui->destination,path); } break; }
+            case UI_DESTINATION: { wchar_t path[MAX_PATH]; wchar_t* target = ui->mode == GUI_READ ? ui->readImage : ui->destinationImage; wcscpy(path,target); if (gui_file(window,path,true,ui->mode == GUI_READ ? readFilter : L"ISO 镜像\0*.iso\0\0",L"iso")) { wcscpy(target,path); if (ui->destination) SetWindowTextW(ui->destination,path); } break; }
             case UI_CALCULATE: gui_start(ui,GUI_CALCULATE); break;
             case UI_BUILD: case UI_READ: case UI_WRITE: case UI_VERIFY: case UI_GO:
                 if (ui->mode == GUI_BUILD && !ui->outputDevice) gui_start(ui,GUI_BUILD_IMAGE); else if (ui->mode == GUI_READ) gui_start(ui,GUI_READ_DISC); else if (ui->mode == GUI_WRITE) gui_start(ui,GUI_WRITE_DISC); else if (ui->mode == GUI_VERIFY) gui_start(ui,GUI_VERIFY_DISC); break;

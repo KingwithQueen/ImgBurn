@@ -109,3 +109,49 @@ done:
     if (!success) return read_failure(&stats,error,"Disc read did not complete",callback,context);
     stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Disc image read successfully."); if (callback) callback(&stats,context); return true;
 }
+
+bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallback callback, void* context) {
+    PipelineStats stats = {0}; HANDLE image = INVALID_HANDLE_VALUE; uint8_t* data = NULL; uint8_t* reference = NULL; DWORD error = ERROR_SUCCESS; bool success = false;
+    if (!config || !config->drive || config->retryCount > 20) return read_failure(&stats,ERROR_INVALID_PARAMETER,"Invalid verify configuration",callback,context);
+    ReadConfig reader = {0}; reader.drive = config->drive; reader.cancelEvent = config->cancelEvent; reader.retryCount = config->retryCount;
+    if (read_cancelled(&reader)) return read_failure(&stats,ERROR_CANCELLED,"Verify cancelled",callback,context);
+    bool compare = config->imagePath && config->imagePath[0];
+    if (compare) {
+        const wchar_t* extension = wcsrchr(config->imagePath,L'.');
+        if (!extension || (_wcsicmp(extension,L".iso") && _wcsicmp(extension,L".bin"))) return read_failure(&stats,ERROR_NOT_SUPPORTED,"Require a data ISO or BIN",callback,context);
+        image = CreateFileW(config->imagePath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL); if (image == INVALID_HANDLE_VALUE) return read_failure(&stats,GetLastError(),"Cannot open comparison image",callback,context);
+        LARGE_INTEGER size; if (!GetFileSizeEx(image,&size) || size.QuadPart <= 0 || size.QuadPart % 2048 || (uint64_t)size.QuadPart / 2048 > UINT32_MAX) { error = ERROR_INVALID_DATA; goto verify_done; }
+        stats.totalSectors = (uint32_t)((uint64_t)size.QuadPart / 2048);
+    }
+    OpticalDrive* drive = config->drive; if (!mmc_test_unit_ready(drive)) { error = read_device_error(drive); goto verify_done; }
+    MmcProfile profile = mmc_get_current_profile(drive); if (!read_profile(profile)) { error = ERROR_NOT_SUPPORTED; goto verify_done; }
+    uint32_t last = 0, bytes = 0;
+    if (!mmc_read_capacity(drive,&last,&bytes)) { error = read_device_error(drive); goto verify_done; }
+    if (last == UINT32_MAX || bytes != 2048 || (compare && stats.totalSectors > last + 1)) { error = ERROR_INVALID_DATA; goto verify_done; }
+    uint32_t capacity = last + 1; if (!compare) stats.totalSectors = capacity;
+    if (profile <= MMC_PROFILE_CD_RW && !mmc_check_iso_cd(drive,capacity)) { error = read_device_error(drive); goto verify_done; }
+    data = malloc(32 * 2048); if (compare) reference = malloc(32 * 2048); if (!data || (compare && !reference)) { error = ERROR_NOT_ENOUGH_MEMORY; goto verify_done; }
+    stats.state = PIPELINE_STATE_VERIFYING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),compare ? "Comparing disc data against image..." : "Checking disc data readability..."); ULONGLONG started = GetTickCount64();
+    if (callback) callback(&stats,context);
+    for (uint32_t lba = 0; lba < stats.totalSectors;) {
+        if (read_cancelled(&reader)) { error = ERROR_CANCELLED; goto verify_done; }
+        uint16_t count = (uint16_t)(stats.totalSectors - lba < 32 ? stats.totalSectors - lba : 32);
+        if (!read_sectors(&reader,lba,count,data,&stats)) { error = read_cancelled(&reader) ? ERROR_CANCELLED : read_device_error(drive); goto verify_done; }
+        if (compare) {
+            DWORD wanted = (DWORD)count * 2048, offset = 0;
+            while (offset < wanted) { DWORD actual = 0; if (!ReadFile(image,reference + offset,wanted - offset,&actual,NULL)) { error = GetLastError(); goto verify_done; } if (!actual || actual > wanted - offset) { error = ERROR_HANDLE_EOF; goto verify_done; } offset += actual; }
+            for (unsigned i = 0; i < count; i++) if (memcmp(data + (size_t)i * 2048,reference + (size_t)i * 2048,2048)) stats.miscomparesCount++;
+        }
+        lba += count; stats.currentLba = lba; stats.progressPercent = (int)((uint64_t)lba * 99 / stats.totalSectors); ULONGLONG elapsed = GetTickCount64() - started;
+        stats.elapsedTimeSec = (uint32_t)(elapsed / 1000); if (elapsed) { stats.currentSpeedKBps = (double)lba * 2000 / elapsed; stats.speedMultiplier = stats.currentSpeedKBps / (profile <= MMC_PROFILE_CD_RW ? 150.0 : profile >= MMC_PROFILE_BD_ROM ? 4495.5 : 1385.0); stats.remainingTimeSec = (uint32_t)((stats.totalSectors - lba) * 2.0 / stats.currentSpeedKBps); }
+        if (callback) callback(&stats,context);
+    }
+    if (read_cancelled(&reader)) { error = ERROR_CANCELLED; goto verify_done; }
+    if (!mmc_test_unit_ready(drive) || !mmc_read_capacity(drive,&last,&bytes)) { error = read_device_error(drive); goto verify_done; }
+    if (last != capacity - 1 || bytes != 2048 || mmc_get_current_profile(drive) != profile) { error = ERROR_MEDIA_CHANGED; goto verify_done; }
+    if (stats.miscomparesCount) { error = ERROR_CRC; goto verify_done; } success = true;
+verify_done:
+    if (image != INVALID_HANDLE_VALUE) CloseHandle(image); free(data); free(reference);
+    if (!success) return read_failure(&stats,error,"Verify did not complete",callback,context);
+    stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),compare ? "Disc data matches image." : "Disc data readability check passed."); if (callback) callback(&stats,context); return true;
+}

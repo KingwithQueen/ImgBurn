@@ -42,11 +42,11 @@ msbuild ImgBurn.sln /m /p:Configuration=Release /p:Platform=x64
 
 | 功能范围 | 当前实现和缺口 |
 | --- | --- |
-| Read | 已接通 GUI/命令行的数据光盘读取主体：DVD/Blu-ray 的 2048 字节数据扇区，以及经 TOC 和原始扇区头检查的单会话、单轨 MODE1 CD，可连续读取为 ISO。支持软件重试、取消、完整传输检查及目标保护。音频/混合轨道/多会话 CD、原始扇区与子通道、MDS 配套输出及完整选项仍待实现；真实介质验收尚未完成 |
+| Read | GUI/命令行支持 DVD/Blu-ray 的 2048 字节数据 ISO，以及经检查的单会话、单轨 MODE1 CD ISO。新增单会话音频、混合轨道、MODE1/MODE2 CD 的 2352 字节 CUE/BIN 读取，使用 Q 子通道核对轨道、索引与地址。支持有界重试、取消、完整传输检查及目标保护。多会话、负 LBA 隐藏音轨、完整 P–W 子通道、CD-TEXT、MDS 配套输出及完整选项仍待实现；实体介质验收尚未完成 |
 | Build | 已实现 ISO/Joliet 双字节序路径表、目录扇区填充、名称冲突处理、多 extent 大文件及 UDF 1.02/2.50 文件树。UDF 使用 64 位文件长度和 AED 分配表续接，2.50 使用 EFE、元数据分区与副本。支持纯 ISO、ISO/Joliet、纯 UDF 或桥接镜像；保留输入一致性和目标文件保护 |
 | DVD-Video / Blu-ray 布局 | DVD 使用 ISO+UDF 1.02，补建 AUDIO_TS、过滤 VIDEO_TS、按视频文件顺序排列，并保证 IFO 末尾与 BUP 开头至少间隔 32 KiB。在输出中修正 IFO/BUP 与标题集地址；标题导航交叉检查 PGC、PTT、Cell 地址、VOBU 表和 NAV 包，支持从实际布局选取 OTP 层切换单元、加入填充、更新 SPLIP 并生成 MDS。Blu-ray 使用纯 UDF 2.50、EFE、元数据副本、64 KiB 文件对齐、分离的主备描述区及 BDMV/BDAV 目录补齐。输入需要已经制作好的视频目录；单元预览与原版的逐项对照及介质验收仍待完成 |
 | Write | 已修正输入、写入、收尾及写后校验错误传播；测试写入明确返回尚未实现，介质准备协议与真实刻录未验收 |
-| Verify | 已修正空输入、非扇区对齐输入、读取错误及失配结果；真实设备与完整原版流程尚未验收 |
+| Verify | GUI/命令行已接通 2048 字节数据光盘的整盘可读性检查和 ISO/BIN 比较，支持重试、取消、完整传输检查、失配扇区计数和结束容量复查。比较覆盖镜像声明的范围，可读性检查覆盖整盘数据范围；原始音频/混合轨道、CUE/MDS 比较、完整选项及真实介质流程尚未验收 |
 | Discovery | 已有模式页面，测试流程尚未实现 |
 | 桌面界面、设置、任务队列 | 已有快速向导、六种页面、文件/查看/模式/工具/帮助菜单及 Build 的输入/输出菜单。已接通来源选择、镜像计算和构建、日志、CUE/MDS 生成窗口及镜像信息；完整工具窗口、方案保存载入、设置、队列、图表和高级布局编辑仍待补齐 |
 | 音频、CUE、MDS、层切换点 | CUE 支持 UTF-8、UTF-16 LE/BE、本机 ANSI、CR/LF/CRLF 换行、BINARY/MOTOROLA、混合扇区尺寸、INDEX 00–99、FLAGS、SONGWRITER、CDTEXTFILE 和多会话；下一会话前要求 LEAD-OUT，导出器保留该声明。WAVE、AIFF、MP3 等音频按解码后的实际 PCM 计数。MDS 支持 1.x 多会话 CD、DVD、多轨道、非零数据偏移及分卷引用，提供 OTP/PTP DVD 描述生成接口，PTP 可保留 L1 大于 L0 的布局。CD 多会话写入、完整格式兼容和刻录集成仍待完成 |
@@ -62,11 +62,25 @@ Read 数据镜像命令示例：
 ```bat
 ImgBurn.exe read R: disc.iso
 ImgBurn.exe read R: disc.iso --retries 20 --replace
+ImgBurn.exe read R: disc.cue
 ```
 
 默认执行 20 次单扇区额外软件重试，不修改光驱的硬件重试设置。多扇区读取失败后尝试逐扇区恢复，无法恢复时返回失败；不会用零填充冒充完整镜像。`--retries` 接受 0–20，`--replace` 明确允许在成功完成后替换已有目标。GUI 也可选择来源光驱、目标 ISO 并执行读取或取消；命令行连接控制台时可用 Ctrl+C 请求取消。镜像先写入同目录的临时文件，完整读取、冲刷及最终容量检查通过后再发布；取消或失败时尝试移除本次临时输出并保留原有目标。驱动器访问仍取决于系统权限及设备对 SPTI 的支持。
 
-CD 的 ISO 路径只接受能够以 2048 字节用户数据保存的单轨 MODE1 布局，依据 [TOC](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddcdrm/ns-ntddcdrm-_cdrom_toc) 与[会话信息](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddcdrm/ns-ntddcdrm-_cdrom_toc_session_data)核对轨道和会话，再检查原始扇区头。其他布局需要后续的原始轨道读取，当前明确返回不支持。
+CD 的 ISO 路径只接受能够以 2048 字节用户数据保存的单轨 MODE1 布局，依据 [TOC](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddcdrm/ns-ntddcdrm-_cdrom_toc) 与[会话信息](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddcdrm/ns-ntddcdrm-_cdrom_toc_session_data)核对轨道和会话，再检查原始扇区头。音频、混合轨道及 MODE2 可选择 `.cue` 原始读取；当前仅支持单会话 CD，要求驱动器返回完整主通道及格式化 Q 数据。
+
+原始读取保留 LBA 0 到 lead-out 之前的全部 2352 字节主通道，CUE 记录轨道模式、FLAGS、INDEX 00–99 及结束地址。Q 用于检查 CRC、轨道和绝对/相对地址，不写入 BIN；若非位置 Q 遮住不能确定的索引边界，会明确失败。不会推测缺失索引或填零。先完成新 BIN，最后发布 CUE；已有 BIN 不覆盖，有同名文件时依次使用 `.001.bin` 等文件名。明确替换 CUE 后，旧 BIN 仍保留；失败或取消时尝试删除本次创建的文件。该文件保护策略尚未完成与原版输出命名行为的逐项对照。
+
+数据 Verify 命令示例：
+
+```bat
+ImgBurn.exe verify R: disc.iso
+ImgBurn.exe verify R: --readable --retries 0
+```
+
+Verify 默认不执行额外单扇区软件重试，可用 `--retries 0–20` 指定；多扇区失败后仍会尝试逐扇区读取。GUI 的镜像文件栏留空时检查整盘数据可读性，填写 ISO 或按 2048 字节分扇区的 BIN 时比较镜像范围，支持取消。可读性通过不等于与某个镜像一致，原始 2352 字节 BIN 及 CUE/MDS 不属于此数据校验路径。
+
+SPTI 命令即使只读取光盘，也要求设备句柄具有读写访问权；这不代表执行写入。Windows 权限、设备驱动和策略会影响该权限，管理员身份并非所有环境的统一前提，详见 [Microsoft 的 SCSI Pass Through 说明](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddscsi/ni-ntddscsi-ioctl_scsi_pass_through)。本轮在授权的管理员只读复测中已成功通过虚拟光驱完整读回样本，哈希一致；此前同一设备的非管理员进程无法获得所需访问权。程序会给出权限提示，不自动提权，也不修改设备权限或系统安全策略。
 
 第二阶段已通过 Win32/x64 离线回归：合计 190 项原生断言及 89 项独立检查。合成样本包含 191 个文件、192 个目录，覆盖多扇区路径表、目录边界、空目录、中文、长名称别名、CRC32 碰撞及重复内容。使用独立读取器提取并核对文件名称、目录集合和 SHA-256，另检查 UDF 标签 CRC、分区地址、主备描述序列及元数据副本。x64 解析回归另经 AddressSanitizer 检查；两个架构已运行 MSVC 静态分析，原始诊断保存在本机。此结果属于离线验证，不等同于原版逐项对照、完整格式认证或真实设备验收。
 
@@ -125,4 +139,6 @@ CUE 按原版拒绝 CDG 轨道，REM PREGAP 仍作为注释处理；完整特殊
 
 第十一阶段接通 Read 的数据 ISO 主体及 GUI，核对原版默认的软件读取重试次数，并修正 SPTI/MMC 对实际返回字节数的检查。两个架构通过读取、短传输、坏扇区、重试、取消及发布失败的隔离回归，并分别完整读回超过 4 GiB 的样本，输出全量 SHA-256 与源文件一致。测试使用真实文件和替代设备响应，不能视为实体光驱验收；本机只读虚拟光驱测试受 SPTI 访问权限限制，未计为通过。
 
-当前验证仍不代表完整 DVD 播放器或介质验收。原版星级评定、更多实际多角度/多故事样本及介质验收仍待补齐；PTP 解析与描述文件生成不代表可按 PTP 写入可录双层介质。后续继续补齐 Read 原始轨道读取，再逐项推进 Write、Verify、Discovery 及其菜单、命令窗口和剩余格式兼容。原版缺陷修复与额外改进仍在复刻完成后讨论。
+第十二阶段加入单会话 CD 的原始 CUE/BIN 读取和数据 Verify 的可读性、镜像比较流程。使用受控的音频、MODE2、混合轨道样本，对两个架构输出的全部主通道字节和索引进行独立核对；混合轨道中的数据提取后与原版生成的 ISO 整体哈希一致，并由独立读取器打开。原始轨道样本属于结构测试，尚未证明实体光驱的音频读取、纠错或子通道行为。另通过用户确认的管理员只读复测，确认 SPTI 可用、虚拟 ISO 完整读回一致并卸载本次样本挂载；第十一阶段的权限阻碍在该测试环境已解决，不等同于实体介质验收。
+
+当前验证仍不代表完整 DVD 播放器或介质验收。原版星级评定、更多实际多角度/多故事样本及介质验收仍待补齐；PTP 解析与描述文件生成不代表可按 PTP 写入可录双层介质。后续继续补齐 Read/Verify 的剩余原始轨道能力，逐项推进 Write、Discovery 及其菜单、命令窗口和剩余格式兼容。原版缺陷修复与额外改进仍在复刻完成后讨论。
