@@ -5,6 +5,7 @@
 #include "imgburn_audio.h"
 #include "imgburn_audio_source.h"
 #include "imgburn_cd_sector.h"
+#include "imgburn_cdtext.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,9 +21,10 @@ typedef struct {
     CueSheet sheet;
     BurnCdSpan spans[MAX_CUE_TRACKS * 5];
     unsigned spanCount, readSpan;
-    uint32_t readLba, cueBytes;
+    uint32_t readLba, cueBytes, leadInCueOffset;
     bool xa;
-    HANDLE cancelEvent;
+    HANDLE cancelEvent, cdTextFile;
+    CdText cdText;
     BurnCdAudio audio[MAX_CUE_TRACKS];
     unsigned audioCount;
     uint8_t cue[(MAX_CUE_TRACKS * (MAX_CUE_INDICES + 4) + 5) * 8];
@@ -35,7 +37,36 @@ static void burn_cd_free(BurnCdImage* image) {
         if (sourceFile && sourceFile != INVALID_HANDLE_VALUE) CloseHandle(sourceFile);
     }
     for (unsigned i = 0; i < image->audioCount; i++) audio_pcm_source_close(&image->audio[i].source);
+    if (image->cdTextFile && image->cdTextFile != INVALID_HANDLE_VALUE) CloseHandle(image->cdTextFile);
+    imgburn_cdtext_free(&image->cdText);
     free(image);
+}
+static bool burn_cd_text_requested(const CueSheet* sheet) {
+    if (sheet->cdTextFile[0] || sheet->discTitle[0] || sheet->discPerformer[0] || sheet->songwriter[0] || sheet->composer[0] || sheet->arranger[0] || sheet->message[0] || sheet->discId[0] || sheet->cdTextUpc[0]) return true;
+    for (int i = 0; i < sheet->trackCount; i++) { const CueTrack* track = &sheet->tracks[i]; if (track->title[0] || track->performer[0] || track->songwriter[0] || track->composer[0] || track->arranger[0] || track->message[0]) return true; }
+    return false;
+}
+static bool burn_cd_text_prepare(BurnCdImage* image) {
+    CueSheet* sheet = &image->sheet; if (!burn_cd_text_requested(sheet)) return true;
+    if (sheet->cdTextFile[0]) {
+        image->cdTextFile = CreateFileW(sheet->cdTextFile,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL);
+        if (image->cdTextFile != INVALID_HANDLE_VALUE) {
+            if (GetFileType(image->cdTextFile) != FILE_TYPE_DISK) { SetLastError(ERROR_INVALID_DATA); return false; }
+            LARGE_INTEGER length; if (!GetFileSizeEx(image->cdTextFile,&length)) return false;
+            if (length.QuadPart <= 0 || length.QuadPart > IMGBURN_CDTEXT_MAX_BYTES || length.QuadPart % IMGBURN_CDTEXT_PACK_BYTES) { SetLastError(ERROR_INVALID_DATA); return false; }
+            uint8_t* packs = malloc((size_t)length.QuadPart); if (!packs) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; }
+            DWORD got = 0; bool ok = ReadFile(image->cdTextFile,packs,(DWORD)length.QuadPart,&got,NULL) != FALSE; DWORD error = GetLastError();
+            if (ok && got != (DWORD)length.QuadPart) { ok = false; error = ERROR_HANDLE_EOF; }
+            if (ok) { ok = imgburn_cdtext_parse(packs,got,&image->cdText); error = GetLastError(); }
+            free(packs); if (!ok) { SetLastError(error); return false; }
+        } else if (GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND) return false;
+    }
+    if (!image->cdText.packs) {
+        /* 只有外部文件确实缺失才采用CUE文字；生成时暂时移除引用，保留原解析路径供后续流程使用。 */
+        wchar_t first = sheet->cdTextFile[0]; sheet->cdTextFile[0] = 0; bool ok = imgburn_cdtext_generate(sheet,&image->cdText); sheet->cdTextFile[0] = first; if (!ok) return false;
+    }
+    for (unsigned block = 0; block < image->cdText.blockCount; block++) if (image->cdText.blocks[block].firstTrack != 1 || image->cdText.blocks[block].lastTrack != sheet->trackCount) { SetLastError(ERROR_INVALID_DATA); return false; }
+    return true;
 }
 static AudioPcmSource* burn_cd_audio(BurnCdImage* image, const wchar_t* path, CueFileType type) {
     for (unsigned i = 0; i < image->audioCount; i++) if (image->audio[i].type == type && !_wcsicmp(image->audio[i].path,path)) return &image->audio[i].source;
@@ -144,18 +175,19 @@ static bool burn_cd_plan(BurnCdImage* image) {
     CueSheet* sheet = &image->sheet;
     if (image->cancelEvent && WaitForSingleObject(image->cancelEvent,0) == WAIT_OBJECT_0) { SetLastError(ERROR_CANCELLED); return false; }
     if (sheet->trackCount < 1 || sheet->trackCount > MAX_CUE_TRACKS || !sheet->totalSectors || sheet->totalSectors > 359849) { SetLastError(ERROR_INVALID_DATA); return false; }
-    if (sheet->sessionCount != 1 || sheet->discTitle[0] || sheet->discPerformer[0] || sheet->songwriter[0] || sheet->cdTextFile[0]) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+    if (sheet->sessionCount != 1) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+    if (!burn_cd_text_prepare(image)) return false;
     if (sheet->catalogNumber[0]) {
         if (strlen(sheet->catalogNumber) != 13) { SetLastError(ERROR_INVALID_DATA); return false; }
         for (unsigned i = 0; i < 13; i++) if (!isdigit((unsigned char)sheet->catalogNumber[i])) { SetLastError(ERROR_INVALID_DATA); return false; }
         image->cue[0] = image->cue[8] = 2; memcpy(image->cue + 1,sheet->catalogNumber,7); memcpy(image->cue + 9,sheet->catalogNumber + 7,6); image->cueBytes = 16;
     }
-    burn_cd_entry(image,burn_cd_control(&sheet->tracks[0]),0,0,1,0,-150);
+    image->leadInCueOffset = image->cueBytes; burn_cd_entry(image,burn_cd_control(&sheet->tracks[0]),0,0,image->cdText.bytes ? 0x41 : 1,0,-150);
     uint32_t cursor = 0;
     for (int i = 0; i < sheet->trackCount; i++) {
         const CueTrack* track = &sheet->tracks[i]; uint8_t control = burn_cd_control(track), scms = (track->flags & CUE_FLAG_SCMS) ? 0x80 : 0;
         bool audio = track->mode == TRACK_MODE_AUDIO;
-        if ((!audio && track->mode != TRACK_MODE_MODE1_2352 && track->mode != TRACK_MODE_MODE2_2352) || track->sectorSize != 2352 || track->sourceType > CUE_FILE_AUDIO || (!audio && track->sourceType != CUE_FILE_BINARY) || track->title[0] || track->performer[0] || track->songwriter[0] || (!audio && (track->isrc[0] || (track->flags & (CUE_FLAG_PRE | CUE_FLAG_4CH | CUE_FLAG_SCMS))))) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+        if ((!audio && track->mode != TRACK_MODE_MODE1_2352 && track->mode != TRACK_MODE_MODE2_2352) || track->sectorSize != 2352 || track->sourceType > CUE_FILE_AUDIO || (!audio && track->sourceType != CUE_FILE_BINARY) || (!audio && (track->isrc[0] || (track->flags & (CUE_FLAG_PRE | CUE_FLAG_4CH | CUE_FLAG_SCMS))))) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
         if (track->mode == TRACK_MODE_MODE2_2352) image->xa = true;
         if (track->trackNumber != i + 1 || track->sessionNumber != 1 || track->indexCount < 1 || track->indexCount > MAX_CUE_INDICES || track->sectorCount < 300 || (scms && (control & 2))) { SetLastError(ERROR_INVALID_DATA); return false; }
         uint32_t indexOne = 0; bool found = false;
@@ -342,6 +374,18 @@ static bool burn_cancelled(const BurnConfig* config, PipelineStats* stats, Pipel
     if (!config->cancelEvent || WaitForSingleObject(config->cancelEvent,0) != WAIT_OBJECT_0) return false;
     stats->state = PIPELINE_STATE_ABORTED; snprintf(stats->statusMessage,sizeof(stats->statusMessage),"Burn cancelled; recorded sectors cannot be undone."); if (callback) callback(stats,userData); SetLastError(ERROR_CANCELLED); return true;
 }
+static bool burn_cd_write_text(const BurnConfig* config, const BurnCdImage* image, const MmcCdTextLeadIn* leadIn, uint8_t* buffer, bool* writeAttempted, PipelineStats* stats, PipelineProgressCallback callback, void* userData) {
+    for (uint32_t offset = 0; offset < leadIn->sectorCount;) {
+        if (burn_cancelled(config,stats,callback,userData)) return false;
+        uint16_t count = (uint16_t)(leadIn->sectorCount - offset < 682 ? leadIn->sectorCount - offset : 682);
+        if (!imgburn_cdtext_encode_rw(&image->cdText,offset,count,buffer,(size_t)count * 96)) return pipeline_failure(stats,"Cannot encode the CD-TEXT lead-in.",callback,userData);
+        snprintf(stats->statusMessage,sizeof(stats->statusMessage),"Writing CD-TEXT lead-in (%u/%u sectors)...",offset,leadIn->sectorCount); if (callback) callback(stats,userData);
+        if (burn_cancelled(config,stats,callback,userData)) return false; *writeAttempted = true;
+        if (!mmc_write_cd_text_blocks(config->drive,leadIn->startLba + (int32_t)offset,count,buffer)) return pipeline_failure(stats,"CD-TEXT lead-in write failed or returned a short transfer.",callback,userData);
+        offset += count;
+    }
+    return true;
+}
 /* 空白 CD-R 使用 ATIP，DVD-R/+R、BD-R SRM 使用可写轨道，不查询 READ CAPACITY。 */
 static bool burn_check_media(OpticalDrive* drive, uint32_t sectors, MmcProfile* profile) {
     MmcDiscInfo disc; MmcTrackInfo track;
@@ -413,8 +457,6 @@ bool pipeline_burn_image(const BurnConfig* config, PipelineProgressCallback call
         cdImage->cancelEvent = config->cancelEvent;
         stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Preparing and checking CD source audio..."); if (callback) callback(&stats,userData);
         if (burn_cancelled(config,&stats,callback,userData)) { burn_cd_free(cdImage); CloseHandle(source); return false; }
-        stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Preparing and checking CD source audio..."); if (callback) callback(&stats,userData);
-        if (burn_cancelled(config,&stats,callback,userData)) { burn_cd_free(cdImage); CloseHandle(source); return false; }
         SetLastError(ERROR_SUCCESS); bool parsed = imgburn_cue_parse_ex(config->imagePath,&cdImage->sheet,burn_cd_resolve,cdImage);
         if (!parsed || !burn_cd_plan(cdImage)) {
             DWORD prepareError = GetLastError(); burn_cd_free(cdImage); CloseHandle(source);
@@ -426,6 +468,7 @@ bool pipeline_burn_image(const BurnConfig* config, PipelineProgressCallback call
     uint16_t chunkSectors = cdImage ? 27 : CHUNK_SECTORS; DWORD sectorBytes = cdImage ? 2352 : 2048, chunkBytes = chunkSectors * sectorBytes;
     bool success = false, ownedLock = false, prevented = false, writeAttempted = false, syncAttempted = false, parametersChanged = false; DWORD error = ERROR_SUCCESS;
     MmcProfile profile = MMC_PROFILE_NONE; MmcDvdWriteFeatures features = {0}; MmcWriteParameters original = {0}; bool bdVerifyNotRequired = false;
+    MmcCdTextLeadIn textLeadIn = {0}; uint8_t* textBuffer = NULL; bool textRequested = cdImage && cdImage->cdText.bytes != 0;
     RingBuffer rb = {0}; HANDLE producer = NULL; uint8_t* buffers = NULL; ProducerContext context = {0}; context.hSourceFile = source; context.rb = &rb; context.expectedBytes = (uint64_t)stats.totalSectors * sectorBytes; context.cd = cdImage; context.chunkBytes = chunkBytes;
     stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Checking blank CD-R, DVD-R/+R or BD-R SRM and source image..."); if (callback) callback(&stats,userData);
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
@@ -436,6 +479,11 @@ bool pipeline_burn_image(const BurnConfig* config, PipelineProgressCallback call
     if (profile == MMC_PROFILE_CD_R) {
         MmcCdWriteFeatures cd; if (!mmc_get_cd_write_features(config->drive,&cd)) { pipeline_failure(&stats,"Cannot query CD-R SAO write capabilities.",callback,userData); goto cleanup; }
         if (cdImage && cdImage->cueBytes > cd.maxCueSheetBytes) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"The complete CD cue sheet exceeds the device buffer.",callback,userData); goto cleanup; }
+        if (textRequested) {
+            if (!cd.rawRwSubchannel) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"The drive does not support raw R-W for CD-TEXT SAO writing.",callback,userData); goto cleanup; }
+            if (!mmc_read_cd_text_leadin(config->drive,&textLeadIn)) { pipeline_failure(&stats,"Cannot determine the CD-TEXT lead-in start address.",callback,userData); goto cleanup; }
+            uint8_t* entry = cdImage->cue + cdImage->leadInCueOffset; entry[5] = textLeadIn.minute; entry[6] = textLeadIn.second; entry[7] = textLeadIn.frame;
+        }
         features.testWrite = cd.testWrite; features.bufferUnderrunFree = cd.bufferUnderrunFree;
     }
     if (profile == MMC_PROFILE_DVD_R_SEQ) {
@@ -447,6 +495,7 @@ bool pipeline_burn_image(const BurnConfig* config, PipelineProgressCallback call
     }
     if (profile == MMC_PROFILE_BD_R_SRM && !mmc_get_bd_write_features(config->drive,&bdVerifyNotRequired)) { pipeline_failure(&stats,"Cannot confirm BD-R write capability.",callback,userData); goto cleanup; }
     buffers = malloc((size_t)chunkBytes * 2); if (!buffers) { burn_failure(&stats,ERROR_NOT_ENOUGH_MEMORY,"Cannot allocate source buffers.",callback,userData); goto cleanup; } context.buffer = buffers + chunkBytes;
+    if (textRequested) { textBuffer = malloc(682 * 96); if (!textBuffer) { burn_failure(&stats,ERROR_NOT_ENOUGH_MEMORY,"Cannot allocate the CD-TEXT transfer buffer.",callback,userData); goto cleanup; } }
     if (!ringbuffer_init(&rb,config->ringBufferBytes ? config->ringBufferBytes : 32 * 1024 * 1024,true)) { pipeline_failure(&stats,"Cannot initialize source buffer.",callback,userData); goto cleanup; }
     producer = CreateThread(NULL,0,producer_thread,&context,0,NULL); if (!producer) { pipeline_failure(&stats,"Cannot create source reader thread.",callback,userData); goto cleanup; }
     uint16_t count = (uint16_t)(stats.totalSectors < chunkSectors ? stats.totalSectors : chunkSectors);
@@ -456,8 +505,12 @@ bool pipeline_burn_image(const BurnConfig* config, PipelineProgressCallback call
     if (!mmc_prevent_removal(config->drive,true)) { pipeline_failure(&stats,"Cannot prevent medium removal.",callback,userData); goto cleanup; } prevented = true;
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
     if (!burn_check_media(config->drive,stats.totalSectors,&profile)) { pipeline_failure(&stats,"Target media changed before writing.",callback,userData); goto cleanup; }
+    if (textRequested) {
+        MmcCdTextLeadIn lockedLeadIn; if (!mmc_read_cd_text_leadin(config->drive,&lockedLeadIn)) { pipeline_failure(&stats,"Cannot recheck the CD-TEXT lead-in address.",callback,userData); goto cleanup; }
+        if (lockedLeadIn.startLba != textLeadIn.startLba || lockedLeadIn.sectorCount != textLeadIn.sectorCount) { burn_failure(&stats,ERROR_MEDIA_CHANGED,"The CD-TEXT lead-in changed before writing.",callback,userData); goto cleanup; }
+    }
     if (profile == MMC_PROFILE_DVD_R_SEQ || profile == MMC_PROFILE_CD_R) {
-        MmcWriteParameters selected = original, actual; selected.page[2] = (uint8_t)(2 | (features.bufferUnderrunFree ? 0x40 : 0) | (config->testMode ? 0x10 : 0)); selected.page[3] = cdImage ? burn_cd_control(&cdImage->sheet.tracks[0]) : profile == MMC_PROFILE_CD_R ? 4 : 0x25; selected.page[4] = cdImage ? 0 : 8; parametersChanged = true;
+        MmcWriteParameters selected = original, actual; selected.page[2] = (uint8_t)(2 | (features.bufferUnderrunFree ? 0x40 : 0) | (config->testMode ? 0x10 : 0)); selected.page[3] = cdImage ? burn_cd_control(&cdImage->sheet.tracks[0]) : profile == MMC_PROFILE_CD_R ? 4 : 0x25; selected.page[4] = textRequested ? 3 : cdImage ? 0 : 8; parametersChanged = true;
         /* 清除旧盘的MCN、ISRC及会话格式，只有经过检查的XA源选择CD-ROM XA会话。 */
         if (profile == MMC_PROFILE_CD_R) { memset(selected.page + 7,0,45); selected.page[8] = cdImage && cdImage->xa ? 0x20 : 0; selected.page[15] = 150; }
         if (!mmc_set_write_parameters(config->drive,&selected) || !mmc_get_write_parameters(config->drive,&actual)) { pipeline_failure(&stats,"Cannot set CD-R SAO or DVD-R DAO write parameters.",callback,userData); goto cleanup; }
@@ -471,6 +524,8 @@ bool pipeline_burn_image(const BurnConfig* config, PipelineProgressCallback call
     else if ((profile == MMC_PROFILE_DVD_R_SEQ || profile == MMC_PROFILE_BD_R_SRM || config->reserveTrack) && !mmc_reserve_track(config->drive,stats.totalSectors)) { pipeline_failure(&stats,"Cannot reserve the recording track.",callback,userData); goto cleanup; }
     stats.state = PIPELINE_STATE_WRITING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),config->testMode ? "Device test writing CD-R SAO / DVD-R DAO..." : cdImage ? "Writing CD-R CUE SAO..." : profile == MMC_PROFILE_CD_R ? "Writing CD-R MODE1 SAO..." : profile == MMC_PROFILE_DVD_R_SEQ ? "Writing DVD-R DAO..." : profile == MMC_PROFILE_BD_R_SRM ? "Writing BD-R SRM track..." : "Writing DVD+R track..."); DWORD start = GetTickCount(), previousTime = start; uint32_t previousLba = 0;
     if (profile == MMC_PROFILE_CD_R) {
+        if (textRequested && !burn_cd_write_text(config,cdImage,&textLeadIn,textBuffer,&writeAttempted,&stats,callback,userData)) goto cleanup;
+        snprintf(stats.statusMessage,sizeof(stats.statusMessage),config->testMode ? "Device test writing CD-R SAO..." : cdImage ? "Writing CD-R CUE SAO..." : "Writing CD-R MODE1 SAO...");
         if (callback) callback(&stats,userData); if (burn_cancelled(config,&stats,callback,userData)) goto cleanup; writeAttempted = true;
         if (!mmc_write_cd_leadin_gap(config->drive)) { pipeline_failure(&stats,"Cannot write the generated CD lead-in pregap.",callback,userData); goto cleanup; }
     }
@@ -525,7 +580,7 @@ cleanup:
     if (parametersChanged && (config->testMode || !writeAttempted) && !burn_restore_parameters(config->drive,&original) && success) { error = GetLastError(); success = burn_failure(&stats,error,"Cannot restore device write parameters.",callback,userData); }
     if (prevented && !mmc_prevent_removal(config->drive,false) && success) { error = GetLastError(); success = burn_failure(&stats,error,"Cannot restore medium removal.",callback,userData); }
     if (ownedLock && !spti_lock_drive(config->drive,false) && success) { error = GetLastError(); success = burn_failure(&stats,error,"Cannot unlock target volume.",callback,userData); }
-    ringbuffer_destroy(&rb); free(buffers); burn_cd_free(cdImage); CloseHandle(source);
+    ringbuffer_destroy(&rb); free(buffers); free(textBuffer); burn_cd_free(cdImage); CloseHandle(source);
     if (success && config->ejectWhenDone && !mmc_load_eject(config->drive,true)) { error = GetLastError(); success = burn_failure(&stats,error,"Eject failed.",callback,userData); }
     if (success) { stats.state = PIPELINE_STATE_COMPLETED; stats.currentLba = stats.totalSectors; stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),config->testMode ? "Device test write completed; no recorded-data verification performed." : "Burn process completed successfully."); if (callback) callback(&stats,userData); }
     SetLastError(success ? ERROR_SUCCESS : error); return success;

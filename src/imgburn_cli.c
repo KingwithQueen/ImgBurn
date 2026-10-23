@@ -768,7 +768,8 @@ static int cmd_cue(const char* cueFile) {
     CueSheet* cue = (CueSheet*)calloc(1, sizeof(*cue));
     if (!cue) return 1;
     if (!imgburn_cue_parse(path, cue)) { printf("Error: Failed to parse CUE sheet '%s'\n", cueFile); free(cue); return 1; }
-    printf("CUE Sheet Metadata:\n  Disc Title: '%s'\n  Disc Performer: '%s'\n  Catalog / UPC: '%s'\n  Sessions: %u\n  Total Tracks: %d\n  Total Sectors: %u\n", cue->discTitle, cue->discPerformer, cue->catalogNumber, cue->sessionCount, cue->trackCount, cue->totalSectors);
+    printf("CUE Sheet Metadata:\n  Disc Title: '%s'\n  Disc Performer: '%s'\n  Media Catalog Number: '%s'\n  Sessions: %u\n  Total Tracks: %d\n  Total Sectors: %u\n", cue->discTitle, cue->discPerformer, cue->catalogNumber, cue->sessionCount, cue->trackCount, cue->totalSectors);
+    printf("  Composer: '%s' | Arranger: '%s' | Message: '%s'\n  Disc ID: '%s' | CD-TEXT UPC: '%s'\n",cue->composer,cue->arranger,cue->message,cue->discId,cue->cdTextUpc);
     static const char* modes[] = {"AUDIO","MODE1/2048","MODE1/2352","MODE2/2336","MODE2/2352","MODE2/2048","MODE2/2324","CDI/2336","CDI/2352","CDG"};
     for (int i = 0; i < cue->trackCount; i++) {
         const CueTrack* t = &cue->tracks[i];
@@ -832,8 +833,12 @@ static int cmd_cdtext_info(int argc, char** argv) {
         memset(sheet,0,sizeof(*sheet)); sheet->trackCount = info->lastTrack - info->firstTrack + 1;
         for (int i = 0; i < sheet->trackCount; i++) sheet->tracks[i].trackNumber = (uint8_t)(info->firstTrack + i);
         if (!imgburn_cdtext_extract(&text,block,sheet)) { printf("    Text conversion unavailable; raw packs retained.\n"); continue; }
-        printf("    TITLE '%s' | PERFORMER '%s' | SONGWRITER '%s' | CATALOG '%s'\n",sheet->discTitle,sheet->discPerformer,sheet->songwriter,sheet->catalogNumber);
-        for (int i = 0; i < sheet->trackCount; i++) printf("    Track %02u: TITLE '%s' | PERFORMER '%s' | SONGWRITER '%s' | ISRC '%s'\n",sheet->tracks[i].trackNumber,sheet->tracks[i].title,sheet->tracks[i].performer,sheet->tracks[i].songwriter,sheet->tracks[i].isrc);
+        printf("    TITLE '%s' | PERFORMER '%s' | SONGWRITER '%s' | UPC '%s'\n",sheet->discTitle,sheet->discPerformer,sheet->songwriter,sheet->cdTextUpc);
+        printf("    COMPOSER '%s' | ARRANGER '%s' | MESSAGE '%s' | DISCID '%s'\n",sheet->composer,sheet->arranger,sheet->message,sheet->discId);
+        for (int i = 0; i < sheet->trackCount; i++) {
+            printf("    Track %02u: TITLE '%s' | PERFORMER '%s' | SONGWRITER '%s' | ISRC '%s'\n",sheet->tracks[i].trackNumber,sheet->tracks[i].title,sheet->tracks[i].performer,sheet->tracks[i].songwriter,sheet->tracks[i].isrc);
+            printf("      COMPOSER '%s' | ARRANGER '%s' | MESSAGE '%s'\n",sheet->tracks[i].composer,sheet->tracks[i].arranger,sheet->tracks[i].message);
+        }
     }
     free(sheet); imgburn_cdtext_free(&text); return 0;
 }

@@ -56,6 +56,7 @@ typedef struct {
     CueFileType sourceType;
     uint32_t flags;
     char songwriter[128];
+    char composer[128], arranger[128], message[128]; /* 轨道CD-TEXT扩展文字。 */
     CueIndex indices[MAX_CUE_INDICES];
     int indexCount;
     unsigned sessionNumber;
@@ -78,6 +79,8 @@ typedef struct {
     AudioTrack tracks[MAX_AUDIO_TRACKS];
     uint32_t totalSectors;          /* Total sectors including lead-in pregap */
     char songwriter[128];
+    char composer[128], arranger[128], message[128]; /* 光盘CD-TEXT扩展文字。 */
+    char discId[128], cdTextUpc[16]; /* 与Q子通道目录号独立保存。 */
     wchar_t cdTextFile[MAX_PATH];
     unsigned sessionCount;
     uint32_t sessionLeadIn[99], sessionLeadOut[99], sessionEndLba[99];

@@ -149,7 +149,7 @@ bool mmc_read_track_information(OpticalDrive* drive, uint32_t lbaOrTrack, bool i
     }
 
     uint32_t declared = (uint32_t)read_be16(buffer) + 2, required = declared < sizeof(buffer) ? declared : sizeof(buffer);
-    if (drive->lastTransferBytes < required || declared < 32) { drive->lastError = ERROR_READ_FAULT; SetLastError(ERROR_READ_FAULT); return false; }
+    if (drive->lastTransferBytes < required || drive->lastTransferBytes > sizeof(buffer) || declared < 32) { drive->lastError = ERROR_READ_FAULT; SetLastError(ERROR_READ_FAULT); return false; }
 
     outInfo->trackNumber = buffer[2];
     outInfo->sessionNumber = buffer[3];
@@ -276,7 +276,7 @@ bool mmc_get_cd_write_features(OpticalDrive* drive, MmcCdWriteFeatures* features
     if (drive->lastTransferBytes == 8 && read_be32(data) == 4) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
     if (drive->lastTransferBytes != sizeof(data) || read_be32(data) < 12) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
     if (read_be16(data + 6) != MMC_PROFILE_CD_R || read_be16(data + 8) != 0x2E || !(data[10] & 1) || data[11] != 4 || !(data[12] & 0x20)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
-    features->testWrite = (data[12] & 4) != 0; features->bufferUnderrunFree = (data[12] & 0x40) != 0; features->maxCueSheetBytes = (uint32_t)data[13] << 16 | (uint32_t)data[14] << 8 | data[15];
+    features->testWrite = (data[12] & 4) != 0; features->bufferUnderrunFree = (data[12] & 0x40) != 0; features->maxCueSheetBytes = (uint32_t)data[13] << 16 | (uint32_t)data[14] << 8 | data[15]; features->rawRwSubchannel = (data[12] & 1) != 0;
     if (features->maxCueSheetBytes < 32) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED); return true;
 }
 bool mmc_read_cd_write_capacity(OpticalDrive* drive, uint32_t* sectors) {
@@ -296,6 +296,23 @@ bool mmc_send_cd_mode1_cue(OpticalDrive* drive, uint32_t sectors) {
     uint8_t data[32] = {0x41,0,0,1,0,0,0,0, 0x41,1,0,0x14,0,0,0,0, 0x41,1,1,0x10,0,0,2,0, 0x41,0xAA,1,1,0,0,0,0};
     uint32_t end = sectors + 150; data[29] = (uint8_t)(end / (60 * 75)); data[30] = (uint8_t)(end / 75 % 60); data[31] = (uint8_t)(end % 75);
     return mmc_send_cd_cue(drive,data,sizeof(data));
+}
+bool mmc_read_cd_text_leadin(OpticalDrive* drive, MmcCdTextLeadIn* leadIn) {
+    if (!leadIn) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER); memset(leadIn,0,sizeof(*leadIn));
+    if (!drive) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    MmcTrackInfo track; if (!mmc_read_track_information(drive,0,false,&track)) return false;
+    /* MMC-5 6.44.3.3 仅将 -45150..-1 解释为负地址；预间隙 -150..-1 不属于导入区。 */
+    if (track.trackNumber || track.trackStartLba < UINT32_C(0xFFFF4FA2) || track.trackStartLba > UINT32_C(0xFFFFFF69)) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+    int32_t start = (int32_t)((int64_t)track.trackStartLba - INT64_C(4294967296)); uint32_t absolute = (uint32_t)(start + 450150);
+    leadIn->startLba = start; leadIn->sectorCount = (uint32_t)(-150 - start);
+    leadIn->minute = (uint8_t)(absolute / 4500); leadIn->second = (uint8_t)(absolute / 75 % 60); leadIn->frame = (uint8_t)(absolute % 75); return true;
+}
+bool mmc_write_cd_text_blocks(OpticalDrive* drive, int32_t startLba, uint16_t blockCount, const void* buffer) {
+    if (!drive || !buffer || !blockCount || blockCount > 682 || startLba < -45150 || startLba >= -150 || (uint32_t)blockCount > (uint32_t)(-150 - startLba)) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    /* SAO 的传输长度由 CUE 决定，01h 主通道不传数据，41h 只追加 96 字节原始子通道。 */
+    uint8_t cdb[10] = {0x2A}; write_be32(cdb + 2,(uint32_t)startLba); write_be16(cdb + 7,blockCount); uint32_t bytes = (uint32_t)blockCount * 96;
+    if (!spti_send_cdb(drive,cdb,10,(void*)buffer,bytes,false,180)) return false;
+    if (drive->lastTransferBytes != bytes) return mmc_write_parameter_error(drive,ERROR_WRITE_FAULT); return true;
 }
 bool mmc_send_cd_cue(OpticalDrive* drive, const uint8_t* cue, uint32_t bytes) {
     if (!cue || bytes < 32 || bytes > 0xFFFFFF || bytes % 8) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);

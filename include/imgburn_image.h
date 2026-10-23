@@ -78,6 +78,7 @@ typedef struct {
     unsigned sessionNumber;
     unsigned sourceFileGroup; /* 保留同路径重复FILE声明与跨会话共用FILE的区别。 */
     char songwriter[128];
+    char composer[128], arranger[128], message[128]; /* CD-TEXT作曲、编曲及文字信息。 */
     char title[128];         /* CD-Text Title */
     char performer[128];     /* CD-Text Performer */
     char isrc[16];           /* ISRC code */
@@ -96,12 +97,14 @@ typedef struct {
     wchar_t cueFilePath[MAX_PATH];
     char discTitle[128];     /* CD-Text Album Title */
     char discPerformer[128]; /* CD-Text Album Artist */
-    char catalogNumber[16];  /* UPC/EAN Barcode */
+    char catalogNumber[16];  /* Q子通道MCN，与CD-TEXT中的UPC独立。 */
 
     CueTrack tracks[MAX_CUE_TRACKS];
     int trackCount;
     uint32_t totalSectors;
     char songwriter[128];
+    char composer[128], arranger[128], message[128]; /* 光盘级CD-TEXT文字。 */
+    char discId[128], cdTextUpc[16]; /* DISCID与UPC分别对应86h、8Eh包。 */
     wchar_t cdTextFile[MAX_PATH];
     unsigned sessionCount;
     uint32_t sessionLeadIn[99], sessionLeadOut[99], sessionEndLba[99];

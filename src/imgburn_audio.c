@@ -312,6 +312,8 @@ bool cue_sheet_parse(const wchar_t* cuePath, AudioCompilation* outComp) {
     strcpy(outComp->cdTitle, sheet->discTitle); strcpy(outComp->cdPerformer, sheet->discPerformer);
     strcpy(outComp->catalogNumber, sheet->catalogNumber);
     strcpy(outComp->songwriter, sheet->songwriter); wcscpy(outComp->cdTextFile, sheet->cdTextFile); outComp->sessionCount = sheet->sessionCount;
+    strcpy(outComp->composer, sheet->composer); strcpy(outComp->arranger, sheet->arranger); strcpy(outComp->message, sheet->message);
+    strcpy(outComp->discId, sheet->discId); strcpy(outComp->cdTextUpc, sheet->cdTextUpc);
     memcpy(outComp->sessionLeadIn, sheet->sessionLeadIn, sizeof(outComp->sessionLeadIn)); memcpy(outComp->sessionLeadOut, sheet->sessionLeadOut, sizeof(outComp->sessionLeadOut)); memcpy(outComp->sessionEndLba, sheet->sessionEndLba, sizeof(outComp->sessionEndLba));
     outComp->trackCount = sheet->trackCount; outComp->totalSectors = sheet->totalSectors;
     for (int i = 0; i < sheet->trackCount; i++) {
@@ -322,6 +324,7 @@ bool cue_sheet_parse(const wchar_t* cuePath, AudioCompilation* outComp) {
         target->startLba = source->startLba; target->sectorCount = source->sectorCount; target->pregapSectors = source->pregapSectors;
         target->postgapSectors = source->postgapSectors; target->sourceIsWave = source->sourceIsWave;
         target->sourceType = source->sourceType; target->flags = source->flags; target->sessionNumber = source->sessionNumber; target->sourceFileGroup = source->sourceFileGroup; strcpy(target->songwriter, source->songwriter);
+        strcpy(target->composer, source->composer); strcpy(target->arranger, source->arranger); strcpy(target->message, source->message);
         target->decodedSourceSectors = source->decodedSourceSectors;
         target->indexCount = source->indexCount; memcpy(target->indices, source->indices, (size_t)source->indexCount * sizeof(CueIndex));
         target->duration = lba_to_msf(source->sectorCount);
@@ -347,6 +350,11 @@ static bool cue_metadata(const char* value, size_t capacity) {
     return true;
 }
 
+static bool cue_metadata_line(char* text, size_t capacity, size_t* used, const char* prefix, const char* command, const char* value, size_t valueCapacity) {
+    if (!cue_metadata(value, valueCapacity)) return false;
+    return !value[0] || cue_append(text, capacity, used, "%s%s \"%s\"\n", prefix, command, value);
+}
+
 bool cue_sheet_generate(const AudioCompilation* comp, const wchar_t* outCuePath) {
     if (!comp || !outCuePath || comp->trackCount <= 0 || comp->trackCount > MAX_AUDIO_TRACKS || wcslen(outCuePath) >= MAX_PATH || !cue_metadata(comp->cdTitle, 128) || !cue_metadata(comp->cdPerformer, 128)) return false;
     wchar_t destination[MAX_PATH], temporary[MAX_PATH], previous[MAX_PATH] = L"";
@@ -359,8 +367,15 @@ bool cue_sheet_generate(const AudioCompilation* comp, const wchar_t* outCuePath)
     size_t used = 0;
     if (comp->cdTitle[0]) ok = cue_append(text, capacity, &used, "TITLE \"%s\"\n", comp->cdTitle);
     if (ok && comp->cdPerformer[0]) ok = cue_append(text, capacity, &used, "PERFORMER \"%s\"\n", comp->cdPerformer);
-    if (!cue_metadata(comp->songwriter, 128)) ok = false;
-    if (ok && comp->songwriter[0]) ok = cue_append(text, capacity, &used, "SONGWRITER \"%s\"\n", comp->songwriter);
+    if (ok) ok = cue_metadata_line(text, capacity, &used, "", "SONGWRITER", comp->songwriter, sizeof(comp->songwriter));
+    if (ok) ok = cue_metadata_line(text, capacity, &used, "", "COMPOSER", comp->composer, sizeof(comp->composer));
+    if (ok) ok = cue_metadata_line(text, capacity, &used, "", "ARRANGER", comp->arranger, sizeof(comp->arranger));
+    if (ok) ok = cue_metadata_line(text, capacity, &used, "", "MESSAGE", comp->message, sizeof(comp->message));
+    if (ok) ok = cue_metadata_line(text, capacity, &used, "", "DISCID", comp->discId, sizeof(comp->discId));
+    if (ok && comp->cdTextUpc[0]) {
+        if (strnlen(comp->cdTextUpc, sizeof(comp->cdTextUpc)) != 13 || strspn(comp->cdTextUpc, "0123456789") != 13) ok = false;
+        else ok = cue_append(text, capacity, &used, "UPC %s\n", comp->cdTextUpc);
+    }
     if (ok && comp->cdTextFile[0]) {
         char utf8[MAX_PATH * 3]; wchar_t cdText[MAX_PATH];
         chars = wcsnlen(comp->cdTextFile, MAX_PATH) == MAX_PATH ? 0 : GetFullPathNameW(comp->cdTextFile, MAX_PATH, cdText, NULL);
@@ -406,8 +421,10 @@ bool cue_sheet_generate(const AudioCompilation* comp, const wchar_t* outCuePath)
         if (ok) ok = cue_append(text, capacity, &used, "  TRACK %02d AUDIO\n", track->trackNumber);
         if (ok && track->title[0]) ok = cue_append(text, capacity, &used, "    TITLE \"%s\"\n", track->title);
         if (ok && track->performer[0]) ok = cue_append(text, capacity, &used, "    PERFORMER \"%s\"\n", track->performer);
-        if (!cue_metadata(track->songwriter, 128)) ok = false;
-        if (ok && track->songwriter[0]) ok = cue_append(text, capacity, &used, "    SONGWRITER \"%s\"\n", track->songwriter);
+        if (ok) ok = cue_metadata_line(text, capacity, &used, "    ", "SONGWRITER", track->songwriter, sizeof(track->songwriter));
+        if (ok) ok = cue_metadata_line(text, capacity, &used, "    ", "COMPOSER", track->composer, sizeof(track->composer));
+        if (ok) ok = cue_metadata_line(text, capacity, &used, "    ", "ARRANGER", track->arranger, sizeof(track->arranger));
+        if (ok) ok = cue_metadata_line(text, capacity, &used, "    ", "MESSAGE", track->message, sizeof(track->message));
         if (track->flags & ~(CUE_FLAG_DCP | CUE_FLAG_4CH | CUE_FLAG_PRE | CUE_FLAG_SCMS)) ok = false;
         if (ok && track->flags) ok = cue_append(text, capacity, &used, "    FLAGS%s%s%s%s\n", track->flags & CUE_FLAG_DCP ? " DCP" : "", track->flags & CUE_FLAG_4CH ? " 4CH" : "", track->flags & CUE_FLAG_PRE ? " PRE" : "", track->flags & CUE_FLAG_SCMS ? " SCMS" : "");
         if (track->isrc[0]) {

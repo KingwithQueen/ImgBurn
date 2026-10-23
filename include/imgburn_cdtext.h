@@ -34,6 +34,9 @@ bool imgburn_cdtext_generate(const CueSheet* sheet, CdText* text);
 
 /* 只填充已存在且轨号范围匹配的CUE元数据，不改变布局；失败时整份CUE保持原样，原pack始终保留。 */
 bool imgburn_cdtext_extract(const CdText* text, unsigned block, CueSheet* sheet);
+
+/* 每扇区循环取4个pack，编码为96个低6位R-W符号；P/Q位清零，写入副本重算CRC，原数据保持不变。 */
+bool imgburn_cdtext_encode_rw(const CdText* text, uint64_t firstSector, uint16_t sectorCount, uint8_t* output, size_t outputBytes);
 void imgburn_cdtext_free(CdText* text);
 
 #ifdef __cplusplus

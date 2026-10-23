@@ -292,10 +292,14 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
             continue;
         }
         if (!cue_end(cursor)) goto done;
-        if (!_stricmp(command, "TITLE") || !_stricmp(command, "PERFORMER") || !_stricmp(command, "SONGWRITER")) {
+        if (!_stricmp(command, "TITLE") || !_stricmp(command, "PERFORMER") || !_stricmp(command, "SONGWRITER") || !_stricmp(command, "COMPOSER") || !_stricmp(command, "ARRANGER") || !_stricmp(command, "MESSAGE")) {
             if (strlen(value) >= 128) goto done;
-            char* destination = !_stricmp(command, "TITLE") ? (track ? track->title : sheet->discTitle) : !_stricmp(command, "PERFORMER") ? (track ? track->performer : sheet->discPerformer) : (track ? track->songwriter : sheet->songwriter);
+            char* destination = !_stricmp(command, "TITLE") ? (track ? track->title : sheet->discTitle) : !_stricmp(command, "PERFORMER") ? (track ? track->performer : sheet->discPerformer) : !_stricmp(command, "SONGWRITER") ? (track ? track->songwriter : sheet->songwriter) : !_stricmp(command, "COMPOSER") ? (track ? track->composer : sheet->composer) : !_stricmp(command, "ARRANGER") ? (track ? track->arranger : sheet->arranger) : (track ? track->message : sheet->message);
             strcpy(destination, value);
+        } else if (!_stricmp(command, "DISCID")) {
+            if (track || strlen(value) >= sizeof(sheet->discId)) goto done; strcpy(sheet->discId, value);
+        } else if (!_stricmp(command, "UPC")) {
+            if (track || strlen(value) != 13 || strspn(value, "0123456789") != 13) goto done; strcpy(sheet->cdTextUpc, value);
         } else if (!_stricmp(command, "CDTEXTFILE")) {
             /* 原版允许外部CDT缺失时使用CUE文字；解析保留路径，使用方决定读取或回退。 */
             if (track || !cue_path(cueFilePath, value, sheet->cdTextFile)) goto done;

@@ -168,10 +168,15 @@ typedef struct { bool testWrite, bufferUnderrunFree; } MmcDvdWriteFeatures;
 typedef struct { uint16_t size; uint8_t page[56]; } MmcWriteParameters;
 bool mmc_get_dvd_write_features(OpticalDrive* drive, MmcDvdWriteFeatures* features);
 /* CD-R 单轨 MODE1 SAO：设备生成导入、两秒预间隙和导出区。 */
-typedef struct { bool testWrite, bufferUnderrunFree; uint32_t maxCueSheetBytes; } MmcCdWriteFeatures;
+typedef struct { bool testWrite, bufferUnderrunFree; uint32_t maxCueSheetBytes; bool rawRwSubchannel; } MmcCdWriteFeatures;
 bool mmc_get_cd_write_features(OpticalDrive* drive, MmcCdWriteFeatures* features);
 bool mmc_read_cd_write_capacity(OpticalDrive* drive, uint32_t* sectors);
 bool mmc_send_cd_mode1_cue(OpticalDrive* drive, uint32_t sectors);
+/* CD-TEXT 导入区从 track 0 查询，负 LBA 按 MMC 的 100 分钟回绕换算为绝对 MSF。 */
+typedef struct { int32_t startLba; uint32_t sectorCount; uint8_t minute, second, frame; } MmcCdTextLeadIn;
+bool mmc_read_cd_text_leadin(OpticalDrive* drive, MmcCdTextLeadIn* leadIn);
+/* SAO 的 CUE form 41h 由设备生成主通道，每扇区只接收 96 字节原始 P-W。 */
+bool mmc_write_cd_text_blocks(OpticalDrive* drive, int32_t startLba, uint16_t blockCount, const void* buffer);
 /* SAO 的完整 CUE、负 LBA 两秒生成间隙及 CD-DA 主通道写入。 */
 bool mmc_send_cd_cue(OpticalDrive* drive, const uint8_t* cue, uint32_t bytes);
 bool mmc_write_cd_leadin_gap(OpticalDrive* drive);

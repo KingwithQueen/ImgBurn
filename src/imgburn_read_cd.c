@@ -179,12 +179,21 @@ static bool cd_publish(const ReadConfig* config, const CdReadPlan* plan, const w
         if (!textName || !WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,textName + 1,-1,utf8,sizeof(utf8),NULL,NULL)) ok = false;
         else ok = cd_append(text,&used,"CDTEXTFILE \"%s\"\r\n",utf8);
     }
-    if (ok && plan->metadata) ok = cd_append_text(text,&used,"TITLE",plan->metadata->discTitle,false) && cd_append_text(text,&used,"PERFORMER",plan->metadata->discPerformer,false) && cd_append_text(text,&used,"SONGWRITER",plan->metadata->songwriter,false);
+    if (ok && plan->metadata) {
+        const CueSheet* fields = plan->metadata;
+        ok = cd_append_text(text,&used,"TITLE",fields->discTitle,false) && cd_append_text(text,&used,"PERFORMER",fields->discPerformer,false) && cd_append_text(text,&used,"SONGWRITER",fields->songwriter,false);
+        if (ok) ok = cd_append_text(text,&used,"COMPOSER",fields->composer,false) && cd_append_text(text,&used,"ARRANGER",fields->arranger,false) && cd_append_text(text,&used,"MESSAGE",fields->message,false);
+        if (ok) ok = cd_append_text(text,&used,"DISCID",fields->discId,false) && cd_append_text(text,&used,"UPC",fields->cdTextUpc,false);
+    }
     if (ok) ok = cd_append(text,&used,"REM SESSION 1\r\nFILE \"%s\" BINARY\r\n",fileName);
     for (unsigned i = 0; ok && i < plan->toc.trackCount; i++) {
         const CdReadTrack* t = &plan->tracks[i]; unsigned control = plan->toc.tracks[i].control;
         ok = cd_append(text,&used,"  TRACK %02u %s\r\n",i + 1,t->mode == 1 ? "MODE1/2352" : t->mode == 2 ? "MODE2/2352" : "AUDIO");
-        if (ok && plan->metadata) ok = cd_append_text(text,&used,"TITLE",plan->metadata->tracks[i].title,true) && cd_append_text(text,&used,"PERFORMER",plan->metadata->tracks[i].performer,true) && cd_append_text(text,&used,"SONGWRITER",plan->metadata->tracks[i].songwriter,true);
+        if (ok && plan->metadata) {
+            const CueTrack* fields = &plan->metadata->tracks[i];
+            ok = cd_append_text(text,&used,"TITLE",fields->title,true) && cd_append_text(text,&used,"PERFORMER",fields->performer,true) && cd_append_text(text,&used,"SONGWRITER",fields->songwriter,true);
+            if (ok) ok = cd_append_text(text,&used,"COMPOSER",fields->composer,true) && cd_append_text(text,&used,"ARRANGER",fields->arranger,true) && cd_append_text(text,&used,"MESSAGE",fields->message,true);
+        }
         if (ok && ((control & 11) || t->scms)) ok = cd_append(text,&used,"    FLAGS%s%s%s%s\r\n",!t->scms && (control & 2) ? " DCP" : "",control & 1 ? " PRE" : "",control & 8 ? " 4CH" : "",t->scms ? " SCMS" : "");
         for (unsigned j = 0; ok && j < 100; j++) if (t->present[j]) { uint32_t lba = t->indices[j]; ok = cd_append(text,&used,"    INDEX %02u %02u:%02u:%02u\r\n",j,lba / 4500,lba / 75 % 60,lba % 75); }
     }

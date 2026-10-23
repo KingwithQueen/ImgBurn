@@ -47,11 +47,11 @@ msbuild ImgBurn.sln /m /p:Configuration=Release /p:Platform=x64
 | Read | GUI/命令行支持 DVD/Blu-ray 的 2048 字节数据 ISO，以及经检查的单会话、单轨 MODE1 CD ISO。新增单会话音频、混合轨道、MODE1/MODE2 CD 的 2352 字节 CUE/BIN 读取，使用 Q 子通道核对轨道、索引与地址，支持符合已检查边界的扩展预间隙和 SCMS 周期识别。可显式读取 CD-TEXT，保留原始 CDT 并在 CUE 中引用。支持有界重试、取消、完整传输检查及目标保护。多会话、负 LBA 隐藏音轨、完整 P–W 子通道、MDS 配套输出及完整选项仍待实现；实体介质验收尚未完成 |
 | Build | 已实现 ISO/Joliet 双字节序路径表、目录扇区填充、名称冲突处理、多 extent 大文件及 UDF 1.02/2.50 文件树。UDF 使用 64 位文件长度和 AED 分配表续接，2.50 使用 EFE、元数据分区与副本。支持纯 ISO、ISO/Joliet、纯 UDF 或桥接镜像；保留输入一致性和目标文件保护 |
 | DVD-Video / Blu-ray 布局 | DVD 使用 ISO+UDF 1.02，补建 AUDIO_TS、过滤 VIDEO_TS、按视频文件顺序排列，并保证 IFO 末尾与 BUP 开头至少间隔 32 KiB。在输出中修正 IFO/BUP 与标题集地址；标题导航交叉检查 PGC、PTT、Cell 地址、VOBU 表和 NAV 包，支持从实际布局选取 OTP 层切换单元、加入填充、更新 SPLIP 并生成 MDS。Blu-ray 使用纯 UDF 2.50、EFE、元数据副本、64 KiB 文件对齐、分离的主备描述区及 BDMV/BDAV 目录补齐。输入需要已经制作好的视频目录；单元预览与原版的逐项对照及介质验收仍待完成 |
-| Write | GUI/命令行已接通空白 CD-R MODE1 SAO、单层 DVD-R DAO、DVD+R 和 BD-R SRM 的单会话单轨 2048 字节 ISO/BIN 写入，并支持 BINARY/MOTOROLA、原生 PCM WAVE 与可解码音频、MODE1/2352、XA MODE2/2352 及混合轨 CUE 的单会话多轨 SAO 写入、索引及间隙。检查介质和容量，按介质发送布局、设置速度、预留轨道并收尾；BD-R 根据当前能力选择 VNR 或普通写入。CD-R、DVD-R 支持设备能力允许的测试写入；命令行/API 可显式请求 OPC。支持 CD-RW、单层 DVD-RW 快速/完整擦除、取消、保护恢复和写后回读比较。缺失解码器的音频、非 XA MODE2、CD-TEXT、DVD 双层写入、其他介质格式化及完整设置仍待实现；实体刻录未验收 |
+| Write | GUI/命令行已接通空白 CD-R MODE1 SAO、单层 DVD-R DAO、DVD+R 和 BD-R SRM 的单会话单轨 2048 字节 ISO/BIN 写入，并支持 BINARY/MOTOROLA、原生 PCM WAVE 与可解码音频、MODE1/2352、XA MODE2/2352 及混合轨 CUE 的单会话多轨 SAO 写入、索引及间隙。支持 CD-TEXT 的导入区写入，使用 CUE 文字或优先保留的原始 CDT。检查介质和容量，按介质发送布局、设置速度、预留轨道并收尾；BD-R 根据当前能力选择 VNR 或普通写入。CD-R、DVD-R 支持设备能力允许的测试写入；命令行/API 可显式请求 OPC。支持 CD-RW、单层 DVD-RW 快速/完整擦除、取消、保护恢复和写后回读比较。缺失解码器的音频、非 XA MODE2、DVD 双层写入、其他介质格式化及完整设置仍待实现；实体刻录未验收 |
 | Verify | GUI/命令行支持 2048 字节数据光盘可读性检查和 ISO/BIN 比较，新增单会话音频、混合轨道、MODE1/MODE2 CD 可读性检查及受支持的原始 CUE/BIN 比较。音频按原版默认仅检查可读性，可显式开启样本比较。支持重试、取消、完整传输检查、失配计数及结束布局复查；多会话、MDS、完整选项及真实介质流程尚未验收，其他音频格式取决于可用解码器 |
 | Discovery | 已有模式页面，测试流程尚未实现 |
 | 桌面界面、设置、任务队列 | 已有快速向导、六种页面、文件/查看/模式/工具/帮助菜单及 Build 的输入/输出菜单。已接通来源选择、镜像计算和构建、日志、CUE/MDS 生成窗口、镜像信息和只读扇区查看器；可选加载原版主图标、向导及部分按钮图像。完整工具窗口、方案保存载入、设置、队列、图表和高级布局编辑仍待补齐 |
-| 音频、CUE、MDS、层切换点 | CUE 支持 UTF-8、UTF-16 LE/BE、本机 ANSI、CR/LF/CRLF 换行、BINARY/MOTOROLA、混合扇区尺寸、INDEX 00–99、FLAGS、SONGWRITER、CDTEXTFILE 和多会话；下一会话前要求 LEAD-OUT，导出器保留该声明。WAVE、AIFF、MP3 等音频按解码后的实际 PCM 计数。MDS 支持 1.x 多会话 CD、DVD、多轨道、非零数据偏移及分卷引用，提供 OTP/PTP DVD 描述生成接口，PTP 可保留 L1 大于 L0 的布局。CD 多会话写入、完整格式兼容和刻录集成仍待完成 |
+| 音频、CUE、MDS、层切换点 | CUE 支持 UTF-8、UTF-16 LE/BE、本机 ANSI、CR/LF/CRLF 换行、BINARY/MOTOROLA、混合扇区尺寸、INDEX 00–99、FLAGS、TITLE/PERFORMER/SONGWRITER/COMPOSER/ARRANGER/MESSAGE、DISCID、UPC、CDTEXTFILE 和多会话；下一会话前要求 LEAD-OUT，导出器保留该声明。WAVE、AIFF、MP3 等音频按解码后的实际 PCM 计数。MDS 支持 1.x 多会话 CD、DVD、多轨道、非零数据偏移及分卷引用，提供 OTP/PTP DVD 描述生成接口，PTP 可保留 L1 大于 L0 的布局。CD 多会话写入、完整格式兼容和刻录集成仍待完成 |
 | 厂商控制与换盘设备 | 有部分命令封装；参数覆盖及真实硬件行为未验收 |
 | 原版命令行接口 | 当前使用子命令，尚不兼容原版 `/MODE` 等接口 |
 
@@ -78,7 +78,7 @@ CD 的 ISO 路径只接受能够以 2048 字节用户数据保存的单轨 MODE1
 
 CD-TEXT 读取使用 READ TOC 格式 5，与逐扇区 Q 检查分开。命令行 `--cdtext` 只接受 CUE，GUI 在 CUE 目标下提供“读取 CD-TEXT”开关；默认关闭。检查响应长度、pack CRC、序号、block、计数及 size information，再于读取结束前比较原始 pack。驱动器不支持该请求、传输不完整、数据非法或前后变化均返回失败，不忽略显式请求。光盘没有文字时正常生成 CUE/BIN，不生成空 CDT。
 
-有文字时将不含设备响应头的完整 18 字节 pack 流保存为 CDT，CUE 使用 `CDTEXTFILE` 引用，并尽可能提取可无损表达的标题、演唱者和作词者。多 block、其他编码及未映射字段保持原始字节；不可转换的内容不替换为问号。先完成新的 BIN/CDT，再原子发布 CUE；旧 CDT 不覆盖，同名时使用 `.001.cdt` 等文件名。取消或失败时尝试删除本次创建的文件。原版 CDT 的全部历史变体和实体驱动器返回尚未完成对照。
+有文字时将不含设备响应头的完整 18 字节 pack 流保存为 CDT，CUE 使用 `CDTEXTFILE` 引用，并尽可能提取可无损表达的标题、演唱者、作词者、作曲者、编曲者、留言、光盘 ID 和 UPC。多 block、其他编码及未映射字段保持原始字节；不可转换的内容不替换为问号。先完成新的 BIN/CDT，再原子发布 CUE；旧 CDT 不覆盖，同名时使用 `.001.cdt` 等文件名。取消或失败时尝试删除本次创建的文件。原版 CDT 的全部历史变体和实体驱动器返回尚未完成对照。
 
 文件工具可检查 CDT，或从 CUE 导出 CDT；不会执行刻录：
 
@@ -88,7 +88,7 @@ ImgBurn.exe cdtext-build disc.cue exported.cdt
 ImgBurn.exe cdtext-build disc.cue exported.cdt --replace
 ```
 
-按照[原版作者说明](https://forum.imgburn.com/topic/25180-cdt-filecd-text/)，CUE 指定的 CDTEXTFILE 存在时优先使用该文件，缺失时使用 CUE 文字；已有但损坏的文件明确失败。当前生成器只编码英语单 block 的 Latin1 文字及受支持的 CATALOG/ISRC，不能无损表达的字符、字段和容量明确拒绝。导出使用临时文件发布，默认不覆盖，且不允许覆盖输入 CUE、音源或 CDT。CD-TEXT 的 SAO 导入区写入尚未接通，Write 对此仍明确拒绝；文件生成与读取验证不代表已能刻录 CD-TEXT。
+按照[原版作者说明](https://forum.imgburn.com/topic/25180-cdt-filecd-text/)，CUE 指定的 CDTEXTFILE 存在时优先使用该文件，缺失时使用 CUE 文字；已有但损坏的文件明确失败。当前生成器编码英语单 block 的 Latin1 文字，支持 TITLE/PERFORMER/SONGWRITER/COMPOSER/ARRANGER/MESSAGE、DISCID、UPC 及轨道 ISRC；不能无损表达的字符、字段和容量明确拒绝。导出使用临时文件发布，默认不覆盖，且不允许覆盖输入 CUE、音源或 CDT。Write 已接通受支持 CD-R 的 CD-TEXT SAO 导入区写入；文件生成、协议验证仍不代表实体刻录和播放器显示已验收。
 
 数据 Verify 命令示例：
 
@@ -128,7 +128,11 @@ CD CUE 写入按[原版音频 CD 工作流程](https://forum.imgburn.com/topic/5
 
 首轨另向 LBA -150 发送 150 扇区零载荷 WRITE，由设备生成标准两秒预间隙；显式首轨 PREGAP 是额外间隙，INDEX 01 随之向后移动，已用原版镜像信息窗口对照。首轨存储的 INDEX 00、负 LBA 隐藏音频及新 FILE 未明确标记的前置偏移仍待寻址对照。每轨实际内容至少 300 扇区；PRE/4CH 变化需要两秒暂停。切换到不同数据结构时要求至少 225 扇区扩展预间隙，前段使用旧轨结构、末 150 扇区切换为新轨结构。数据转音频还检查前数据轨末 150 扇区零正文和音频前 150 扇区暂停，不自动修改短间隙或补齐轨道。
 
-MODE1 数据正文保留，地址、EDC 与 P/Q 纠错码按目标 LBA 重建；XA 保留重复子头和 Form1/Form2 正文并重建相应校验，使用 XA 会话参数与数据形式。MODE2 的非重复子头在更改设备状态前拒绝，尚不支持无 XA 子头的原始 MODE2。写后数据校验使用相同 SAO 内容规则，音频沿用原版默认可读性检查；独立 Verify 的 `--compare-audio` 可比较完整音频样本，仍未补偿真实设备偏移。其他数据扇区尺寸、CD-TEXT、多会话和 MDS 写入仍待接通，不能据此认定完整 CD 刻录已复刻。
+MODE1 数据正文保留，地址、EDC 与 P/Q 纠错码按目标 LBA 重建；XA 保留重复子头和 Form1/Form2 正文并重建相应校验，使用 XA 会话参数与数据形式。MODE2 的非重复子头在更改设备状态前拒绝，尚不支持无 XA 子头的原始 MODE2。写后数据校验使用相同 SAO 内容规则，音频沿用原版默认可读性检查；独立 Verify 的 `--compare-audio` 可比较完整音频样本，仍未补偿真实设备偏移。其他数据扇区尺寸、多会话和 MDS 写入仍待接通，不能据此认定完整 CD 刻录已复刻。
+
+CD-TEXT 写入从驱动器报告的 track 0 起点开始，检查 R-W 写入能力，锁定后再核对导入区地址。按 MMC SAO 的 CUE 格式 41h、写入参数类型 3，每扇区发送 96 字节原始 R-W，每次最多 682 扇区，持续到 LBA -151；再发送两秒预间隙及原有主通道。每帧顺序循环四个 18 字节 pack，补全写出 CRC，不改变输入 CDT。负地址与分块方式也有[原版日志对照](https://forum.imgburn.com/topic/25716-io-error-write-error/)，但该日志记录的是一次失败写入，不作为成功介质证据。
+
+CATALOG 是 Q 子通道的 MCN，与 CD-TEXT 的 UPC 独立，映射依据[原版作者说明](https://forum.imgburn.com/topic/22155-supported-cd-text-keysfields-in-imgburn/)。只有 CATALOG/ISRC 时保留原主通道及 Q 写入流程，不额外生成 CD-TEXT。有效 CDT 可保留多语言、未知字符集和未映射字段；CUE 文字生成仍限上述 Latin1 范围。UPC 当前接受 13 位数字，其他原版输入变体尚待对照。Read 的 ISRC/MCN 原始 Q 提取尚未接通，不将文字区 ISRC 冒充为已读到的 Q 数据。
 
 ```bat
 ImgBurn.exe burn R: disc.iso --verify
@@ -234,3 +238,5 @@ CUE 按原版拒绝 CDG 轨道，REM PREGAP 仍作为注释处理；完整特殊
 第二十三阶段加入 CD-TEXT pack 的解析、保留及受支持元数据生成，接通 MMC 格式 5、Read 的 CUE/CDT 输出、GUI 读取开关和文件命令。修正 CUE 解析对缺失 CDTEXTFILE 的过早拒绝，使文件导出能够按原版规则回退到 CUE 文字。独立使用 cdrdao 官方编码器产物及另一份 CRC、跨包字段和 size information 检查器核对，不将编码和解析相互通过作为唯一依据；覆盖多 block、Latin1、TAB 重复、容量、未知编码、错误数据、取消和输入/输出保护。CD-TEXT 的实际 SAO 写入、原版 CDT 全部变体和实体介质验收仍待完成。
 
 当前验证仍不代表完整 DVD 播放器或介质验收。原版星级评定、更多实际多角度/多故事样本及介质验收仍待补齐；PTP 解析与描述文件生成不代表可按 PTP 写入可录双层介质。后续继续补齐 Read/Verify 的剩余原始轨道能力，逐项推进 Write、Discovery 及其菜单、命令窗口和剩余格式兼容。原版缺陷修复与额外改进仍在复刻完成后讨论。
+
+第二十四阶段接通 CD-TEXT 的 SAO 导入区、R-W 能力及负 LBA 检查，补齐原版支持的 CUE 文字字段，并修正本实现将 CATALOG 误映射为文字区 UPC 的错误。独立编码参考核对每帧 R-W、跨块循环及完整导入区，隔离设备模型检查主通道、命令顺序、输入锁、错误和取消；Read 与文件工具同步保留新增字段。原有模式继续回归，实体刻录、播放器显示及更多驱动器兼容仍待验收。

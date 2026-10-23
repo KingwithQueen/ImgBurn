@@ -32,7 +32,7 @@ static bool cdtext_positions(const uint8_t* packs, size_t bytes, unsigned block,
             if (!value) {
                 if (tab && (type > 0x85 || track <= info->firstTrack || !previousNonempty)) return cdtext_error(ERROR_INVALID_DATA);
                 previousNonempty = position != 0; position = 0; tab = false;
-                track = track ? track + 1 : info->firstTrack; finished = track > info->lastTrack;
+                track = track ? track + 1 : info->firstTrack; finished = type == 0x86 || track > info->lastTrack;
             } else {
                 if (tab || (value == 9 && (position || type > 0x85))) return cdtext_error(ERROR_INVALID_DATA);
                 tab = value == 9; position++;
@@ -71,7 +71,7 @@ bool imgburn_cdtext_parse(const uint8_t* packs, size_t bytes, CdText* text) {
         if (!size[1] || size[1] > size[2] || size[2] > 99 || (size[3] & 0x38) || ((size[3] & 0x40) && !(size[3] & 0x80))) return cdtext_error(ERROR_INVALID_DATA);
         for (unsigned type = 0; type < 16; type++) {
             if (counts[block][type] != size[4 + type]) return cdtext_error(ERROR_INVALID_DATA);
-            if (counts[block][type] && type != 0 && type != 1 && type != 2 && type != 14 && type != 15) info->hasUnmapped = true;
+            if (counts[block][type] && type > 6 && type != 14 && type != 15) info->hasUnmapped = true;
         }
         if (extended[block] || size[3]) info->hasUnmapped = true;
         for (unsigned other = 0; other < 8; other++) if (size[20 + other] != (sequence[other] ? sequence[other] - 1 : 0) || (other && size[28 + other] != sizes[0][28 + other]) || (!present[other] && size[28 + other])) return cdtext_error(ERROR_INVALID_DATA);
@@ -80,9 +80,10 @@ bool imgburn_cdtext_parse(const uint8_t* packs, size_t bytes, CdText* text) {
     for (size_t offset = 0; offset < bytes; offset += 18) {
         const uint8_t* pack = packs + offset; unsigned block = (pack[3] >> 4) & 7;
         if (!(pack[1] & 0x80) && ((pack[0] >= 0x80 && pack[0] <= 0x85) || pack[0] == 0x8E) && pack[1] && (pack[1] < result.blocks[block].firstTrack || pack[1] > result.blocks[block].lastTrack)) return cdtext_error(ERROR_INVALID_DATA);
+        if (!(pack[1] & 0x80) && pack[0] == 0x86 && pack[1]) return cdtext_error(ERROR_INVALID_DATA);
     }
     for (unsigned block = 0; block < result.blockCount; block++) if (result.blocks[block].supported) {
-        for (unsigned type = 0x80; type <= 0x85; type++) if (!cdtext_positions(packs,bytes,block,type,&result.blocks[block])) return false;
+        for (unsigned type = 0x80; type <= 0x86; type++) if (!cdtext_positions(packs,bytes,block,type,&result.blocks[block])) return false;
         if (!cdtext_positions(packs,bytes,block,0x8E,&result.blocks[block])) return false;
     }
     result.packs = malloc(bytes);
@@ -92,20 +93,20 @@ bool imgburn_cdtext_parse(const uint8_t* packs, size_t bytes, CdText* text) {
 
 static char* cdtext_field(CueSheet* sheet, unsigned type, unsigned track, size_t* capacity) {
     if (!track) {
-        *capacity = type == 0x8E ? sizeof(sheet->catalogNumber) : sizeof(sheet->discTitle);
-        return type == 0x80 ? sheet->discTitle : type == 0x81 ? sheet->discPerformer : type == 0x82 ? sheet->songwriter : sheet->catalogNumber;
+        *capacity = type == 0x8E ? sizeof(sheet->cdTextUpc) : sizeof(sheet->discTitle);
+        return type == 0x80 ? sheet->discTitle : type == 0x81 ? sheet->discPerformer : type == 0x82 ? sheet->songwriter : type == 0x83 ? sheet->composer : type == 0x84 ? sheet->arranger : type == 0x85 ? sheet->message : type == 0x86 ? sheet->discId : sheet->cdTextUpc;
     }
     CueTrack* item = &sheet->tracks[track - (unsigned)sheet->tracks[0].trackNumber];
     *capacity = type == 0x8E ? sizeof(item->isrc) : sizeof(item->title);
-    return type == 0x80 ? item->title : type == 0x81 ? item->performer : type == 0x82 ? item->songwriter : item->isrc;
+    return type == 0x80 ? item->title : type == 0x81 ? item->performer : type == 0x82 ? item->songwriter : type == 0x83 ? item->composer : type == 0x84 ? item->arranger : type == 0x85 ? item->message : item->isrc;
 }
 
-static bool cdtext_code(const char* value, bool catalog) {
+static bool cdtext_code(const char* value, bool upc) {
     size_t length = strlen(value); if (!length) return true;
-    if (length != (size_t)(catalog ? 13 : 12)) return cdtext_error(ERROR_INVALID_DATA);
+    if (length != (size_t)(upc ? 13 : 12)) return cdtext_error(ERROR_INVALID_DATA);
     for (size_t i = 0; i < length; i++) {
         bool digit = value[i] >= '0' && value[i] <= '9', letter = value[i] >= 'A' && value[i] <= 'Z';
-        if (catalog ? !digit : i < 2 ? !letter : i < 5 ? !(letter || digit) : !digit) return cdtext_error(ERROR_INVALID_DATA);
+        if (upc ? !digit : i < 2 ? !letter : i < 5 ? !(letter || digit) : !digit) return cdtext_error(ERROR_INVALID_DATA);
     }
     return true;
 }
@@ -122,10 +123,10 @@ static bool cdtext_extract_type(const CdText* text, unsigned block, unsigned typ
             if (!value) {
                 if (tab) { size_t previousCapacity; char* previous = cdtext_field(sheet,type,track - 1,&previousCapacity); size_t length = strlen(previous); if (!length || length >= capacity) return cdtext_error(ERROR_INVALID_DATA); memcpy(field,previous,length + 1); }
                 if (type == 0x8E && !cdtext_code(field,!track)) return false;
-                track = track ? track + 1 : info->firstTrack; used = 0; tab = false; finished = track > info->lastTrack; continue;
+                track = track ? track + 1 : info->firstTrack; used = 0; tab = false; finished = type == 0x86 || track > info->lastTrack; continue;
             }
             if (value == 9) { tab = true; continue; }
-            if (value < 0x20 || value == 0x7F || (value >= 0x80 && value < 0xA0) || (value >= 0x80 && info->characterCode == 1 && type != 0x8E) || value == '"') return cdtext_error(ERROR_NO_UNICODE_TRANSLATION);
+            if (value < 0x20 || value == 0x7F || (value >= 0x80 && value < 0xA0) || (value >= 0x80 && info->characterCode == 1 && type <= 0x85) || value == '"') return cdtext_error(ERROR_NO_UNICODE_TRANSLATION);
             size_t needed = value < 0x80 ? 1 : 2;
             if (used + needed >= capacity) return cdtext_error(ERROR_INSUFFICIENT_BUFFER);
             if (needed == 2) { field[used++] = (char)(0xC0 | (value >> 6)); field[used++] = (char)(0x80 | (value & 0x3F)); }
@@ -144,9 +145,12 @@ bool imgburn_cdtext_extract(const CdText* text, unsigned block, CueSheet* sheet)
     for (int i = 0; i < sheet->trackCount; i++) if (sheet->tracks[i].trackNumber != info->firstTrack + i) return cdtext_error(ERROR_INVALID_DATA);
     CueSheet* copy = malloc(sizeof(*copy));
     if (!copy) return cdtext_error(ERROR_NOT_ENOUGH_MEMORY);
-    *copy = *sheet; copy->discTitle[0] = copy->discPerformer[0] = copy->songwriter[0] = copy->catalogNumber[0] = 0;
-    for (int i = 0; i < copy->trackCount; i++) copy->tracks[i].title[0] = copy->tracks[i].performer[0] = copy->tracks[i].songwriter[0] = copy->tracks[i].isrc[0] = 0;
-    bool ok = cdtext_extract_type(text,block,0x80,copy) && cdtext_extract_type(text,block,0x81,copy) && cdtext_extract_type(text,block,0x82,copy) && cdtext_extract_type(text,block,0x8E,copy);
+    *copy = *sheet;
+    copy->discTitle[0] = copy->discPerformer[0] = copy->songwriter[0] = copy->composer[0] = copy->arranger[0] = copy->message[0] = copy->discId[0] = copy->cdTextUpc[0] = 0;
+    for (int i = 0; i < copy->trackCount; i++) copy->tracks[i].title[0] = copy->tracks[i].performer[0] = copy->tracks[i].songwriter[0] = copy->tracks[i].composer[0] = copy->tracks[i].arranger[0] = copy->tracks[i].message[0] = copy->tracks[i].isrc[0] = 0;
+    bool ok = true;
+    for (unsigned type = 0x80; ok && type <= 0x86; type++) ok = cdtext_extract_type(text,block,type,copy);
+    if (ok) ok = cdtext_extract_type(text,block,0x8E,copy);
     DWORD error = GetLastError(); if (ok) *sheet = *copy; free(copy); SetLastError(ok ? ERROR_SUCCESS : error); return ok;
 }
 
@@ -190,14 +194,21 @@ bool imgburn_cdtext_generate(const CueSheet* sheet, CdText* text) {
     for (int i = 0; i < sheet->trackCount; i++) if ((unsigned)sheet->tracks[i].trackNumber != first + (unsigned)i) return cdtext_error(ERROR_INVALID_DATA);
     CdTextBuilder builder = {0}; builder.packs = calloc(256,18);
     if (!builder.packs) return cdtext_error(ERROR_NOT_ENOUGH_MEMORY);
-    bool ok = false; unsigned counts[16] = {0}; unsigned types[4] = {0x80,0x81,0x82,0x8E};
-    for (unsigned category = 0; category < 4; category++) {
+    bool ok = false; unsigned counts[16] = {0}; unsigned types[8] = {0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x8E};
+    for (unsigned category = 0; category < 8; category++) {
         unsigned type = types[category], before = builder.count; bool present = type == 0x80;
-        for (unsigned item = 0; item <= (unsigned)sheet->trackCount; item++) { size_t capacity; const char* value = cdtext_field((CueSheet*)sheet,type,item ? first + item - 1 : 0,&capacity); if (value[0]) present = true; }
+        unsigned lastItem = type == 0x86 ? 0 : (unsigned)sheet->trackCount;
+        for (unsigned item = 0; item <= lastItem; item++) { size_t capacity; const char* value = cdtext_field((CueSheet*)sheet,type,item ? first + item - 1 : 0,&capacity); if (value[0]) present = true; }
         if (!present) continue;
-        for (unsigned item = 0; item <= (unsigned)sheet->trackCount; item++) {
+        for (unsigned item = 0; item <= lastItem; item++) {
             unsigned track = item ? first + item - 1 : 0; size_t capacity; const char* value = cdtext_field((CueSheet*)sheet,type,track,&capacity); uint8_t latin[128]; unsigned length = 0;
-            if (!cdtext_latin1(value,capacity,latin,&length) || (type == 0x8E && !cdtext_code(value,!track))) goto cleanup;
+            if (!cdtext_latin1(value,capacity,latin,&length)) goto cleanup;
+            if (type == 0x8E) {
+                char code[16]; if (length >= sizeof(code)) { cdtext_error(ERROR_INVALID_DATA); goto cleanup; } memcpy(code,latin,length); code[length] = 0;
+                /* 与SAO的Q子通道一致，只规范化生成的轨道ISRC，不修改CUE和外部原始包。 */
+                if (track) for (unsigned i = 0; i < length; i++) if (code[i] >= 'a' && code[i] <= 'z') code[i] = (char)(code[i] - 'a' + 'A');
+                if (!cdtext_code(code,!track)) goto cleanup; memcpy(latin,code,length);
+            }
             for (unsigned i = 0; i <= length; i++) if (!cdtext_byte(&builder,type,track,i,i < length ? latin[i] : 0)) goto cleanup;
         }
         cdtext_finish(&builder); counts[type & 15] = builder.count - before;
@@ -213,4 +224,28 @@ bool imgburn_cdtext_generate(const CueSheet* sheet, CdText* text) {
 cleanup:
     { DWORD error = GetLastError(); free(builder.packs); SetLastError(ok ? ERROR_SUCCESS : error); }
     return ok;
+}
+
+bool imgburn_cdtext_encode_rw(const CdText* text, uint64_t firstSector, uint16_t sectorCount, uint8_t* output, size_t outputBytes) {
+    if (!text || !text->packs || !output || !sectorCount || !text->bytes || text->bytes % 18 || text->bytes > IMGBURN_CDTEXT_MAX_BYTES) return cdtext_error(ERROR_INVALID_PARAMETER);
+    size_t required = (size_t)sectorCount * 96;
+    if (outputBytes < required) return cdtext_error(ERROR_INSUFFICIENT_BUFFER);
+    uintptr_t sourceAddress = (uintptr_t)text->packs, targetAddress = (uintptr_t)output;
+    if (sourceAddress > UINTPTR_MAX - text->bytes || targetAddress > UINTPTR_MAX - required || (sourceAddress < targetAddress + required && targetAddress < sourceAddress + text->bytes)) return cdtext_error(ERROR_INVALID_PARAMETER);
+    CdText validated = {0};
+    if (!imgburn_cdtext_parse(text->packs, text->bytes, &validated)) return false;
+    imgburn_cdtext_free(&validated);
+    size_t packCount = text->bytes / 18, packIndex = (size_t)(firstSector % packCount) * 4 % packCount;
+    for (unsigned sector = 0; sector < sectorCount; sector++) {
+        for (unsigned item = 0; item < 4; item++) {
+            uint8_t pack[18]; memcpy(pack, text->packs + packIndex * 18, sizeof(pack));
+            uint16_t crc = cdtext_crc(pack); pack[16] = (uint8_t)(crc >> 8); pack[17] = (uint8_t)crc;
+            for (unsigned group = 0; group < 6; group++) {
+                unsigned bits = (unsigned)pack[group * 3] << 16 | (unsigned)pack[group * 3 + 1] << 8 | pack[group * 3 + 2];
+                for (unsigned symbol = 0; symbol < 4; symbol++) output[(size_t)sector * 96 + item * 24 + group * 4 + symbol] = (uint8_t)((bits >> (18 - symbol * 6)) & 0x3F);
+            }
+            if (++packIndex == packCount) packIndex = 0;
+        }
+    }
+    SetLastError(ERROR_SUCCESS); return true;
 }
