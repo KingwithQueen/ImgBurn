@@ -316,10 +316,14 @@ static bool cd_verify_plan(CdVerifyImage* image) {
         if (track->indexCount < 1 || track->indexCount > MAX_CUE_INDICES || track->sectorCount > UINT32_MAX - track->startLba) { SetLastError(ERROR_INVALID_DATA); return false; }
         if (track->sectorSize != 2352 || (track->mode != TRACK_MODE_AUDIO && track->mode != TRACK_MODE_MODE1_2352 && track->mode != TRACK_MODE_MODE2_2352) || track->sourceType > CUE_FILE_AUDIO || (track->sourceType != CUE_FILE_BINARY && track->mode != TRACK_MODE_AUDIO) || (!image->saoData && (track->pregapSectors || track->postgapSectors) && track->mode != TRACK_MODE_AUDIO)) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
         uint32_t indexOne = 0; bool found = false;
-        for (int j = 0; j < track->indexCount; j++) if (track->indices[j].indexNumber == 1) { indexOne = track->indices[j].lba; found = true; }
-        bool firstFileTrack = !i || track->sourceFileGroup != sheet->tracks[i - 1].sourceFileGroup;
-        uint32_t fileStart = firstFileTrack ? 0 : track->indices[0].lba;
-        if (!found || fileStart > indexOne || indexOne - fileStart > track->startLba) { SetLastError(ERROR_INVALID_DATA); return false; }
+        for (int j = 0; j < track->indexCount; j++) {
+            const CueIndex* entry = &track->indices[j];
+            if (entry->indexNumber < 0 || entry->indexNumber > 99 || (!j && entry->indexNumber > 1) || (j && (entry->indexNumber <= track->indices[j - 1].indexNumber || entry->lba < track->indices[j - 1].lba))) { SetLastError(ERROR_INVALID_DATA); return false; }
+            if (entry->indexNumber == 1) { indexOne = entry->lba; found = true; }
+        }
+        /* 与写入及原版一致：仅整个镜像首轨缺少INDEX00时保留文件零帧起的隐式间隙。 */
+        uint32_t fileStart = !i && track->indices[0].indexNumber != 0 ? 0 : track->indices[0].lba;
+        if (!found || fileStart > indexOne || indexOne - fileStart > track->startLba || track->indices[track->indexCount - 1].lba - indexOne >= track->sectorCount) { SetLastError(ERROR_INVALID_DATA); return false; }
         span->payloadStart = track->startLba - (indexOne - fileStart); span->payloadEnd = track->startLba + track->sectorCount;
         uint64_t prefix = (uint64_t)(track->startLba - span->payloadStart) * 2352;
         if (track->pregapSectors > span->payloadStart || track->postgapSectors > UINT32_MAX - span->payloadEnd) { SetLastError(ERROR_INVALID_DATA); return false; }

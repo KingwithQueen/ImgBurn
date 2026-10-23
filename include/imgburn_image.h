@@ -73,7 +73,7 @@ typedef struct {
     bool sourceIsWave;       /* FILE声明的类型，不能由扩展名猜测。 */
     CueFileType sourceType;
     uint32_t sectorSize, flags;
-    uint64_t sourceByteOffset, sourceByteLength;
+    uint64_t sourceByteOffset, sourceByteLength; /* INDEX01相对源数据或解码PCM的字节位置及有效长度。 */
     uint32_t decodedSourceSectors; /* REM解码长度缓存，0表示需实际解码测量。 */
     unsigned sessionNumber;
     unsigned sourceFileGroup; /* 保留同路径重复FILE声明与跨会话共用FILE的区别。 */
@@ -89,8 +89,8 @@ typedef struct {
     CueIndex indices[MAX_CUE_INDICES];
     int indexCount;
 
-    uint32_t startLba;       /* Absolute start LBA */
-    uint32_t sectorCount;    /* Total sectors in track */
+    uint32_t startLba;       /* INDEX01在光盘中的绝对LBA，已扣除未引用的FILE前缀。 */
+    uint32_t sectorCount;    /* 从INDEX01起的扇区数，不含INDEX00、PREGAP和POSTGAP。 */
 } CueTrack;
 
 typedef struct {

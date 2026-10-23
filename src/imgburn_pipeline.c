@@ -191,12 +191,14 @@ static bool burn_cd_plan(BurnCdImage* image) {
         if (track->mode == TRACK_MODE_MODE2_2352) image->xa = true;
         if (track->trackNumber != i + 1 || track->sessionNumber != 1 || track->indexCount < 1 || track->indexCount > MAX_CUE_INDICES || track->sectorCount < 300 || (scms && (control & 2))) { SetLastError(ERROR_INVALID_DATA); return false; }
         uint32_t indexOne = 0; bool found = false;
-        for (int j = 0; j < track->indexCount; j++) if (track->indices[j].indexNumber == 1) { indexOne = track->indices[j].lba; found = true; }
-        bool firstFileTrack = !i || track->sourceFileGroup != sheet->tracks[i - 1].sourceFileGroup;
-        uint32_t fileStart = firstFileTrack ? 0 : track->indices[0].lba;
-        if (!found || fileStart > indexOne || indexOne - fileStart > track->startLba) { SetLastError(ERROR_INVALID_DATA); return false; }
-        /* 首轨仅开放原版额外PREGAP；文件偏移与存储首轨INDEX00仍待原版寻址对照。 */
-        if ((!i && track->startLba != track->pregapSectors) || (firstFileTrack && indexOne && (track->indices[0].indexNumber != 0 || track->indices[0].lba))) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+        for (int j = 0; j < track->indexCount; j++) {
+            const CueIndex* entry = &track->indices[j];
+            if (entry->indexNumber < 0 || entry->indexNumber > 99 || (!j && entry->indexNumber > 1) || (j && (entry->indexNumber <= track->indices[j - 1].indexNumber || entry->lba < track->indices[j - 1].lba))) { SetLastError(ERROR_INVALID_DATA); return false; }
+            if (entry->indexNumber == 1) { indexOne = entry->lba; found = true; }
+        }
+        uint32_t fileStart = !i && track->indices[0].indexNumber != 0 ? 0 : track->indices[0].lba;
+        if (!found || fileStart > indexOne || indexOne - fileStart > track->startLba || track->indices[track->indexCount - 1].lba - indexOne >= track->sectorCount) { SetLastError(ERROR_INVALID_DATA); return false; }
+        /* 仅首轨省略INDEX00时保留隐式存储前缀，其余未引用的源前缀不会写入光盘。 */
         uint32_t payloadStart = track->startLba - (indexOne - fileStart); uint64_t end = (uint64_t)track->startLba + track->sectorCount, prefix = (uint64_t)(indexOne - fileStart) * 2352;
         if (track->pregapSectors > payloadStart || payloadStart - track->pregapSectors != cursor || end + track->postgapSectors > sheet->totalSectors || track->sourceByteOffset < prefix || (track->sourceType < CUE_FILE_WAVE && track->sourceByteLength != (uint64_t)track->sectorCount * 2352)) { SetLastError(ERROR_INVALID_DATA); return false; }
         TrackDataMode previousMode = i ? sheet->tracks[i - 1].mode : track->mode;

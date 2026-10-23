@@ -321,6 +321,9 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
         int last = first + 1; while (last < sheet->trackCount && groups[last] == groups[first]) last++;
         if (groups[first] != (first ? groups[first - 1] + 1 : 1)) goto done;
         CueTrack* initial = &sheet->tracks[first];
+        if (!initial->indexCount) goto done;
+        /* 仅首轨省略INDEX00时保留源零帧起的隐式前缀，其余FILE从首个声明INDEX裁去未引用内容。 */
+        uint32_t origin = first || initial->indices[0].indexNumber == 0 ? initial->indices[0].lba : 0;
         if (initial->sessionNumber != previousSession) {
             total += (uint64_t)sheet->sessionLeadOut[previousSession - 1] + sheet->sessionLeadIn[initial->sessionNumber - 1];
             if (!initial->pregapSectors && initial->indexCount && initial->indices[0].indexNumber == 1 && !initial->indices[0].lba) total += 150;
@@ -341,7 +344,7 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
             if (!current->indexCount) goto done;
             bool indexOne = false; uint32_t start = 0, segment = i == first ? 0 : current->indices[0].lba;
             for (int j = 0; j < current->indexCount; j++) if (current->indices[j].indexNumber == 1) { indexOne = true; start = current->indices[j].lba; }
-            if (!indexOne || start < segment || usedBytes > sourceBytes) goto done;
+            if (!indexOne || start < segment || start < origin || usedBytes > sourceBytes) goto done;
             uint64_t available = sourceBytes - usedBytes;
             uint64_t end = i + 1 < last && sheet->tracks[i + 1].indexCount ? sheet->tracks[i + 1].indices[0].lba : segment + (available + current->sectorSize - 1) / current->sectorSize;
             if (i + 1 < last && sheet->tracks[i + 1].sessionNumber != current->sessionNumber) {
@@ -356,21 +359,22 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
                 uint32_t declared = sheet->sessionEndLba[current->sessionNumber - 1];
                 uint64_t overhead = total + gaps + current->pregapSectors + current->postgapSectors;
                 /* 显式LEAD-OUT限定末轨长度，源文件尾部允许保留未引用的数据。 */
-                if (declared) { if (declared <= overhead || declared - overhead > end) goto done; end = declared - overhead; }
+                uint64_t declaredEnd = (uint64_t)declared + origin;
+                if (declared) { if (declaredEnd <= overhead || declaredEnd - overhead > end) goto done; end = declaredEnd - overhead; }
             }
             if (end <= start || end > UINT32_MAX || current->indices[current->indexCount - 1].lba >= end) goto done;
             uint64_t segmentBytes = (end - segment) * current->sectorSize;
             if (i + 1 < last && segmentBytes > available) goto done;
             gaps += current->pregapSectors;
-            if (total + start + gaps > UINT32_MAX) goto done;
-            current->startLba = (uint32_t)(total + start + gaps); current->sectorCount = (uint32_t)(end - start);
+            if (total + start - origin + gaps > UINT32_MAX) goto done;
+            current->startLba = (uint32_t)(total + start - origin + gaps); current->sectorCount = (uint32_t)(end - start);
             current->sourceByteOffset = usedBytes + (uint64_t)(start - segment) * current->sectorSize;
             current->sourceByteLength = (uint64_t)current->sectorCount * current->sectorSize;
             if (current->sourceByteOffset >= sourceBytes) goto done;
             if (current->sourceByteLength > sourceBytes - current->sourceByteOffset) current->sourceByteLength = sourceBytes - current->sourceByteOffset;
             usedBytes += segmentBytes; sourceFrames += end - segment; gaps += current->postgapSectors; fileEnd = (uint32_t)end;
             if (i + 1 == sheet->trackCount || sheet->tracks[i + 1].sessionNumber != current->sessionNumber) {
-                uint64_t sessionEnd = total + end + gaps; uint32_t declared = sheet->sessionEndLba[current->sessionNumber - 1];
+                uint64_t sessionEnd = total + end - origin + gaps; uint32_t declared = sheet->sessionEndLba[current->sessionNumber - 1];
                 if (sessionEnd > UINT32_MAX || (declared && declared != sessionEnd)) goto done;
                 sheet->sessionEndLba[current->sessionNumber - 1] = (uint32_t)sessionEnd;
             }
@@ -380,7 +384,7 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
         uint32_t lastSectorSize = sheet->tracks[last - 1].sectorSize;
         uint64_t decodedFrames = sourceFrames + (usedBytes < sourceBytes ? (sourceBytes - usedBytes + lastSectorSize - 1) / lastSectorSize : 0);
         if (decodedHints[groups[first]] && decodedHints[groups[first]] != decodedFrames) goto done;
-        total += fileEnd + gaps; if (total > UINT32_MAX) goto done;
+        total += fileEnd - origin + gaps; if (total > UINT32_MAX) goto done;
         first = last;
     }
     sheet->totalSectors = (uint32_t)total; memcpy(outCue, sheet, sizeof(*sheet)); ok = true;
