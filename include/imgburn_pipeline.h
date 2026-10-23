@@ -67,7 +67,7 @@ typedef struct {
     OpticalDrive* drive;
     const wchar_t* imagePath;       /* Path to .iso, .bin */
     uint32_t writeSpeedKbps;        /* 0、0xFFFF 或 0xFFFFFFFF 为最高速度；蓝光支持 32 位速率。 */
-    bool testMode;                  /* 仅支持具备 Test Write 能力的 DVD-R DAO。 */
+    bool testMode;                  /* 支持具备 Test Write 能力的 CD-R SAO、DVD-R DAO。 */
     bool verifyAfterWrite;
     bool ejectWhenDone;
     size_t ringBufferBytes;         /* e.g. 32 MB or 64 MB */

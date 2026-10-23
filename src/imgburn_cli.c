@@ -520,7 +520,7 @@ static int cmd_burn(int argc, char **argv) {
     config.verifyAfterWrite = verifyAfter;
     MmcProfile speedProfile = speed > 0 ? mmc_get_current_profile(&drive) : MMC_PROFILE_NONE;
     if (speed > 0 && speedProfile == MMC_PROFILE_UNKNOWN) { printf("Error: Cannot identify media for write speed.\n"); spti_close_drive(&drive); return 1; }
-    config.writeSpeedKbps = speed > 0 ? (uint32_t)(speed * (speedProfile == MMC_PROFILE_BD_R_SRM ? 4495.5 : 1385.0) + 0.5) : UINT32_MAX;
+    config.writeSpeedKbps = speed > 0 ? (uint32_t)(speed * (speedProfile == MMC_PROFILE_BD_R_SRM ? 4495.5 : speedProfile == MMC_PROFILE_CD_R ? 176.4 : 1385.0) + 0.5) : UINT32_MAX;
     config.ringBufferBytes = 32 * 1024 * 1024;
     config.reserveTrack = reserve; config.cycleTrayBeforeVerify = cycle; config.performOpc = opc;
     HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; } config.cancelEvent = cancel;

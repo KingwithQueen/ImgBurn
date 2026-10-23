@@ -124,7 +124,7 @@ bool mmc_read_track_information(OpticalDrive* drive, uint32_t lbaOrTrack, bool i
  * @param writeSpeedKbps 0xFFFF for Maximum
  */
 bool mmc_set_speed(OpticalDrive* drive, uint16_t readSpeedKbps, uint16_t writeSpeedKbps);
-/* 蓝光使用 SET STREAMING 的 32 位速率，DVD 保留 SET CD SPEED。 */
+/* 蓝光使用 SET STREAMING 的 32 位速率，CD/DVD 保留 SET CD SPEED。 */
 bool mmc_set_burn_speed(OpticalDrive* drive, MmcProfile profile, uint32_t writeSpeedKbps);
 /* 当前 BD Write 能力；返回设备是否支持 WRITE (12) 的 VNR 位。 */
 bool mmc_get_bd_write_features(OpticalDrive* drive, bool* verifyNotRequired);
@@ -167,6 +167,13 @@ bool mmc_prevent_removal(OpticalDrive* drive, bool prevent);
 typedef struct { bool testWrite, bufferUnderrunFree; } MmcDvdWriteFeatures;
 typedef struct { uint16_t size; uint8_t page[56]; } MmcWriteParameters;
 bool mmc_get_dvd_write_features(OpticalDrive* drive, MmcDvdWriteFeatures* features);
+/* CD-R 单轨 MODE1 SAO：设备生成导入、两秒预间隙和导出区。 */
+typedef struct { bool testWrite, bufferUnderrunFree; uint32_t maxCueSheetBytes; } MmcCdWriteFeatures;
+bool mmc_get_cd_write_features(OpticalDrive* drive, MmcCdWriteFeatures* features);
+bool mmc_read_cd_write_capacity(OpticalDrive* drive, uint32_t* sectors);
+bool mmc_send_cd_mode1_cue(OpticalDrive* drive, uint32_t sectors);
+bool mmc_write_cd_mode1_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, const void* buffer);
+bool mmc_finish_cd_sao(OpticalDrive* drive);
 bool mmc_get_write_parameters(OpticalDrive* drive, MmcWriteParameters* parameters);
 bool mmc_set_write_parameters(OpticalDrive* drive, const MmcWriteParameters* parameters);
 bool mmc_perform_opc(OpticalDrive* drive);

@@ -131,6 +131,7 @@ static bool job_drive(GuiJob* job) {
         if (ok) { char text[29]; memcpy(text, inquiry + 8, 28); text[28] = 0; wchar_t wide[29]; MultiByteToWideChar(CP_ACP, 0, text, -1, wide, 29); job_text(job, L"%ls\r\n%ls\r\n", wide, ready ? L"介质已就绪" : L"介质未就绪或未插入光盘"); }
         if (ready && mmc_read_capacity(&drive, &last, &bytes)) job_text(job, L"容量：%llu 扇区，每扇区 %u 字节\r\n", (uint64_t)last + 1, bytes);
         if (ready && mmc_get_current_profile(&drive) == MMC_PROFILE_DVD_R_SEQ) { MmcDvdWriteFeatures features; if (mmc_get_dvd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
+        if (ready && mmc_get_current_profile(&drive) == MMC_PROFILE_CD_R) { MmcCdWriteFeatures features; if (mmc_get_cd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
         if (ready) { MmcDiscInfo disc; if (mmc_read_disc_information(&drive,&disc)) job->eraseSupported = disc.isErasable && (disc.currentProfile == MMC_PROFILE_CD_RW || disc.currentProfile == MMC_PROFILE_DVD_RW_SEQ || disc.currentProfile == MMC_PROFILE_DVD_RW_RO); }
     } else if (!ready) SetLastError(ERROR_NOT_READY);
     else if (job->operation == GUI_READ_DISC) {
