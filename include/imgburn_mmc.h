@@ -172,6 +172,10 @@ typedef struct { bool testWrite, bufferUnderrunFree; uint32_t maxCueSheetBytes; 
 bool mmc_get_cd_write_features(OpticalDrive* drive, MmcCdWriteFeatures* features);
 bool mmc_read_cd_write_capacity(OpticalDrive* drive, uint32_t* sectors);
 bool mmc_send_cd_mode1_cue(OpticalDrive* drive, uint32_t sectors);
+/* SAO 的完整 CUE、负 LBA 两秒生成间隙及 CD-DA 主通道写入。 */
+bool mmc_send_cd_cue(OpticalDrive* drive, const uint8_t* cue, uint32_t bytes);
+bool mmc_write_cd_leadin_gap(OpticalDrive* drive);
+bool mmc_write_cd_audio_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, const void* buffer);
 bool mmc_write_cd_mode1_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, const void* buffer);
 bool mmc_finish_cd_sao(OpticalDrive* drive);
 bool mmc_get_write_parameters(OpticalDrive* drive, MmcWriteParameters* parameters);

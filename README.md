@@ -47,7 +47,7 @@ msbuild ImgBurn.sln /m /p:Configuration=Release /p:Platform=x64
 | Read | GUI/命令行支持 DVD/Blu-ray 的 2048 字节数据 ISO，以及经检查的单会话、单轨 MODE1 CD ISO。新增单会话音频、混合轨道、MODE1/MODE2 CD 的 2352 字节 CUE/BIN 读取，使用 Q 子通道核对轨道、索引与地址。支持有界重试、取消、完整传输检查及目标保护。多会话、负 LBA 隐藏音轨、完整 P–W 子通道、CD-TEXT、MDS 配套输出及完整选项仍待实现；实体介质验收尚未完成 |
 | Build | 已实现 ISO/Joliet 双字节序路径表、目录扇区填充、名称冲突处理、多 extent 大文件及 UDF 1.02/2.50 文件树。UDF 使用 64 位文件长度和 AED 分配表续接，2.50 使用 EFE、元数据分区与副本。支持纯 ISO、ISO/Joliet、纯 UDF 或桥接镜像；保留输入一致性和目标文件保护 |
 | DVD-Video / Blu-ray 布局 | DVD 使用 ISO+UDF 1.02，补建 AUDIO_TS、过滤 VIDEO_TS、按视频文件顺序排列，并保证 IFO 末尾与 BUP 开头至少间隔 32 KiB。在输出中修正 IFO/BUP 与标题集地址；标题导航交叉检查 PGC、PTT、Cell 地址、VOBU 表和 NAV 包，支持从实际布局选取 OTP 层切换单元、加入填充、更新 SPLIP 并生成 MDS。Blu-ray 使用纯 UDF 2.50、EFE、元数据副本、64 KiB 文件对齐、分离的主备描述区及 BDMV/BDAV 目录补齐。输入需要已经制作好的视频目录；单元预览与原版的逐项对照及介质验收仍待完成 |
-| Write | GUI/命令行已接通空白 CD-R MODE1 SAO、单层 DVD-R DAO、DVD+R 和 BD-R SRM 的单会话单轨 2048 字节 ISO/BIN 写入：检查介质和容量，设置速度，按介质发送布局、预留轨道并收尾。CD-R 使用 ATIP 容量及二进制 MSF CUE，BD-R 根据当前能力选择 VNR 写入或普通写入。CD-R、DVD-R 支持设备能力允许的测试写入；命令行/API 可显式请求 OPC。支持 CD-RW、单层 DVD-RW 快速/完整擦除、取消、保护恢复和写后回读比较。其他介质、原始/音频/多轨 CD、DVD 双层布局写入、格式化及完整设置仍待实现；实体刻录未验收 |
+| Write | GUI/命令行已接通空白 CD-R MODE1 SAO、单层 DVD-R DAO、DVD+R 和 BD-R SRM 的单会话单轨 2048 字节 ISO/BIN 写入，并支持 BINARY/MOTOROLA 音频 CUE 的单会话多轨 SAO 写入、索引及间隙。检查介质和容量，按介质发送布局、设置速度、预留轨道并收尾；BD-R 根据当前能力选择 VNR 或普通写入。CD-R、DVD-R 支持设备能力允许的测试写入；命令行/API 可显式请求 OPC。支持 CD-RW、单层 DVD-RW 快速/完整擦除、取消、保护恢复和写后回读比较。解码音频、数据混合轨、CD-TEXT、DVD 双层写入、其他介质格式化及完整设置仍待实现；实体刻录未验收 |
 | Verify | GUI/命令行支持 2048 字节数据光盘可读性检查和 ISO/BIN 比较，新增单会话音频、混合轨道、MODE1/MODE2 CD 可读性检查及受支持的原始 CUE/BIN 比较。音频按原版默认仅检查可读性，可显式开启样本比较。支持重试、取消、完整传输检查、失配计数及结束布局复查；多会话、MDS、解码音频和完整选项及真实介质流程尚未验收 |
 | Discovery | 已有模式页面，测试流程尚未实现 |
 | 桌面界面、设置、任务队列 | 已有快速向导、六种页面、文件/查看/模式/工具/帮助菜单及 Build 的输入/输出菜单。已接通来源选择、镜像计算和构建、日志、CUE/MDS 生成窗口、镜像信息和只读扇区查看器；可选加载原版主图标、向导及部分按钮图像。完整工具窗口、方案保存载入、设置、队列、图表和高级布局编辑仍待补齐 |
@@ -84,7 +84,7 @@ ImgBurn.exe verify R: disc.cue --compare-audio
 
 Verify 默认不执行额外单扇区软件重试，可用 `--retries 0–20` 指定；多扇区失败后仍会尝试逐扇区读取。GUI 按[原版流程](https://forum.imgburn.com/topic/6392-the-imgburn-functions/)提供“与镜像文件比较”开关，默认开启；关闭后检查整盘可读性，开启时需要选择镜像。ISO 或按 2048 字节分扇区的 BIN 比较镜像声明的范围。原始 CD 的 2352 字节 BIN 需要通过 CUE 提供轨道布局。任务可以取消，结果区分内容比较、仅检查可读性和失配扇区，不能把可读性通过理解为全部内容一致。
 
-单会话 CUE 校验支持 BINARY 的 AUDIO、MODE1/2352、MODE2/2352，以及 MOTOROLA 音频，允许多个 FILE、保存在文件中的 INDEX 00 与后续索引，按真实文件偏移读取。核对 TOC 的轨道数、INDEX 01、音频/数据类型及 lead-out；数据轨默认比较全部 2352 字节，音频默认只检查设备返回的扇区可读性。此默认值依据原版配置及[作者对音频校验的说明](https://forum.imgburn.com/topic/20476-audio-cd-verify/)，原因是驱动器读取与写入的音频样本偏移会影响逐字节比较。`--compare-audio` 显式开启音频样本比较，不作偏移补偿；完整设置窗口尚未接通该选项。
+单会话 CUE 校验支持 BINARY 的 AUDIO、MODE1/2352、MODE2/2352，以及 MOTOROLA 音频，允许多个 FILE、保存在文件中的 INDEX 00 与后续索引，按真实文件偏移读取。音频的 PREGAP/POSTGAP 按生成的静音比较，不将其误算为源文件偏移；数据轨的生成间隙尚未接通。核对 TOC 的轨道数、INDEX 01、音频/数据类型及 lead-out；数据轨默认比较全部 2352 字节，音频默认只检查设备返回的扇区可读性。此默认值依据原版配置及[作者对音频校验的说明](https://forum.imgburn.com/topic/20476-audio-cd-verify/)，原因是驱动器读取与写入的音频样本偏移会影响逐字节比较。Verify 命令的 `--compare-audio` 显式开启音频样本比较，不作偏移补偿；完整设置窗口尚未接通该选项。
 
 原始校验只请求主通道，不要求 Q 返回，也不比较 Q、CD-TEXT、MCN、ISRC 等子通道信息。CUE 内没有存入文件的 PREGAP/POSTGAP、压缩或 WAVE 音频源、其他扇区尺寸、MDS 及多会话仍明确返回不支持。校验只读共享源描述和数据文件，内容比较期间拒绝改写或替换；结束前复查介质布局，任何读错、失配、取消或布局变化均不报告成功完成。
 
@@ -103,7 +103,9 @@ ImgBurn.exe sector R: 0 --raw-sub
 
 Write 当前支持空白 CD-R MODE1 SAO、单层 DVD-R DAO、DVD+R 和 BD-R SRM，ISO/BIN 必须非空且按 2048 字节分扇区。DVD/BD 使用轨道信息检查有效 NWA、起点和可写空间，不以空白盘的 READ CAPACITY 结果作为写入前提。容量检查包含末尾占用：DVD 使用 16 扇区 ECC 块，BD 使用 32 扇区簇。DVD+R 的补齐行为与[原版作者说明](https://forum.imgburn.com/topic/14049-size-of-dvd-contents-smaller-than-actual-iso-size/)一致。程序不修改源镜像，写后校验比较源镜像声明的扇区范围。DVD-R DAO 设置并回读写入参数页，在同步缓存时结束光盘；DVD+R 和 BD-R 则另外关闭轨道并结束光盘，核对光盘和最后会话均已完成。
 
-CD-R 数据镜像采用与[原版 MODE1 写入日志](https://forum.imgburn.com/topic/17325-stuck-writing-leadin/)一致的 SAO 写入类型。根据 [MMC-5](https://www.13thmonkey.org/documentation/SCSI/mmc5r04.pdf) 检查 CD Mastering 能力、SAO 和 CUE 缓冲长度，设置 MODE1 参数并回读确认，再发送单轨布局。设备生成导入区、两秒预间隙和导出区，主机从 LBA 0 发送原始镜像的 2048 字节用户数据，不添加 DVD/BD 的 ECC 簇填充。ATIP 与 CUE 使用二进制 MSF，空白盘的容量在锁定后再次核对；结束后核对实际 TOC 的起点、类型和导出位置。当前仅支持普通、非受限、空白 CD-R，单轨至少 300 扇区，不自动补齐更小镜像；不进行超刻、高容量扩展、TAO、RAW、音频、多轨或追加会话。文件和协议验证尚未证明实体设备的导入/导出、纠错或实际刻录效果。
+CD-R 数据镜像采用与[原版 MODE1 写入日志](https://forum.imgburn.com/topic/17325-stuck-writing-leadin/)一致的 SAO 写入类型。根据 [MMC-5](https://www.13thmonkey.org/documentation/SCSI/mmc5r04.pdf) 检查 CD Mastering 能力、SAO 和 CUE 缓冲长度，设置 MODE1 参数并回读确认，再发送单轨布局。设备生成导入区、两秒预间隙和导出区，主机从 LBA 0 发送原始镜像的 2048 字节用户数据，不添加 DVD/BD 的 ECC 簇填充。ATIP 与 CUE 使用二进制 MSF，空白盘的容量在锁定后再次核对；结束后核对实际 TOC 的起点、类型和导出位置。此数据入口仅支持普通、非受限、空白 CD-R，单轨至少 300 扇区，不自动补齐更小镜像；不进行超刻、高容量扩展、TAO、RAW、数据多轨或追加会话。文件和协议验证尚未证明实体设备的导入/导出、纠错或实际刻录效果。
+
+音频写入按[原版音频 CD 工作流程](https://forum.imgburn.com/topic/5555-how-to-write-an-audio-cd-from-music-files-using-imgburn/)从 Write 模式载入 CUE。当前支持 AUDIO 轨、BINARY/MOTOROLA 文件、最多 99 轨、多个或重复 FILE、INDEX 00–99、PREGAP/POSTGAP、CATALOG、ISRC 及 DCP/PRE/4CH/SCMS 标志。使用锁定的只读来源流式发送 2352 字节 PCM，MOTOROLA 转为小端样本，显式前后间隙发送静音；首轨另向 LBA -150 发送 150 扇区零载荷 WRITE，由设备生成标准两秒预间隙，ISO 数据路径也执行此命令。完整 CUE 长度先与设备容量核对，结束后核对全部轨道的起点、控制标志和导出位置。首轨 INDEX 01 必须从 LBA 0 开始；首轨额外偏移、负 LBA 隐藏音频及 FILE 开头未明确标为 INDEX 00 的前置内容尚未接通。每轨实际内容至少 300 扇区，PRE/4CH 控制变化需要至少两秒预间隙；不自动补齐或移动索引。WAVE/压缩音频解码、数据混合轨、CD-TEXT 请求及多会话当前明确拒绝，不能据此认定完整音频刻录已复刻。写后音频校验沿用原版默认的可读性检查，完整样本比较可另用 Verify 的 `--compare-audio`，真实设备偏移仍待验收。
 
 ```bat
 ImgBurn.exe burn R: disc.iso --verify
@@ -116,7 +118,7 @@ ImgBurn.exe burn R: bluray.iso --speed 4x --verify
 
 默认最高速度，DVD+R 默认不预留轨道，`--reserve` 显式启用；当前 DVD-R DAO 和 BD-R SRM 路径总是预留，CD-R SAO 不发送预留命令。BD-R 预留后需保留至少一个空余簇，当前不支持占满全部可写空间的无预留流程。设备速度请求以 CD 176.4 KB/s、DVD 1385 KB/s、BD 4495.5 KB/s 计算 1x；CD/DVD 使用 SET CD SPEED，BD 使用 SET STREAMING 的 32 位速率请求，GUI 当前仍使用最高速度。`--opc` 在写入前请求功率校准，按[原版设置](https://forum.imgburn.com/topic/6232-the-imgburn-settings/)默认关闭，目前尚未接通设置窗口。`--verify` 在实际写入和结束光盘成功后执行回读比较，GUI 默认开启；校验前默认弹出并重新装载介质，可用 `--no-cycle` 关闭。取消在命令之间生效，正在执行的设备命令需要返回后才能处理。已写入扇区不能撤销，失败或取消时尽力同步缓存并恢复锁定状态，不报告成功；SAO/DAO 的错误冲刷也可能留下无法继续写入的部分光盘。完整的原版失败恢复选项仍待实现。
 
-`--test` 仅用于当前支持且报告 Test Write 能力的 CD-R、DVD-R；DVD+R 和 BD-R 会拒绝测试写入。测试模式先回读参数确认测试位已生效，结束时退出并检查介质仍为空白。按[原版功能说明](https://forum.imgburn.com/topic/6392-the-imgburn-functions/)，GUI 勾选测试模式后取消并禁用校验，退出后恢复先前选择；底层接口和命令行也跳过测试后的回读校验。显式合用 `--opc` 仍请求实际功率校准，可能写入介质校准区。BD-R 仅接通空白单会话、单轨、NWA=0 的顺序写入，不配置备区或 POW；按[原版默认设置](https://forum.imgburn.com/topic/6232-the-imgburn-settings/)在设备支持时使用 WRITE (12) 的 VNR 位，否则使用 WRITE (10)，软件回读校验独立执行。BD-R RRM、非空盘追加、多会话、CUE/MDS 写入和 DVD 双层写入尚未接通，多层 BD 的逐层报告与实测也未完成。厂商参数、完整缓冲策略、写入重试及真实设备兼容仍待补齐。
+`--test` 仅用于当前支持且报告 Test Write 能力的 CD-R、DVD-R；DVD+R 和 BD-R 会拒绝测试写入。测试模式先回读参数确认测试位已生效，结束时退出并检查介质仍为空白。按[原版功能说明](https://forum.imgburn.com/topic/6392-the-imgburn-functions/)，GUI 勾选测试模式后取消并禁用校验，退出后恢复先前选择；底层接口和命令行也跳过测试后的回读校验。显式合用 `--opc` 仍请求实际功率校准，可能写入介质校准区。BD-R 仅接通空白单会话、单轨、NWA=0 的顺序写入，不配置备区或 POW；按[原版默认设置](https://forum.imgburn.com/topic/6232-the-imgburn-settings/)在设备支持时使用 WRITE (12) 的 VNR 位，否则使用 WRITE (10)，软件回读校验独立执行。BD-R RRM、非空盘追加、多会话、数据 CUE/MDS 写入和 DVD 双层写入尚未接通，多层 BD 的逐层报告与实测也未完成。厂商参数、完整缓冲策略、写入重试及真实设备兼容仍待补齐。
 
 可通过“工具 → 驱动器 → 擦除光盘 → 快速/完整”擦除 CD-RW 和单层 DVD-RW，或使用以下命令。省略选项时执行快速擦除；`--quick` 与 `--full` 不能同时指定。
 
@@ -199,5 +201,7 @@ CUE 按原版拒绝 CDG 轨道，REM PREGAP 仍作为注释处理；完整特殊
 第十八阶段接通 BD-R SRM 的数据镜像写入与 GUI/命令行入口，检查完整 BD Write 能力描述、VNR 支持、32 位速度、32 扇区簇容量、预留及轨道/光盘收尾。修正收尾与重新装载时遗漏最后会话状态的实现检查。两个架构使用隔离设备验证完整写入和回读、VNR 回退、16x 速率、非整簇末尾、短传输、错误和取消；独立核对所有输出字节、UDF 提取文件哈希、命令顺序和参数，新增回归另经 x64 内存检查。已有 DVD、擦除、Read/Verify 回归继续通过。全部仍属文件和协议验证，未执行实际刻录。实机验收按项目所有者安排，待功能开发完成后先验证 BD、CD、DVD，再验证可擦除光盘。
 
 第十九阶段接通 CD-R MODE1 SAO 数据镜像写入、GUI 测试写入能力及命令行 CD 速度换算。两个架构使用隔离设备核对 ATIP、完整 CUE、写入参数、收尾 TOC、最小轨道及非整簇末尾，覆盖短传输、错误、取消、测试模式退出和写后比较。独立逐字节检查原版生成镜像的模拟写入/读回输出，并提取文件核对哈希；实际命令行入口连接同一隔离设备，检查 CD/DVD/BD 的不同速度单位。已有 DVD、BD、擦除与 Read/Verify 回归继续通过，另经 x64 内存检查；这些结果不代替实机刻录验收。
+
+第二十阶段接通 BINARY/MOTOROLA 多轨音频 CUE 写入，以及音频间隙的回读比较；修正上一阶段仅声明首轨预间隙却未发送对应零载荷 WRITE 的实现遗漏。两个架构与内存检查使用独立指定的 TOC 和 PCM 样本，核对单轨、多轨、多文件、字节序、生成间隙、后续索引、元数据、99 轨和错误/取消，完整比较输出字节、CUE 参数与命令顺序。GUI 工作者和实际 CLI 入口通过隔离设备验证，旧模式回归继续通过。尚未操作实体光盘，也未把协议模型结果当作实际介质验收。
 
 当前验证仍不代表完整 DVD 播放器或介质验收。原版星级评定、更多实际多角度/多故事样本及介质验收仍待补齐；PTP 解析与描述文件生成不代表可按 PTP 写入可录双层介质。后续继续补齐 Read/Verify 的剩余原始轨道能力，逐项推进 Write、Discovery 及其菜单、命令窗口和剩余格式兼容。原版缺陷修复与额外改进仍在复刻完成后讨论。

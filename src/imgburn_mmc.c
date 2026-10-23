@@ -292,10 +292,27 @@ bool mmc_read_cd_write_capacity(OpticalDrive* drive, uint32_t* sectors) {
 }
 bool mmc_send_cd_mode1_cue(OpticalDrive* drive, uint32_t sectors) {
     if (sectors < 300 || sectors > 79 * 60 * 75 + 59 * 75 + 74 - 150) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
-    uint8_t cdb[10] = {0x5D}, data[32] = {0x41,0,0,1,0,0,0,0, 0x41,1,0,0x14,0,0,0,0, 0x41,1,1,0x10,0,0,2,0, 0x41,0xAA,1,1,0,0,0,0}; cdb[8] = sizeof(data);
+    uint8_t data[32] = {0x41,0,0,1,0,0,0,0, 0x41,1,0,0x14,0,0,0,0, 0x41,1,1,0x10,0,0,2,0, 0x41,0xAA,1,1,0,0,0,0};
     uint32_t end = sectors + 150; data[29] = (uint8_t)(end / (60 * 75)); data[30] = (uint8_t)(end / 75 % 60); data[31] = (uint8_t)(end % 75);
-    if (!spti_send_cdb(drive,cdb,10,data,sizeof(data),false,10)) return false;
-    if (drive->lastTransferBytes != sizeof(data)) return mmc_write_parameter_error(drive,ERROR_WRITE_FAULT); return true;
+    return mmc_send_cd_cue(drive,data,sizeof(data));
+}
+bool mmc_send_cd_cue(OpticalDrive* drive, const uint8_t* cue, uint32_t bytes) {
+    if (!cue || bytes < 32 || bytes > 0xFFFFFF || bytes % 8) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    uint8_t cdb[10] = {0x5D}; cdb[6] = (uint8_t)(bytes >> 16); cdb[7] = (uint8_t)(bytes >> 8); cdb[8] = (uint8_t)bytes;
+    if (!spti_send_cdb(drive,cdb,10,(void*)cue,bytes,false,10)) return false;
+    if (drive->lastTransferBytes != bytes) return mmc_write_parameter_error(drive,ERROR_WRITE_FAULT); return true;
+}
+bool mmc_write_cd_leadin_gap(OpticalDrive* drive) {
+    /* 即使 CUE 指定由设备生成零数据，程序区的每一扇区也必须有对应 WRITE。 */
+    uint8_t cdb[10] = {0x2A}; write_be32(cdb + 2,(uint32_t)-150); write_be16(cdb + 7,150);
+    if (!spti_send_cdb(drive,cdb,10,NULL,0,false,180)) return false;
+    if (drive->lastTransferBytes) return mmc_write_parameter_error(drive,ERROR_WRITE_FAULT); return true;
+}
+bool mmc_write_cd_audio_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, const void* buffer) {
+    if (!buffer || !blockCount || blockCount > 27 || startLba > UINT32_MAX - ((uint32_t)blockCount - 1)) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    uint8_t cdb[10] = {0x2A}; write_be32(cdb + 2,startLba); write_be16(cdb + 7,blockCount); uint32_t bytes = (uint32_t)blockCount * 2352;
+    if (!spti_send_cdb(drive,cdb,10,(void*)buffer,bytes,false,startLba ? 30 : 180)) return false;
+    if (drive->lastTransferBytes != bytes) return mmc_write_parameter_error(drive,ERROR_WRITE_FAULT); return true;
 }
 bool mmc_write_cd_mode1_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, const void* buffer) {
     if (!buffer || !blockCount || blockCount > 32 || startLba > UINT32_MAX - ((uint32_t)blockCount - 1)) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);

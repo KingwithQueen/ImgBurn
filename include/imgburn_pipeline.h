@@ -65,7 +65,7 @@ typedef void (*PipelineProgressCallback)(const PipelineStats* stats, void* userD
  */
 typedef struct {
     OpticalDrive* drive;
-    const wchar_t* imagePath;       /* Path to .iso, .bin */
+    const wchar_t* imagePath;       /* 2048 字节 ISO/BIN 或受支持的音频 CUE。 */
     uint32_t writeSpeedKbps;        /* 0、0xFFFF 或 0xFFFFFFFF 为最高速度；蓝光支持 32 位速率。 */
     bool testMode;                  /* 支持具备 Test Write 能力的 CD-R SAO、DVD-R DAO。 */
     bool verifyAfterWrite;

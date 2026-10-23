@@ -160,7 +160,7 @@ done:
     stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Raw CD image read successfully."); if (callback) callback(&stats,context); return true;
 }
 
-typedef struct { HANDLE file; uint32_t start, end; uint64_t offset; bool audio, swap; } CdVerifySpan;
+typedef struct { HANDLE file; uint32_t start, end, payloadStart, payloadEnd; uint64_t offset; bool audio, swap; } CdVerifySpan;
 typedef struct { CueSheet sheet; CdVerifySpan spans[99]; } CdVerifyImage;
 
 static bool cd_verify_plan(CdVerifyImage* image) {
@@ -170,30 +170,38 @@ static bool cd_verify_plan(CdVerifyImage* image) {
     for (int i = 0; i < sheet->trackCount; i++) {
         const CueTrack* track = &sheet->tracks[i]; CdVerifySpan* span = &image->spans[i];
         if (track->indexCount < 1 || track->indexCount > MAX_CUE_INDICES || track->sectorCount > UINT32_MAX - track->startLba) { SetLastError(ERROR_INVALID_DATA); return false; }
-        if (track->sectorSize != 2352 || (track->mode != TRACK_MODE_AUDIO && track->mode != TRACK_MODE_MODE1_2352 && track->mode != TRACK_MODE_MODE2_2352) || track->sourceType > CUE_FILE_MOTOROLA || (track->sourceType == CUE_FILE_MOTOROLA && track->mode != TRACK_MODE_AUDIO) || track->pregapSectors || track->postgapSectors) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+        if (track->sectorSize != 2352 || (track->mode != TRACK_MODE_AUDIO && track->mode != TRACK_MODE_MODE1_2352 && track->mode != TRACK_MODE_MODE2_2352) || track->sourceType > CUE_FILE_MOTOROLA || (track->sourceType == CUE_FILE_MOTOROLA && track->mode != TRACK_MODE_AUDIO) || ((track->pregapSectors || track->postgapSectors) && track->mode != TRACK_MODE_AUDIO)) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
         uint32_t indexOne = 0; bool found = false;
         for (int j = 0; j < track->indexCount; j++) if (track->indices[j].indexNumber == 1) { indexOne = track->indices[j].lba; found = true; }
         bool firstFileTrack = !i || track->sourceFileGroup != sheet->tracks[i - 1].sourceFileGroup;
         uint32_t fileStart = firstFileTrack ? 0 : track->indices[0].lba;
         if (!found || fileStart > indexOne || indexOne - fileStart > track->startLba) { SetLastError(ERROR_INVALID_DATA); return false; }
-        span->start = track->startLba - (indexOne - fileStart); span->end = track->startLba + track->sectorCount;
-        uint64_t prefix = (uint64_t)(track->startLba - span->start) * 2352;
+        span->payloadStart = track->startLba - (indexOne - fileStart); span->payloadEnd = track->startLba + track->sectorCount;
+        uint64_t prefix = (uint64_t)(track->startLba - span->payloadStart) * 2352;
+        if (track->pregapSectors > span->payloadStart || track->postgapSectors > UINT32_MAX - span->payloadEnd) { SetLastError(ERROR_INVALID_DATA); return false; }
+        span->start = span->payloadStart - track->pregapSectors; span->end = span->payloadEnd + track->postgapSectors;
         if (track->sourceByteOffset < prefix || span->end <= span->start || (i ? span->start != image->spans[i - 1].end : span->start != 0)) { SetLastError(ERROR_INVALID_DATA); return false; }
         span->offset = track->sourceByteOffset - prefix; span->audio = track->mode == TRACK_MODE_AUDIO; span->swap = track->sourceType == CUE_FILE_MOTOROLA;
         /* 句柄保持只读共享，校验期间禁止源文件被改写或替换。 */
         span->file = CreateFileW(track->sourceFilePath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL);
         if (span->file == INVALID_HANDLE_VALUE) return false;
-        LARGE_INTEGER length; BY_HANDLE_FILE_INFORMATION info; uint64_t bytes = (uint64_t)(span->end - span->start) * 2352;
+        LARGE_INTEGER length; BY_HANDLE_FILE_INFORMATION info; uint64_t bytes = (uint64_t)(span->payloadEnd - span->payloadStart) * 2352;
         if (GetFileType(span->file) != FILE_TYPE_DISK || !GetFileInformationByHandle(span->file,&info) || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !GetFileSizeEx(span->file,&length) || length.QuadPart < 0 || span->offset > (uint64_t)length.QuadPart || bytes > (uint64_t)length.QuadPart - span->offset) { SetLastError(ERROR_INVALID_DATA); return false; }
     }
     if (image->spans[sheet->trackCount - 1].end != sheet->totalSectors) { SetLastError(ERROR_INVALID_DATA); return false; } return true;
 }
 static bool cd_verify_read(const CdVerifySpan* span, uint32_t lba, uint16_t count, uint8_t* data) {
-    LARGE_INTEGER position; position.QuadPart = (LONGLONG)(span->offset + (uint64_t)(lba - span->start) * 2352);
-    if (!SetFilePointerEx(span->file,position,NULL,FILE_BEGIN)) return false;
-    DWORD wanted = (DWORD)count * 2352, offset = 0;
-    while (offset < wanted) { DWORD actual = 0; if (!ReadFile(span->file,data + offset,wanted - offset,&actual,NULL)) return false; if (!actual || actual > wanted - offset) { SetLastError(ERROR_HANDLE_EOF); return false; } offset += actual; }
-    if (span->swap) for (DWORD i = 0; i < wanted; i += 2) { uint8_t value = data[i]; data[i] = data[i + 1]; data[i + 1] = value; } return true;
+    if (!count || count > 27 || lba < span->start || lba >= span->end || count > span->end - lba) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    DWORD wanted = (DWORD)count * 2352; memset(data,0,wanted);
+    uint32_t first = lba > span->payloadStart ? lba : span->payloadStart, end = lba + count < span->payloadEnd ? lba + count : span->payloadEnd;
+    /* PREGAP/POSTGAP 是生成的静音，不能被当作源文件偏移读取。 */
+    if (first < end) {
+        LARGE_INTEGER position; position.QuadPart = (LONGLONG)(span->offset + (uint64_t)(first - span->payloadStart) * 2352);
+        if (!SetFilePointerEx(span->file,position,NULL,FILE_BEGIN)) return false;
+        DWORD bytes = (end - first) * 2352, offset = 0, destination = (first - lba) * 2352;
+        while (offset < bytes) { DWORD actual = 0; if (!ReadFile(span->file,data + destination + offset,bytes - offset,&actual,NULL)) return false; if (!actual || actual > bytes - offset) { SetLastError(ERROR_HANDLE_EOF); return false; } offset += actual; }
+    }
+    if (span->swap) for (DWORD i = 0; i + 1 < wanted; i += 2) { uint8_t value = data[i]; data[i] = data[i + 1]; data[i + 1] = value; } return true;
 }
 
 bool pipeline_verify_cd(const VerifyConfig* config, PipelineProgressCallback callback, void* context) {
