@@ -2,6 +2,8 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "imgburn_pipeline.h"
 #include "imgburn_image.h"
+#include "imgburn_audio.h"
+#include "imgburn_cd_sector.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,39 +13,115 @@
 #define CHUNK_SECTORS 32
 #define CHUNK_BYTES (CHUNK_SECTORS * 2048)
 
-typedef struct { HANDLE file; uint32_t start, end; uint64_t offset; bool swap; } BurnCdSpan;
+typedef struct { HANDLE file; uint32_t start, end; uint64_t offset, sourceBytes; TrackDataMode mode; bool swap; } BurnCdSpan;
 typedef struct {
     CueSheet sheet;
-    BurnCdSpan spans[MAX_CUE_TRACKS * 3];
+    BurnCdSpan spans[MAX_CUE_TRACKS * 5];
     unsigned spanCount, readSpan;
     uint32_t readLba, cueBytes;
+    bool xa;
     uint8_t cue[(MAX_CUE_TRACKS * (MAX_CUE_INDICES + 4) + 5) * 8];
 } BurnCdImage;
 
 static void burn_cd_free(BurnCdImage* image) {
     if (!image) return;
-    for (unsigned i = 0; i < image->spanCount && i < MAX_CUE_TRACKS * 3; i++) {
+    for (unsigned i = 0; i < image->spanCount && i < MAX_CUE_TRACKS * 5; i++) {
         HANDLE sourceFile = image->spans[i].file; image->spans[i].file = NULL;
         if (sourceFile && sourceFile != INVALID_HANDLE_VALUE) CloseHandle(sourceFile);
     }
     free(image);
 }
-static uint8_t burn_cd_control(const CueTrack* track) { return (uint8_t)(((track->flags & CUE_FLAG_DCP) ? 2 : 0) | ((track->flags & CUE_FLAG_4CH) ? 8 : 0) | ((track->flags & CUE_FLAG_PRE) ? 1 : 0)); }
+static uint8_t burn_cd_control(const CueTrack* track) { return (uint8_t)((track->mode == TRACK_MODE_AUDIO ? 0 : 4) | ((track->flags & CUE_FLAG_DCP) ? 2 : 0) | ((track->flags & CUE_FLAG_4CH) ? 8 : 0) | ((track->flags & CUE_FLAG_PRE) ? 1 : 0)); }
+static unsigned burn_cd_form(TrackDataMode mode) { return mode == TRACK_MODE_AUDIO ? 0 : mode == TRACK_MODE_MODE1_2352 ? 0x11 : 0x21; }
 static void burn_cd_entry(BurnCdImage* image, uint8_t control, unsigned track, unsigned index, unsigned form, uint8_t scms, int32_t lba) {
     uint8_t* entry = image->cue + image->cueBytes; uint32_t absolute = (uint32_t)(lba + 150);
     entry[0] = (uint8_t)((control << 4) | 1); entry[1] = (uint8_t)track; entry[2] = (uint8_t)index; entry[3] = (uint8_t)form; entry[4] = scms;
     entry[5] = (uint8_t)(absolute / 4500); entry[6] = (uint8_t)(absolute / 75 % 60); entry[7] = (uint8_t)(absolute % 75); image->cueBytes += 8;
 }
-static bool burn_cd_span(BurnCdImage* image, uint32_t start, uint32_t end, const CueTrack* source, uint64_t offset) {
+static bool burn_cd_span(BurnCdImage* image, uint32_t start, uint32_t end, const CueTrack* source, uint64_t offset, TrackDataMode mode) {
     if (start == end) return true;
-    if (start > end || image->spanCount >= MAX_CUE_TRACKS * 3) { SetLastError(ERROR_INVALID_DATA); return false; }
-    BurnCdSpan* span = &image->spans[image->spanCount++]; memset(span,0,sizeof(*span)); span->start = start; span->end = end; span->offset = offset;
+    if (start > end || image->spanCount >= MAX_CUE_TRACKS * 5) { SetLastError(ERROR_INVALID_DATA); return false; }
+    BurnCdSpan* span = &image->spans[image->spanCount++]; memset(span,0,sizeof(*span)); span->start = start; span->end = end; span->offset = offset; span->mode = mode;
     if (!source) return true;
     span->swap = source->sourceType == CUE_FILE_MOTOROLA;
     span->file = CreateFileW(source->sourceFilePath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL);
     if (span->file == INVALID_HANDLE_VALUE) return false;
     LARGE_INTEGER length; BY_HANDLE_FILE_INFORMATION info; uint64_t bytes = (uint64_t)(end - start) * 2352;
-    if (GetFileType(span->file) != FILE_TYPE_DISK || !GetFileInformationByHandle(span->file,&info) || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !GetFileSizeEx(span->file,&length) || length.QuadPart < 0 || length.QuadPart % 2352 || offset > (uint64_t)length.QuadPart || bytes > (uint64_t)length.QuadPart - offset) { SetLastError(ERROR_INVALID_DATA); return false; } return true;
+    if (GetFileType(span->file) != FILE_TYPE_DISK || !GetFileInformationByHandle(span->file,&info) || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !GetFileSizeEx(span->file,&length) || length.QuadPart < 0) { SetLastError(ERROR_INVALID_DATA); return false; }
+    if (source->sourceType == CUE_FILE_WAVE) {
+        AudioWaveLayout wave;
+        if (!audio_wave_get_layout(span->file,&wave)) return false;
+        uint64_t paddedBytes = (uint64_t)wave.sectorCount * 2352, trackBytes = (uint64_t)source->sectorCount * 2352;
+        if (!wave.dataBytes || (source->decodedSourceSectors && source->decodedSourceSectors != wave.sectorCount) || source->sourceByteOffset >= wave.dataBytes || offset >= wave.dataBytes || offset > paddedBytes || bytes > paddedBytes - offset || wave.dataOffset > (uint64_t)length.QuadPart || wave.dataBytes > (uint64_t)length.QuadPart - wave.dataOffset) { SetLastError(ERROR_INVALID_DATA); return false; }
+        uint64_t actualTrackBytes = wave.dataBytes - source->sourceByteOffset < trackBytes ? wave.dataBytes - source->sourceByteOffset : trackBytes;
+        if (source->sourceByteLength != actualTrackBytes && (!source->decodedSourceSectors || source->sourceByteLength != trackBytes)) { SetLastError(ERROR_INVALID_DATA); return false; }
+        span->sourceBytes = wave.dataBytes - offset < bytes ? wave.dataBytes - offset : bytes; span->offset += wave.dataOffset;
+    } else {
+        if (length.QuadPart % 2352 || offset > (uint64_t)length.QuadPart || bytes > (uint64_t)length.QuadPart - offset) { SetLastError(ERROR_INVALID_DATA); return false; }
+        span->sourceBytes = bytes;
+    }
+    return true;
+}
+static bool burn_cd_span_range(BurnCdImage* image, uint32_t start, uint32_t end, const CueTrack* source, uint64_t offset, TrackDataMode mode, TrackDataMode previous, uint32_t transition) {
+    uint32_t split = transition > start && transition < end ? transition : end;
+    TrackDataMode firstMode = transition > start ? previous : mode;
+    if (!burn_cd_span(image,start,split,source,offset,firstMode)) return false;
+    return split == end || burn_cd_span(image,split,end,source,offset + (uint64_t)(split - start) * 2352,mode);
+}
+static bool burn_cd_source_read(const BurnCdSpan* span, uint32_t lba, uint16_t count, uint8_t* data) {
+    if (!count || count > 27 || lba < span->start || lba >= span->end || count > span->end - lba) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    DWORD wanted = (DWORD)count * 2352; memset(data,0,wanted);
+    uint64_t sourceOffset = (uint64_t)(lba - span->start) * 2352;
+    if (span->file && sourceOffset < span->sourceBytes) {
+        LARGE_INTEGER position; position.QuadPart = (LONGLONG)(span->offset + sourceOffset);
+        if (!SetFilePointerEx(span->file,position,NULL,FILE_BEGIN)) return false;
+        DWORD bytes = span->sourceBytes - sourceOffset < wanted ? (DWORD)(span->sourceBytes - sourceOffset) : wanted, offset = 0;
+        while (offset < bytes) { DWORD got = 0; if (!ReadFile(span->file,data + offset,bytes - offset,&got,NULL)) return false; if (!got || got > bytes - offset) { SetLastError(ERROR_HANDLE_EOF); return false; } offset += got; }
+        if (span->swap) for (DWORD j = 0; j < bytes; j += 2) { uint8_t value = data[j]; data[j] = data[j + 1]; data[j + 1] = value; }
+    }
+    return true;
+}
+static bool burn_cd_sources_check(const BurnCdImage* image, uint8_t* data) {
+    /* XA必须在改变设备前检查完整引用区；不将普通MODE2正文误认为XA子头。 */
+    for (unsigned i = 0; i < image->spanCount; i++) {
+        const BurnCdSpan* span = &image->spans[i];
+        if (!span->file || span->mode != TRACK_MODE_MODE2_2352) continue;
+        for (uint32_t lba = span->start; lba < span->end;) {
+            uint16_t count = (uint16_t)(span->end - lba < 27 ? span->end - lba : 27);
+            if (!burn_cd_source_read(span,lba,count,data)) return false;
+            for (uint16_t j = 0; j < count; j++) if (memcmp(data + (size_t)j * 2352 + 16,data + (size_t)j * 2352 + 20,4)) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+            lba += count;
+        }
+    }
+    for (int i = 1; i < image->sheet.trackCount; i++) {
+        const CueTrack* previous = &image->sheet.tracks[i - 1];
+        if (previous->mode == TRACK_MODE_AUDIO || image->sheet.tracks[i].mode != TRACK_MODE_AUDIO) continue;
+        uint32_t end = previous->startLba + previous->sectorCount + previous->postgapSectors, first = end - 150;
+        /* 数据转音频前的150帧零正文可来自文件尾部或显式POSTGAP，不能占用下一轨暂停。 */
+        for (unsigned j = 0; j < image->spanCount && first < end; j++) {
+            const BurnCdSpan* span = &image->spans[j];
+            if (first < span->start || first >= span->end) continue;
+            while (first < span->end && first < end) {
+                uint32_t available = span->end < end ? span->end - first : end - first;
+                uint16_t count = (uint16_t)(available < 27 ? available : 27);
+                if (!burn_cd_source_read(span,first,count,data)) return false;
+                for (uint16_t k = 0; k < count; k++) {
+                    const uint8_t* frame = data + (size_t)k * 2352;
+                    unsigned offset = span->mode == TRACK_MODE_MODE1_2352 ? 16 : 24, bytes = span->mode == TRACK_MODE_MODE1_2352 || !(frame[18] & 0x20) ? 2048 : 2324;
+                    if (span->mode == TRACK_MODE_AUDIO) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+                    for (unsigned n = 0; n < bytes; n++) if (frame[offset + n]) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+                }
+                first += count;
+            }
+        }
+        if (first != end) { SetLastError(ERROR_INVALID_DATA); return false; }
+    }
+    return true;
+}
+static bool burn_cd_sources_valid(const BurnCdImage* image) {
+    uint8_t* data = malloc(27 * 2352);
+    if (!data) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; }
+    bool ok = burn_cd_sources_check(image,data); DWORD error = GetLastError(); free(data); SetLastError(error); return ok;
 }
 static bool burn_cd_plan(BurnCdImage* image) {
     CueSheet* sheet = &image->sheet;
@@ -58,18 +136,23 @@ static bool burn_cd_plan(BurnCdImage* image) {
     uint32_t cursor = 0;
     for (int i = 0; i < sheet->trackCount; i++) {
         const CueTrack* track = &sheet->tracks[i]; uint8_t control = burn_cd_control(track), scms = (track->flags & CUE_FLAG_SCMS) ? 0x80 : 0;
-        if (track->mode != TRACK_MODE_AUDIO || track->sectorSize != 2352 || track->sourceType > CUE_FILE_MOTOROLA || track->title[0] || track->performer[0] || track->songwriter[0]) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+        bool audio = track->mode == TRACK_MODE_AUDIO;
+        if ((!audio && track->mode != TRACK_MODE_MODE1_2352 && track->mode != TRACK_MODE_MODE2_2352) || track->sectorSize != 2352 || track->sourceType > CUE_FILE_WAVE || (!audio && track->sourceType != CUE_FILE_BINARY) || track->title[0] || track->performer[0] || track->songwriter[0] || (!audio && (track->isrc[0] || (track->flags & (CUE_FLAG_PRE | CUE_FLAG_4CH | CUE_FLAG_SCMS))))) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+        if (track->mode == TRACK_MODE_MODE2_2352) image->xa = true;
         if (track->trackNumber != i + 1 || track->sessionNumber != 1 || track->indexCount < 1 || track->indexCount > MAX_CUE_INDICES || track->sectorCount < 300 || (scms && (control & 2))) { SetLastError(ERROR_INVALID_DATA); return false; }
         uint32_t indexOne = 0; bool found = false;
         for (int j = 0; j < track->indexCount; j++) if (track->indices[j].indexNumber == 1) { indexOne = track->indices[j].lba; found = true; }
         bool firstFileTrack = !i || track->sourceFileGroup != sheet->tracks[i - 1].sourceFileGroup;
         uint32_t fileStart = firstFileTrack ? 0 : track->indices[0].lba;
         if (!found || fileStart > indexOne || indexOne - fileStart > track->startLba) { SetLastError(ERROR_INVALID_DATA); return false; }
-        /* 首轨非零偏移及 FILE 前未明确标为 INDEX00 的内容，待原版寻址对照后接通。 */
-        if ((!i && track->startLba) || (firstFileTrack && indexOne && (track->indices[0].indexNumber != 0 || track->indices[0].lba))) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+        /* 首轨仅开放原版额外PREGAP；文件偏移与存储首轨INDEX00仍待原版寻址对照。 */
+        if ((!i && track->startLba != track->pregapSectors) || (firstFileTrack && indexOne && (track->indices[0].indexNumber != 0 || track->indices[0].lba))) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
         uint32_t payloadStart = track->startLba - (indexOne - fileStart); uint64_t end = (uint64_t)track->startLba + track->sectorCount, prefix = (uint64_t)(indexOne - fileStart) * 2352;
-        if (track->pregapSectors > payloadStart || payloadStart - track->pregapSectors != cursor || end + track->postgapSectors > sheet->totalSectors || track->sourceByteOffset < prefix || track->sourceByteLength != (uint64_t)track->sectorCount * 2352) { SetLastError(ERROR_INVALID_DATA); return false; }
-        if (i && ((control ^ burn_cd_control(&sheet->tracks[i - 1])) & 9) && track->startLba - cursor < 150) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+        if (track->pregapSectors > payloadStart || payloadStart - track->pregapSectors != cursor || end + track->postgapSectors > sheet->totalSectors || track->sourceByteOffset < prefix || (track->sourceType != CUE_FILE_WAVE && track->sourceByteLength != (uint64_t)track->sectorCount * 2352)) { SetLastError(ERROR_INVALID_DATA); return false; }
+        TrackDataMode previousMode = i ? sheet->tracks[i - 1].mode : track->mode;
+        bool extended = i && !audio && track->mode != previousMode;
+        if ((extended && track->startLba - cursor < 225) || (i && ((control ^ burn_cd_control(&sheet->tracks[i - 1])) & 13) && track->startLba - cursor < 150)) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+        uint32_t transition = extended ? track->startLba - 150 : 0;
         if (track->isrc[0]) {
             if (strlen(track->isrc) != 12) { SetLastError(ERROR_INVALID_DATA); return false; }
             for (unsigned j = 0; j < 12; j++) if (j < 2 ? !isalpha((unsigned char)track->isrc[j]) : j < 5 ? !isalnum((unsigned char)track->isrc[j]) : !isdigit((unsigned char)track->isrc[j])) { SetLastError(ERROR_INVALID_DATA); return false; }
@@ -77,14 +160,19 @@ static bool burn_cd_plan(BurnCdImage* image) {
             for (unsigned j = 0; j < 12; j++) pair[(j < 6 ? 2 : 10) + j % 6] = (uint8_t)toupper((unsigned char)track->isrc[j]); image->cueBytes += 16;
         }
         /* 首轨的标准两秒预间隙位于负 LBA；文件中的 INDEX00 内容仍从 LBA0 起保留。 */
-        if (!i) burn_cd_entry(image,control,1,0,1,scms,-150);
-        if (track->startLba > cursor) burn_cd_entry(image,control,(unsigned)i + 1,0,0,scms,(int32_t)cursor);
-        for (int j = 0; j < track->indexCount; j++) if (track->indices[j].indexNumber) burn_cd_entry(image,control,(unsigned)i + 1,(unsigned)track->indices[j].indexNumber,0,scms,(int32_t)(track->startLba + track->indices[j].lba - indexOne));
-        if (!burn_cd_span(image,cursor,payloadStart,NULL,0) || !burn_cd_span(image,payloadStart,(uint32_t)end,track,track->sourceByteOffset - prefix) || !burn_cd_span(image,(uint32_t)end,(uint32_t)end + track->postgapSectors,NULL,0)) return false;
+        if (!i) burn_cd_entry(image,control,1,0,audio ? 1 : track->mode == TRACK_MODE_MODE1_2352 ? 0x14 : 0x24,scms,-150);
+        if (track->startLba > cursor) burn_cd_entry(image,extended ? burn_cd_control(&sheet->tracks[i - 1]) : control,(unsigned)i + 1,0,burn_cd_form(extended ? previousMode : track->mode),scms,(int32_t)cursor);
+        if (extended) burn_cd_entry(image,control,(unsigned)i + 1,0,burn_cd_form(track->mode),scms,(int32_t)transition);
+        for (int j = 0; j < track->indexCount; j++) if (track->indices[j].indexNumber) burn_cd_entry(image,control,(unsigned)i + 1,(unsigned)track->indices[j].indexNumber,burn_cd_form(track->mode),scms,(int32_t)(track->startLba + track->indices[j].lba - indexOne));
+        if (!burn_cd_span_range(image,cursor,payloadStart,NULL,0,track->mode,previousMode,transition) || !burn_cd_span_range(image,payloadStart,(uint32_t)end,track,track->sourceByteOffset - prefix,track->mode,previousMode,transition) || !burn_cd_span(image,(uint32_t)end,(uint32_t)end + track->postgapSectors,NULL,0,track->mode)) return false;
         cursor = (uint32_t)end + track->postgapSectors;
     }
     if (cursor != sheet->totalSectors) { SetLastError(ERROR_INVALID_DATA); return false; }
-    burn_cd_entry(image,burn_cd_control(&sheet->tracks[sheet->trackCount - 1]),0xAA,1,1,0,(int32_t)cursor); return true;
+    burn_cd_entry(image,burn_cd_control(&sheet->tracks[sheet->trackCount - 1]),0xAA,1,1,0,(int32_t)cursor); return burn_cd_sources_valid(image);
+}
+static uint16_t burn_cd_chunk_count(const BurnCdImage* image, uint32_t lba, uint16_t maximum) {
+    for (unsigned i = 0; i < image->spanCount; i++) if (lba >= image->spans[i].start && lba < image->spans[i].end) return (uint16_t)(image->spans[i].end - lba < maximum ? image->spans[i].end - lba : maximum);
+    return 0;
 }
 static BOOL burn_cd_read(BurnCdImage* image, uint8_t* data, DWORD wanted, DWORD* actual) {
     *actual = 0;
@@ -93,13 +181,10 @@ static BOOL burn_cd_read(BurnCdImage* image, uint8_t* data, DWORD wanted, DWORD*
         if (image->readSpan >= image->spanCount || (wanted - *actual) % 2352) { SetLastError(ERROR_HANDLE_EOF); return FALSE; }
         const BurnCdSpan* span = &image->spans[image->readSpan]; DWORD frames = (wanted - *actual) / 2352;
         if (frames > span->end - image->readLba) frames = span->end - image->readLba; DWORD bytes = frames * 2352;
-        if (!span->file) memset(data + *actual,0,bytes);
-        else {
-            LARGE_INTEGER position; position.QuadPart = (LONGLONG)(span->offset + (uint64_t)(image->readLba - span->start) * 2352);
-            if (!SetFilePointerEx(span->file,position,NULL,FILE_BEGIN)) return FALSE;
-            DWORD offset = 0;
-            while (offset < bytes) { DWORD got = 0; if (!ReadFile(span->file,data + *actual + offset,bytes - offset,&got,NULL)) return FALSE; if (!got || got > bytes - offset) { SetLastError(ERROR_HANDLE_EOF); return FALSE; } offset += got; }
-            if (span->swap) for (DWORD j = 0; j < bytes; j += 2) { uint8_t value = data[*actual + j]; data[*actual + j] = data[*actual + j + 1]; data[*actual + j + 1] = value; }
+        if (!burn_cd_source_read(span,image->readLba,(uint16_t)frames,data + *actual)) return FALSE;
+        for (DWORD j = 0; j < frames; j++) {
+            uint32_t lba = image->readLba + j; uint8_t* frame = data + *actual + (size_t)j * 2352;
+            if (!(span->file ? imgburn_cd_normalize_sector(span->mode,lba,frame) : imgburn_cd_zero_sector(span->mode,lba,frame))) return FALSE;
         }
         image->readLba += frames; *actual += bytes;
     } return TRUE;
@@ -301,14 +386,14 @@ bool pipeline_burn_image(const BurnConfig* config, PipelineProgressCallback call
     if (burn_cancelled(config,&stats,callback,userData)) return false;
     const wchar_t* extension = wcsrchr(config->imagePath,L'.');
     bool cueInput = extension && !_wcsicmp(extension,L".cue"); BurnCdImage* cdImage = NULL;
-    if (!extension || (!cueInput && _wcsicmp(extension,L".iso") && _wcsicmp(extension,L".bin"))) return burn_failure(&stats,ERROR_NOT_SUPPORTED,"Write accepts 2048-byte ISO/BIN or supported audio CUE images.",callback,userData);
+    if (!extension || (!cueInput && _wcsicmp(extension,L".iso") && _wcsicmp(extension,L".bin"))) return burn_failure(&stats,ERROR_NOT_SUPPORTED,"Write accepts 2048-byte ISO/BIN or supported CD CUE images.",callback,userData);
     HANDLE source = cueInput ? CreateFileW(config->imagePath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL) : open_image(config->imagePath,&stats.totalSectors);
     if (source == INVALID_HANDLE_VALUE) return pipeline_failure(&stats,"Cannot open the source image or CUE descriptor.",callback,userData);
     if (cueInput) {
         cdImage = calloc(1,sizeof(*cdImage));
         if (!cdImage) { CloseHandle(source); return burn_failure(&stats,ERROR_NOT_ENOUGH_MEMORY,"Cannot allocate the CD source plan.",callback,userData); }
         SetLastError(ERROR_SUCCESS); bool parsed = imgburn_cue_parse(config->imagePath,&cdImage->sheet);
-        if (!parsed || !burn_cd_plan(cdImage)) { DWORD prepareError = GetLastError(); burn_cd_free(cdImage); CloseHandle(source); return burn_failure(&stats,prepareError ? prepareError : ERROR_INVALID_DATA,"Cannot prepare this audio CUE and its locked source files.",callback,userData); }
+        if (!parsed || !burn_cd_plan(cdImage)) { DWORD prepareError = GetLastError(); burn_cd_free(cdImage); CloseHandle(source); return burn_failure(&stats,prepareError ? prepareError : ERROR_INVALID_DATA,"Cannot prepare this CD CUE and its locked source files.",callback,userData); }
         stats.totalSectors = cdImage->sheet.totalSectors;
     }
     uint16_t chunkSectors = cdImage ? 27 : CHUNK_SECTORS; DWORD sectorBytes = cdImage ? 2352 : 2048, chunkBytes = chunkSectors * sectorBytes;
@@ -318,7 +403,7 @@ bool pipeline_burn_image(const BurnConfig* config, PipelineProgressCallback call
     stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Checking blank CD-R, DVD-R/+R or BD-R SRM and source image..."); if (callback) callback(&stats,userData);
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
     if (!burn_check_media(config->drive,stats.totalSectors,&profile)) { pipeline_failure(&stats,"Require blank CD-R, DVD-R/+R or BD-R SRM with enough writable sectors.",callback,userData); goto cleanup; }
-    if (cdImage && profile != MMC_PROFILE_CD_R) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"Audio CUE writing requires blank CD-R media.",callback,userData); goto cleanup; }
+    if (cdImage && profile != MMC_PROFILE_CD_R) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"CD CUE writing requires blank CD-R media.",callback,userData); goto cleanup; }
     if (profile != MMC_PROFILE_BD_R_SRM && config->writeSpeedKbps > 0xFFFF && config->writeSpeedKbps != UINT32_MAX) { burn_failure(&stats,ERROR_INVALID_PARAMETER,"CD/DVD write speed exceeds the command range.",callback,userData); goto cleanup; }
     if (config->testMode && profile != MMC_PROFILE_DVD_R_SEQ && profile != MMC_PROFILE_CD_R) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"Device test writing requires supported CD-R or DVD-R media.",callback,userData); goto cleanup; }
     if (profile == MMC_PROFILE_CD_R) {
@@ -338,6 +423,7 @@ bool pipeline_burn_image(const BurnConfig* config, PipelineProgressCallback call
     if (!ringbuffer_init(&rb,config->ringBufferBytes ? config->ringBufferBytes : 32 * 1024 * 1024,true)) { pipeline_failure(&stats,"Cannot initialize source buffer.",callback,userData); goto cleanup; }
     producer = CreateThread(NULL,0,producer_thread,&context,0,NULL); if (!producer) { pipeline_failure(&stats,"Cannot create source reader thread.",callback,userData); goto cleanup; }
     uint16_t count = (uint16_t)(stats.totalSectors < chunkSectors ? stats.totalSectors : chunkSectors);
+    if (cdImage) { count = burn_cd_chunk_count(cdImage,0,count); if (!count) { burn_failure(&stats,ERROR_INVALID_DATA,"CD source plan has an empty initial range.",callback,userData); goto cleanup; } }
     if (!burn_buffer_read(config,&context,buffers,(size_t)count * sectorBytes,&stats,callback,userData)) goto cleanup;
     if (!config->drive->isLocked) { if (!spti_lock_drive(config->drive,true)) { pipeline_failure(&stats,"Cannot lock the target volume.",callback,userData); goto cleanup; } ownedLock = true; }
     if (!mmc_prevent_removal(config->drive,true)) { pipeline_failure(&stats,"Cannot prevent medium removal.",callback,userData); goto cleanup; } prevented = true;
@@ -345,10 +431,10 @@ bool pipeline_burn_image(const BurnConfig* config, PipelineProgressCallback call
     if (!burn_check_media(config->drive,stats.totalSectors,&profile)) { pipeline_failure(&stats,"Target media changed before writing.",callback,userData); goto cleanup; }
     if (profile == MMC_PROFILE_DVD_R_SEQ || profile == MMC_PROFILE_CD_R) {
         MmcWriteParameters selected = original, actual; selected.page[2] = (uint8_t)(2 | (features.bufferUnderrunFree ? 0x40 : 0) | (config->testMode ? 0x10 : 0)); selected.page[3] = cdImage ? burn_cd_control(&cdImage->sheet.tracks[0]) : profile == MMC_PROFILE_CD_R ? 4 : 0x25; selected.page[4] = cdImage ? 0 : 8; parametersChanged = true;
-        /* 普通 MODE1 CD 不继承上一张音频盘的 MCN、ISRC 或 XA 会话格式，保留厂商尾部。 */
-        if (profile == MMC_PROFILE_CD_R) { memset(selected.page + 7,0,45); selected.page[15] = 150; }
+        /* 清除旧盘的MCN、ISRC及会话格式，只有经过检查的XA源选择CD-ROM XA会话。 */
+        if (profile == MMC_PROFILE_CD_R) { memset(selected.page + 7,0,45); selected.page[8] = cdImage && cdImage->xa ? 0x20 : 0; selected.page[15] = 150; }
         if (!mmc_set_write_parameters(config->drive,&selected) || !mmc_get_write_parameters(config->drive,&actual)) { pipeline_failure(&stats,"Cannot set CD-R SAO or DVD-R DAO write parameters.",callback,userData); goto cleanup; }
-        if ((actual.page[2] & 0x5F) != selected.page[2] || actual.page[3] != selected.page[3] || actual.page[4] != selected.page[4] || (profile == MMC_PROFILE_CD_R && ((actual.page[7] & 0x3F) || actual.page[8] || (actual.page[16] & 0x80) || (actual.page[32] & 0x80)))) { burn_failure(&stats,ERROR_INVALID_DATA,"The drive did not accept the requested write mode.",callback,userData); goto cleanup; }
+        if ((actual.page[2] & 0x5F) != selected.page[2] || actual.page[3] != selected.page[3] || actual.page[4] != selected.page[4] || (profile == MMC_PROFILE_CD_R && ((actual.page[7] & 0x3F) || actual.page[8] != selected.page[8] || (actual.page[16] & 0x80) || (actual.page[32] & 0x80)))) { burn_failure(&stats,ERROR_INVALID_DATA,"The drive did not accept the requested write mode.",callback,userData); goto cleanup; }
     }
     if (!mmc_set_burn_speed(config->drive,profile,config->writeSpeedKbps)) { pipeline_failure(&stats,"Cannot set write speed.",callback,userData); goto cleanup; }
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
@@ -356,7 +442,7 @@ bool pipeline_burn_image(const BurnConfig* config, PipelineProgressCallback call
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
     if (profile == MMC_PROFILE_CD_R) { if (!(cdImage ? mmc_send_cd_cue(config->drive,cdImage->cue,cdImage->cueBytes) : mmc_send_cd_mode1_cue(config->drive,stats.totalSectors))) { pipeline_failure(&stats,"Cannot send the CD-R cue sheet.",callback,userData); goto cleanup; } }
     else if ((profile == MMC_PROFILE_DVD_R_SEQ || profile == MMC_PROFILE_BD_R_SRM || config->reserveTrack) && !mmc_reserve_track(config->drive,stats.totalSectors)) { pipeline_failure(&stats,"Cannot reserve the recording track.",callback,userData); goto cleanup; }
-    stats.state = PIPELINE_STATE_WRITING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),config->testMode ? "Device test writing CD-R SAO / DVD-R DAO..." : cdImage ? "Writing CD-R audio SAO..." : profile == MMC_PROFILE_CD_R ? "Writing CD-R MODE1 SAO..." : profile == MMC_PROFILE_DVD_R_SEQ ? "Writing DVD-R DAO..." : profile == MMC_PROFILE_BD_R_SRM ? "Writing BD-R SRM track..." : "Writing DVD+R track..."); DWORD start = GetTickCount(), previousTime = start; uint32_t previousLba = 0;
+    stats.state = PIPELINE_STATE_WRITING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),config->testMode ? "Device test writing CD-R SAO / DVD-R DAO..." : cdImage ? "Writing CD-R CUE SAO..." : profile == MMC_PROFILE_CD_R ? "Writing CD-R MODE1 SAO..." : profile == MMC_PROFILE_DVD_R_SEQ ? "Writing DVD-R DAO..." : profile == MMC_PROFILE_BD_R_SRM ? "Writing BD-R SRM track..." : "Writing DVD+R track..."); DWORD start = GetTickCount(), previousTime = start; uint32_t previousLba = 0;
     if (profile == MMC_PROFILE_CD_R) {
         if (callback) callback(&stats,userData); if (burn_cancelled(config,&stats,callback,userData)) goto cleanup; writeAttempted = true;
         if (!mmc_write_cd_leadin_gap(config->drive)) { pipeline_failure(&stats,"Cannot write the generated CD lead-in pregap.",callback,userData); goto cleanup; }
@@ -367,6 +453,7 @@ bool pipeline_burn_image(const BurnConfig* config, PipelineProgressCallback call
         if (!wrote) { pipeline_failure(&stats,"Device write failed or returned a short transfer.",callback,userData); goto cleanup; }
         lba += count; update_progress(&stats,lba,start,&previousTime,&previousLba,sectorBytes); stats.hostBufferPercent = (uint32_t)ringbuffer_get_level_percent(&rb); stats.speedMultiplier = cdImage ? stats.currentSpeedKBps / 172.265625 : calculate_multiplier(stats.currentSpeedKBps,profile); if (callback) callback(&stats,userData);
         if (lba == stats.totalSectors) break; count = (uint16_t)(stats.totalSectors - lba < chunkSectors ? stats.totalSectors - lba : chunkSectors);
+        if (cdImage) { count = burn_cd_chunk_count(cdImage,lba,count); if (!count) { burn_failure(&stats,ERROR_INVALID_DATA,"CD source plan has an empty recording range.",callback,userData); goto cleanup; } }
         if (!burn_buffer_read(config,&context,buffers,(size_t)count * sectorBytes,&stats,callback,userData)) goto cleanup;
     }
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
@@ -399,7 +486,7 @@ bool pipeline_burn_image(const BurnConfig* config, PipelineProgressCallback call
             if (!mmc_read_disc_information(config->drive,&loaded)) { pipeline_failure(&stats,"Cannot inspect reloaded media.",callback,userData); goto cleanup; }
             if (loaded.currentProfile != finalDisc.currentProfile || loaded.discStatus != finalDisc.discStatus || loaded.lastSessionStatus != finalDisc.lastSessionStatus || loaded.numSessions != finalDisc.numSessions || loaded.firstTrack != finalDisc.firstTrack || loaded.lastTrack != finalDisc.lastTrack) { burn_failure(&stats,ERROR_MEDIA_CHANGED,"Reloaded disc layout does not match the recorded disc.",callback,userData); goto cleanup; }
         }
-        VerifyConfig verify = {0}; verify.drive = config->drive; verify.imagePath = config->imagePath; verify.cancelEvent = config->cancelEvent;
+        VerifyConfig verify = {0}; verify.drive = config->drive; verify.imagePath = config->imagePath; verify.cancelEvent = config->cancelEvent; verify.saoData = cdImage != NULL;
         BurnVerifyProgress progress = {&stats,callback,userData}; if (!pipeline_verify_disc_ex(&verify,burn_verify_progress,&progress)) goto cleanup;
     }
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup; success = true;

@@ -2,6 +2,8 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "imgburn_pipeline.h"
 #include "imgburn_image.h"
+#include "imgburn_audio.h"
+#include "imgburn_cd_sector.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -160,8 +162,16 @@ done:
     stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Raw CD image read successfully."); if (callback) callback(&stats,context); return true;
 }
 
-typedef struct { HANDLE file; uint32_t start, end, payloadStart, payloadEnd; uint64_t offset; bool audio, swap; } CdVerifySpan;
-typedef struct { CueSheet sheet; CdVerifySpan spans[99]; } CdVerifyImage;
+typedef struct {
+    HANDLE file;
+    uint32_t start, end, payloadStart, payloadEnd, extendedUntil;
+    uint64_t offset, sourceBytes;
+    TrackDataMode mode, previousMode;
+    bool audio, swap, saoData;
+} CdVerifySpan;
+typedef struct { CueSheet sheet; CdVerifySpan spans[99]; bool saoData; } CdVerifyImage;
+
+static TrackDataMode cd_verify_mode(const CdVerifySpan* span, uint32_t lba) { return lba < span->extendedUntil ? span->previousMode : span->mode; }
 
 static bool cd_verify_plan(CdVerifyImage* image) {
     CueSheet* sheet = &image->sheet;
@@ -170,7 +180,7 @@ static bool cd_verify_plan(CdVerifyImage* image) {
     for (int i = 0; i < sheet->trackCount; i++) {
         const CueTrack* track = &sheet->tracks[i]; CdVerifySpan* span = &image->spans[i];
         if (track->indexCount < 1 || track->indexCount > MAX_CUE_INDICES || track->sectorCount > UINT32_MAX - track->startLba) { SetLastError(ERROR_INVALID_DATA); return false; }
-        if (track->sectorSize != 2352 || (track->mode != TRACK_MODE_AUDIO && track->mode != TRACK_MODE_MODE1_2352 && track->mode != TRACK_MODE_MODE2_2352) || track->sourceType > CUE_FILE_MOTOROLA || (track->sourceType == CUE_FILE_MOTOROLA && track->mode != TRACK_MODE_AUDIO) || ((track->pregapSectors || track->postgapSectors) && track->mode != TRACK_MODE_AUDIO)) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+        if (track->sectorSize != 2352 || (track->mode != TRACK_MODE_AUDIO && track->mode != TRACK_MODE_MODE1_2352 && track->mode != TRACK_MODE_MODE2_2352) || track->sourceType > CUE_FILE_WAVE || (track->sourceType != CUE_FILE_BINARY && track->mode != TRACK_MODE_AUDIO) || (!image->saoData && (track->pregapSectors || track->postgapSectors) && track->mode != TRACK_MODE_AUDIO)) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
         uint32_t indexOne = 0; bool found = false;
         for (int j = 0; j < track->indexCount; j++) if (track->indices[j].indexNumber == 1) { indexOne = track->indices[j].lba; found = true; }
         bool firstFileTrack = !i || track->sourceFileGroup != sheet->tracks[i - 1].sourceFileGroup;
@@ -182,11 +192,27 @@ static bool cd_verify_plan(CdVerifyImage* image) {
         span->start = span->payloadStart - track->pregapSectors; span->end = span->payloadEnd + track->postgapSectors;
         if (track->sourceByteOffset < prefix || span->end <= span->start || (i ? span->start != image->spans[i - 1].end : span->start != 0)) { SetLastError(ERROR_INVALID_DATA); return false; }
         span->offset = track->sourceByteOffset - prefix; span->audio = track->mode == TRACK_MODE_AUDIO; span->swap = track->sourceType == CUE_FILE_MOTOROLA;
+        span->mode = track->mode; span->previousMode = i ? sheet->tracks[i - 1].mode : track->mode; span->saoData = image->saoData;
+        if (image->saoData && i && !span->audio && span->mode != span->previousMode) {
+            if (track->startLba - span->start < 225) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+            /* 扩展预间隙先沿用前轨数据结构，最后两秒才切换为新数据轨。 */
+            span->extendedUntil = track->startLba - 150;
+        }
         /* 句柄保持只读共享，校验期间禁止源文件被改写或替换。 */
         span->file = CreateFileW(track->sourceFilePath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL);
         if (span->file == INVALID_HANDLE_VALUE) return false;
         LARGE_INTEGER length; BY_HANDLE_FILE_INFORMATION info; uint64_t bytes = (uint64_t)(span->payloadEnd - span->payloadStart) * 2352;
-        if (GetFileType(span->file) != FILE_TYPE_DISK || !GetFileInformationByHandle(span->file,&info) || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !GetFileSizeEx(span->file,&length) || length.QuadPart < 0 || span->offset > (uint64_t)length.QuadPart || bytes > (uint64_t)length.QuadPart - span->offset) { SetLastError(ERROR_INVALID_DATA); return false; }
+        if (GetFileType(span->file) != FILE_TYPE_DISK || !GetFileInformationByHandle(span->file,&info) || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !GetFileSizeEx(span->file,&length) || length.QuadPart < 0) { SetLastError(ERROR_INVALID_DATA); return false; }
+        if (track->sourceType == CUE_FILE_WAVE) {
+            AudioWaveLayout wave;
+            if (!audio_wave_get_layout(span->file,&wave)) return false;
+            uint64_t paddedBytes = (uint64_t)wave.sectorCount * 2352;
+            if (!wave.dataBytes || (track->decodedSourceSectors && track->decodedSourceSectors != wave.sectorCount) || span->offset >= wave.dataBytes || span->offset > paddedBytes || bytes > paddedBytes - span->offset || wave.dataOffset > (uint64_t)length.QuadPart || wave.dataBytes > (uint64_t)length.QuadPart - wave.dataOffset) { SetLastError(ERROR_INVALID_DATA); return false; }
+            span->sourceBytes = wave.dataBytes - span->offset < bytes ? wave.dataBytes - span->offset : bytes; span->offset += wave.dataOffset;
+        } else {
+            if (span->offset > (uint64_t)length.QuadPart || bytes > (uint64_t)length.QuadPart - span->offset) { SetLastError(ERROR_INVALID_DATA); return false; }
+            span->sourceBytes = bytes;
+        }
     }
     if (image->spans[sheet->trackCount - 1].end != sheet->totalSectors) { SetLastError(ERROR_INVALID_DATA); return false; } return true;
 }
@@ -194,14 +220,24 @@ static bool cd_verify_read(const CdVerifySpan* span, uint32_t lba, uint16_t coun
     if (!count || count > 27 || lba < span->start || lba >= span->end || count > span->end - lba) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
     DWORD wanted = (DWORD)count * 2352; memset(data,0,wanted);
     uint32_t first = lba > span->payloadStart ? lba : span->payloadStart, end = lba + count < span->payloadEnd ? lba + count : span->payloadEnd;
-    /* PREGAP/POSTGAP 是生成的静音，不能被当作源文件偏移读取。 */
+    /* PREGAP/POSTGAP 由布局生成，WAVE 末帧也只读取有效 PCM，再保持零填充。 */
     if (first < end) {
-        LARGE_INTEGER position; position.QuadPart = (LONGLONG)(span->offset + (uint64_t)(first - span->payloadStart) * 2352);
-        if (!SetFilePointerEx(span->file,position,NULL,FILE_BEGIN)) return false;
-        DWORD bytes = (end - first) * 2352, offset = 0, destination = (first - lba) * 2352;
-        while (offset < bytes) { DWORD actual = 0; if (!ReadFile(span->file,data + destination + offset,bytes - offset,&actual,NULL)) return false; if (!actual || actual > bytes - offset) { SetLastError(ERROR_HANDLE_EOF); return false; } offset += actual; }
+        uint64_t sourceOffset = (uint64_t)(first - span->payloadStart) * 2352;
+        if (sourceOffset < span->sourceBytes) {
+            LARGE_INTEGER position; position.QuadPart = (LONGLONG)(span->offset + sourceOffset);
+            if (!SetFilePointerEx(span->file,position,NULL,FILE_BEGIN)) return false;
+            DWORD bytes = (end - first) * 2352, offset = 0, destination = (first - lba) * 2352;
+            if (span->sourceBytes - sourceOffset < bytes) bytes = (DWORD)(span->sourceBytes - sourceOffset);
+            while (offset < bytes) { DWORD actual = 0; if (!ReadFile(span->file,data + destination + offset,bytes - offset,&actual,NULL)) return false; if (!actual || actual > bytes - offset) { SetLastError(ERROR_HANDLE_EOF); return false; } offset += actual; }
+        }
     }
-    if (span->swap) for (DWORD i = 0; i + 1 < wanted; i += 2) { uint8_t value = data[i]; data[i] = data[i + 1]; data[i + 1] = value; } return true;
+    if (span->swap) for (DWORD i = 0; i + 1 < wanted; i += 2) { uint8_t value = data[i]; data[i] = data[i + 1]; data[i + 1] = value; }
+    if (span->saoData) for (uint32_t i = 0; i < count; i++) {
+        uint32_t current = lba + i; uint8_t* frame = data + (size_t)i * 2352; TrackDataMode mode = cd_verify_mode(span,current);
+        bool generated = current < span->payloadStart || current >= span->payloadEnd;
+        if (!(generated ? imgburn_cd_zero_sector(mode,current,frame) : imgburn_cd_normalize_sector(mode,current,frame))) return false;
+    }
+    return true;
 }
 
 bool pipeline_verify_cd(const VerifyConfig* config, PipelineProgressCallback callback, void* context) {
@@ -213,7 +249,7 @@ bool pipeline_verify_cd(const VerifyConfig* config, PipelineProgressCallback cal
     if (compare) {
         const wchar_t* extension = wcsrchr(config->imagePath,L'.'); if (!extension || _wcsicmp(extension,L".cue")) { error = ERROR_NOT_SUPPORTED; goto verify_done; }
         descriptor = CreateFileW(config->imagePath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL); if (descriptor == INVALID_HANDLE_VALUE) { error = GetLastError(); goto verify_done; }
-        image = calloc(1,sizeof(*image)); if (!image) { error = ERROR_NOT_ENOUGH_MEMORY; goto verify_done; }
+        image = calloc(1,sizeof(*image)); if (!image) { error = ERROR_NOT_ENOUGH_MEMORY; goto verify_done; } image->saoData = config->saoData;
         SetLastError(ERROR_SUCCESS);
         if (!imgburn_cue_parse(config->imagePath,&image->sheet)) { error = GetLastError() == ERROR_NOT_SUPPORTED ? ERROR_NOT_SUPPORTED : ERROR_INVALID_DATA; goto verify_done; }
         if (!cd_verify_plan(image)) { error = GetLastError(); goto verify_done; }
@@ -232,9 +268,11 @@ bool pipeline_verify_cd(const VerifyConfig* config, PipelineProgressCallback cal
     for (uint32_t lba = 0; lba < stats.totalSectors;) {
         if (cd_cancelled(&reader)) { error = ERROR_CANCELLED; goto verify_done; }
         if (compare) while (track + 1 < discToc.trackCount && lba >= image->spans[track].end) track++;
-        uint32_t end = compare ? image->spans[track].end : stats.totalSectors; uint16_t count = (uint16_t)(end - lba < 27 ? end - lba : 27);
+        uint32_t end = compare ? image->spans[track].end : stats.totalSectors;
+        if (compare && lba < image->spans[track].extendedUntil && image->spans[track].extendedUntil < end) end = image->spans[track].extendedUntil;
+        uint16_t count = (uint16_t)(end - lba < 27 ? end - lba : 27);
         if (!cd_read(&reader,lba,count,data,false,&stats)) { error = cd_cancelled(&reader) ? ERROR_CANCELLED : cd_error(drive); goto verify_done; }
-        if (compare && (!image->spans[track].audio || config->compareAudio)) {
+        if (compare && (cd_verify_mode(&image->spans[track],lba) != TRACK_MODE_AUDIO || config->compareAudio)) {
             if (!cd_verify_read(&image->spans[track],lba,count,reference)) { error = GetLastError(); goto verify_done; }
             for (unsigned i = 0; i < count; i++) if (memcmp(data + (size_t)i * 2352,reference + (size_t)i * 2352,2352)) stats.miscomparesCount++;
             stats.comparedSectors += count;

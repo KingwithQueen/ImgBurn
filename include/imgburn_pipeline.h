@@ -65,7 +65,7 @@ typedef void (*PipelineProgressCallback)(const PipelineStats* stats, void* userD
  */
 typedef struct {
     OpticalDrive* drive;
-    const wchar_t* imagePath;       /* 2048 字节 ISO/BIN 或受支持的音频 CUE。 */
+    const wchar_t* imagePath;       /* 2048 字节 ISO/BIN 或受支持的音频、数据与混合轨 CD CUE。 */
     uint32_t writeSpeedKbps;        /* 0、0xFFFF 或 0xFFFFFFFF 为最高速度；蓝光支持 32 位速率。 */
     bool testMode;                  /* 支持具备 Test Write 能力的 CD-R SAO、DVD-R DAO。 */
     bool verifyAfterWrite;
@@ -118,7 +118,7 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
 bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callback, void* userData);
 
 /* Verify：空镜像检查可读性，ISO/BIN 比较数据扇区，CUE 比较受支持的原始 CD。 */
-typedef struct { OpticalDrive* drive; const wchar_t* imagePath; HANDLE cancelEvent; unsigned retryCount; bool compareAudio; } VerifyConfig;
+typedef struct { OpticalDrive* drive; const wchar_t* imagePath; HANDLE cancelEvent; unsigned retryCount; bool compareAudio; bool saoData; } VerifyConfig; /* 写后参考按 SAO 重建数据头与纠错字段，独立原始校验默认保留全部字节。 */
 bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallback callback, void* userData);
 bool pipeline_verify_cd(const VerifyConfig* config, PipelineProgressCallback callback, void* userData);
 

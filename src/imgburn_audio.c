@@ -62,30 +62,32 @@ typedef struct {
 } ChunkHeader;
 #pragma pack(pop)
 
-static bool try_open_native_wav(AudioDecoder* decoder, const wchar_t* filePath, uint32_t* outTotalSectors) {
-    HANDLE file = CreateFileW(filePath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    if (file == INVALID_HANDLE_VALUE) return false;
+static bool parse_native_wav_layout(HANDLE file, AudioWaveLayout* layout) {
     LARGE_INTEGER size;
     RiffHeader riff;
     DWORD actual = 0;
-    bool success = false, foundFmt = false, foundData = false;
+    bool foundFmt = false, foundData = false;
     WaveFmtChunk fmt = {0};
     uint64_t dataOffset = 0;
     uint32_t dataSize = 0;
-    if (!GetFileSizeEx(file, &size) || !ReadFile(file, &riff, sizeof(riff), &actual, NULL) || actual != sizeof(riff)) goto cleanup;
-    if (memcmp(riff.riffId, "RIFF", 4) != 0 || memcmp(riff.waveId, "WAVE", 4) != 0) goto cleanup;
+    if (!GetFileSizeEx(file, &size) || !ReadFile(file, &riff, sizeof(riff), &actual, NULL)) return false;
+    if (actual != sizeof(riff)) { SetLastError(ERROR_HANDLE_EOF); return false; }
+    if (size.QuadPart < 0 || memcmp(riff.riffId, "RIFF", 4) != 0 || memcmp(riff.waveId, "WAVE", 4) != 0) { SetLastError(ERROR_BAD_FORMAT); return false; }
     uint64_t end = (uint64_t)riff.riffSize + 8, position = sizeof(riff);
-    if (end > (uint64_t)size.QuadPart || end < sizeof(riff)) goto cleanup;
+    if (end > (uint64_t)size.QuadPart || end < sizeof(riff)) { SetLastError(ERROR_INVALID_DATA); return false; }
     while (position + sizeof(ChunkHeader) <= end) {
         LARGE_INTEGER offset; offset.QuadPart = (LONGLONG)position;
         ChunkHeader chunk;
-        if (!SetFilePointerEx(file, offset, NULL, FILE_BEGIN) || !ReadFile(file, &chunk, sizeof(chunk), &actual, NULL) || actual != sizeof(chunk)) goto cleanup;
+        if (!SetFilePointerEx(file, offset, NULL, FILE_BEGIN) || !ReadFile(file, &chunk, sizeof(chunk), &actual, NULL)) return false;
+        if (actual != sizeof(chunk)) { SetLastError(ERROR_HANDLE_EOF); return false; }
         position += sizeof(chunk);
         uint64_t next = position + chunk.chunkSize + (chunk.chunkSize & 1);
-        if (next > end) goto cleanup;
+        if (next > end) { SetLastError(ERROR_INVALID_DATA); return false; }
         if (memcmp(chunk.chunkId, "fmt ", 4) == 0) {
             /* PCM 格式块至少有16字节；短读和缺少字段不能作为有效格式。 */
-            if (chunk.chunkSize < 16 || !ReadFile(file, &fmt.audioFormat, 16, &actual, NULL) || actual != 16) goto cleanup;
+            if (chunk.chunkSize < 16) { SetLastError(ERROR_INVALID_DATA); return false; }
+            if (!ReadFile(file, &fmt.audioFormat, 16, &actual, NULL)) return false;
+            if (actual != 16) { SetLastError(ERROR_HANDLE_EOF); return false; }
             foundFmt = true;
         } else if (memcmp(chunk.chunkId, "data", 4) == 0 && !foundData) {
             dataOffset = position;
@@ -97,18 +99,42 @@ static bool try_open_native_wav(AudioDecoder* decoder, const wchar_t* filePath, 
     }
     if (!foundFmt || !foundData || fmt.audioFormat != 1 || fmt.numChannels != CDDA_CHANNELS || fmt.sampleRate != CDDA_SAMPLE_RATE ||
         fmt.bitsPerSample != CDDA_BITS_PER_SAMPLE || fmt.blockAlign != CDDA_BYTES_PER_SAMPLE || fmt.byteRate != CDDA_SAMPLE_RATE * CDDA_BYTES_PER_SAMPLE ||
-        dataSize % CDDA_BYTES_PER_SAMPLE != 0) goto cleanup;
-    LARGE_INTEGER pcm; pcm.QuadPart = (LONGLONG)dataOffset;
-    if (!SetFilePointerEx(file, pcm, NULL, FILE_BEGIN)) goto cleanup;
+        dataSize % CDDA_BYTES_PER_SAMPLE != 0) { SetLastError(ERROR_BAD_FORMAT); return false; }
+    layout->dataOffset = dataOffset; layout->dataBytes = dataSize;
+    layout->sectorCount = (uint32_t)(((uint64_t)dataSize + CDDA_BYTES_PER_FRAME - 1) / CDDA_BYTES_PER_FRAME);
+    return true;
+}
+
+bool audio_wave_get_layout(HANDLE file, AudioWaveLayout* layout) {
+    if (!layout) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    memset(layout, 0, sizeof(*layout));
+    if (!file || file == INVALID_HANDLE_VALUE) { SetLastError(ERROR_INVALID_HANDLE); return false; }
+    LARGE_INTEGER zero = {0}, saved, restored;
+    if (!SetFilePointerEx(file, zero, &saved, FILE_CURRENT)) return false;
+    AudioWaveLayout parsed = {0};
+    bool ok = SetFilePointerEx(file, zero, NULL, FILE_BEGIN) && parse_native_wav_layout(file, &parsed);
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+    /* 句柄由写入流水线持有，成功与失败都必须恢复并核对调用前的位置。 */
+    if (!SetFilePointerEx(file, saved, &restored, FILE_BEGIN)) return false;
+    if (restored.QuadPart != saved.QuadPart) { SetLastError(ERROR_SEEK); return false; }
+    if (ok) *layout = parsed;
+    SetLastError(error);
+    return ok;
+}
+
+static bool try_open_native_wav(AudioDecoder* decoder, const wchar_t* filePath, uint32_t* outTotalSectors) {
+    HANDLE file = CreateFileW(filePath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    AudioWaveLayout layout;
+    if (!audio_wave_get_layout(file, &layout)) { DWORD error = GetLastError(); CloseHandle(file); SetLastError(error); return false; }
+    LARGE_INTEGER pcm; pcm.QuadPart = (LONGLONG)layout.dataOffset;
+    if (!SetFilePointerEx(file, pcm, NULL, FILE_BEGIN)) { DWORD error = GetLastError(); CloseHandle(file); SetLastError(error); return false; }
     decoder->hFile = file;
     decoder->isPipe = false;
-    decoder->totalSamples = dataSize / CDDA_BYTES_PER_SAMPLE;
-    decoder->dataBytesRemaining = dataSize;
-    if (outTotalSectors) *outTotalSectors = (uint32_t)(((uint64_t)dataSize + CDDA_BYTES_PER_FRAME - 1) / CDDA_BYTES_PER_FRAME);
-    success = true;
-cleanup:
-    if (!success) CloseHandle(file);
-    return success;
+    decoder->totalSamples = (uint32_t)(layout.dataBytes / CDDA_BYTES_PER_SAMPLE);
+    decoder->dataBytesRemaining = layout.dataBytes;
+    if (outTotalSectors) *outTotalSectors = layout.sectorCount;
+    return true;
 }
 
 static void find_ffmpeg_executable(const wchar_t* userPath, wchar_t* outPath, size_t maxLen) {

@@ -83,6 +83,16 @@ typedef struct {
     uint32_t sessionLeadIn[99], sessionLeadOut[99], sessionEndLba[99];
 } AudioCompilation;
 
+/* 标准CD音频PCM的数据区域；末扇区允许包含不足2352字节的完整样本。 */
+typedef struct {
+    uint64_t dataOffset;
+    uint64_t dataBytes;
+    uint32_t sectorCount;
+} AudioWaveLayout;
+
+/* 借用同步只读文件句柄解析WAVE，保留文件位置，不取得句柄所有权；调用期间不能并发定位该句柄。 */
+bool audio_wave_get_layout(HANDLE file, AudioWaveLayout* layout);
+
 /**
  * @brief Abstract Audio Stream Decoder (WAV or FFmpeg pipe)
  */
