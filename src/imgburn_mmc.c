@@ -468,6 +468,41 @@ bool mmc_read_cd_text(OpticalDrive* drive, uint8_t** packs, uint32_t* bytes) {
     memmove(data,data + 4,total - 4); *packs = data; *bytes = total - 4; SetLastError(ERROR_SUCCESS); return true;
 }
 
+static bool mmc_read_cd_identifier(OpticalDrive* drive, unsigned track, bool isrc, char* value) {
+    unsigned chars = isrc ? 12 : 13;
+    if (value) memset(value,0,chars + 1);
+    if (!drive || !value || (isrc && (!track || track > 99))) return mmc_cd_text_failure(drive,ERROR_INVALID_PARAMETER);
+    uint8_t cdb[10] = {0x42,0,0x40}, data[24] = {0}; cdb[3] = isrc ? 3 : 2; cdb[6] = (uint8_t)track; cdb[8] = sizeof(data);
+    /* 清除前一条命令的状态，避免将传输故障误判成设备明确不支持。 */
+    memset(&drive->lastSense,0,sizeof(drive->lastSense)); drive->lastTransferBytes = 0; drive->lastError = ERROR_SUCCESS; SetLastError(ERROR_SUCCESS);
+    if (!spti_send_cdb(drive,cdb,10,data,sizeof(data),true,10)) {
+        const ScsiSenseResult* sense = &drive->lastSense;
+        DWORD error = sense->senseKey == 5 && !sense->ascq && (sense->asc == 0x20 || sense->asc == 0x24) ? ERROR_NOT_SUPPORTED : drive->lastError;
+        if (!error) error = GetLastError(); return mmc_cd_text_failure(drive,error ? error : ERROR_IO_DEVICE);
+    }
+    if (drive->lastTransferBytes < 4 || drive->lastTransferBytes > sizeof(data)) return mmc_cd_text_failure(drive,ERROR_READ_FAULT);
+    /* 仅返回头且数据长度为零时没有编号；不读取未传输的有效标志。 */
+    if (!read_be16(data + 2)) { drive->lastError = ERROR_SUCCESS; SetLastError(ERROR_SUCCESS); return true; }
+    if (read_be16(data + 2) != sizeof(data) - 4) return mmc_cd_text_failure(drive,ERROR_INVALID_DATA);
+    if (drive->lastTransferBytes != sizeof(data)) return mmc_cd_text_failure(drive,ERROR_READ_FAULT);
+    if (data[4] != cdb[3] || (isrc && data[6] != track)) return mmc_cd_text_failure(drive,ERROR_INVALID_DATA);
+    if (data[8] & 0x80) {
+        bool empty = true, zeros = true;
+        for (unsigned i = 0; i < chars; i++) { if (data[9 + i]) empty = false; if (data[9 + i] != '0') zeros = false; }
+        if (!empty && !zeros) {
+            for (unsigned i = 0; i < chars; i++) {
+                unsigned c = data[9 + i]; if (isrc && c >= 'a' && c <= 'z') c -= 'a' - 'A';
+                bool digit = c >= '0' && c <= '9', letter = c >= 'A' && c <= 'Z';
+                if (isrc ? (i < 2 ? !letter : i < 5 ? !letter && !digit : !digit) : !digit) { memset(value,0,chars + 1); return mmc_cd_text_failure(drive,ERROR_INVALID_DATA); }
+                value[i] = (char)c;
+            }
+        }
+    }
+    drive->lastError = ERROR_SUCCESS; SetLastError(ERROR_SUCCESS); return true;
+}
+bool mmc_read_cd_catalog(OpticalDrive* drive, char catalog[14]) { return mmc_read_cd_identifier(drive,0,false,catalog); }
+bool mmc_read_cd_isrc(OpticalDrive* drive, unsigned track, char isrc[13]) { return mmc_read_cd_identifier(drive,track,true,isrc); }
+
 bool mmc_read_cd_toc(OpticalDrive* drive, MmcCdToc* toc) {
     if (!toc) { SetLastError(ERROR_INVALID_PARAMETER); return false; } memset(toc,0,sizeof(*toc));
     uint8_t cdb[10] = {0x43,0,1}, session[12] = {0}, data[804] = {0}; cdb[8] = sizeof(session);

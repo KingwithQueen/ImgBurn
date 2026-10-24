@@ -44,7 +44,7 @@ msbuild ImgBurn.sln /m /p:Configuration=Release /p:Platform=x64
 
 | 功能范围 | 当前实现和缺口 |
 | --- | --- |
-| Read | GUI/命令行支持 DVD/Blu-ray 的 2048 字节数据 ISO，以及经检查的单会话、单轨 MODE1 CD ISO。新增单会话音频、混合轨道、MODE1/MODE2 CD 的 2352 字节 CUE/BIN 读取，使用 Q 子通道核对轨道、索引与地址，支持符合已检查边界的扩展预间隙和 SCMS 周期识别。可显式读取 CD-TEXT，保留原始 CDT 并在 CUE 中引用。支持有界重试、取消、完整传输检查及目标保护。多会话、负 LBA 隐藏音轨、完整 P–W 子通道、MDS 配套输出及完整选项仍待实现；实体介质验收尚未完成 |
+| Read | GUI/命令行支持 DVD/Blu-ray 的 2048 字节数据 ISO，以及经检查的单会话、单轨 MODE1 CD ISO。新增单会话音频、混合轨道、MODE1/MODE2 CD 的 2352 字节 CUE/BIN 读取，使用 Q 子通道核对轨道、索引与地址，支持符合已检查边界的扩展预间隙和 SCMS 周期识别。自动提取 Q 的盘级 MCN 与逐音轨 ISRC；可显式读取 CD-TEXT，保留原始 CDT 并在 CUE 中引用。支持有界重试、取消、完整传输检查及目标保护。多会话、MDS 配套输出及完整选项仍待实现，更多原版子通道兼容边界待对照；负 LBA 主通道音频和任意 P–W 保留不在已实现范围，实体介质验收尚未完成 |
 | Build | 已实现 ISO/Joliet 双字节序路径表、目录扇区填充、名称冲突处理、多 extent 大文件及 UDF 1.02/2.50 文件树。UDF 使用 64 位文件长度和 AED 分配表续接，2.50 使用 EFE、元数据分区与副本。支持纯 ISO、ISO/Joliet、纯 UDF 或桥接镜像；保留输入一致性和目标文件保护 |
 | DVD-Video / Blu-ray 布局 | DVD 使用 ISO+UDF 1.02，补建 AUDIO_TS、过滤 VIDEO_TS、按视频文件顺序排列，并保证 IFO 末尾与 BUP 开头至少间隔 32 KiB。在输出中修正 IFO/BUP 与标题集地址；标题导航交叉检查 PGC、PTT、Cell 地址、VOBU 表和 NAV 包，支持从实际布局选取 OTP 层切换单元、加入填充、更新 SPLIP 并生成 MDS。Blu-ray 使用纯 UDF 2.50、EFE、元数据副本、64 KiB 文件对齐、分离的主备描述区及 BDMV/BDAV 目录补齐。输入需要已经制作好的视频目录；单元预览与原版的逐项对照及介质验收仍待完成 |
 | Write | GUI/命令行已接通空白 CD-R MODE1 SAO、单层 DVD-R DAO、DVD+R 和 BD-R SRM 的单会话单轨 2048 字节 ISO/BIN 写入，并支持 BINARY/MOTOROLA、原生 PCM WAVE 与可解码音频、MODE1/2352、XA MODE2/2352 及混合轨 CUE 的单会话多轨 SAO 写入、索引及间隙。支持 CD-TEXT 的导入区写入，使用 CUE 文字或优先保留的原始 CDT。检查介质和容量，按介质发送布局、设置速度、预留轨道并收尾；BD-R 根据当前能力选择 VNR 或普通写入。CD-R、DVD-R 支持设备能力允许的测试写入；命令行/API 可显式请求 OPC。支持 CD-RW、单层 DVD-RW 快速/完整擦除、取消、保护恢复和写后回读比较。缺失解码器的音频、非 XA MODE2、DVD 双层写入、其他介质格式化及完整设置仍待实现；实体刻录未验收 |
@@ -73,6 +73,8 @@ ImgBurn.exe read R: disc.cue --cdtext
 CD 的 ISO 路径只接受能够以 2048 字节用户数据保存的单轨 MODE1 布局，依据 [TOC](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddcdrm/ns-ntddcdrm-_cdrom_toc) 与[会话信息](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddcdrm/ns-ntddcdrm-_cdrom_toc_session_data)核对轨道和会话，再检查原始扇区头。音频、混合轨道及 MODE2 可选择 `.cue` 原始读取；当前仅支持单会话 CD，要求驱动器返回完整主通道及格式化 Q 数据。
 
 原始读取保留 LBA 0 到 lead-out 之前的全部 2352 字节主通道，CUE 记录轨道模式、FLAGS、INDEX 00–99 及结束地址。Q 用于检查 CRC、轨道和绝对/相对地址，不写入 BIN；若非位置 Q 遮住不能确定的索引边界，会明确失败。不会推测缺失索引或填零。先完成新 BIN，最后发布 CUE；已有 BIN 不覆盖，有同名文件时依次使用 `.001.bin` 等文件名。明确替换 CUE 后，旧 BIN 仍保留；失败或取消时尝试删除本次创建的文件。该文件保护策略尚未完成与原版输出命名行为的逐项对照。
+
+CUE/BIN Read 默认通过 READ SUB-CHANNEL 查询盘级 MCN 和音轨 ISRC，同时从 READ CD 的 ADR2/ADR3 扫描获取编号；双路径依据[原版作者说明](https://forum.imgburn.com/topic/11942-bad-or-no-isrc-and-mcn-codes-from-cd-audio-discs/)和官方更新记录。有效编号分别导出为 CATALOG 和 ISRC，与 CD-TEXT 的 UPC/文字 ISRC 独立。ADR3 自身没有轨号，只有前后验证的位置 Q 同属一轨时才采纳，不按 TOC 起点猜测 INDEX00 中的归属。无有效值、全零编号或设备明确不支持不抹除另一来源已取得的值；坏可选编号仅忽略该样本，CLI 和状态回调给出提示，GUI 的详细状态日志仍待接通。传输失败、坏 Q CRC、有效编号冲突或前后有效查询不一致会结束读取并保护旧输出。当前未完整复刻异常驱动器的全部兼容策略，也未保存任意 P–W 子通道。
 
 扩展预间隙读取允许新数据轨 INDEX00 的前段保留旧轨控制和数据结构，核对最后 150 帧的新结构、实际切换位置及 INDEX01；无法确定的边界仍拒绝。SCMS 根据位置 Q 的每四帧翻转周期识别，要求充分且唯一的相位证据，再导出 SCMS 标志；普通 DCP 保持不变。非周期拷贝位变化、证据不足或其他控制位错误不推测为 SCMS。已有普通短预间隙仍可原始读取，写入时另按合规布局检查。
 
@@ -134,7 +136,7 @@ MODE1 数据正文保留，地址、EDC 与 P/Q 纠错码按目标 LBA 重建；
 
 CD-TEXT 写入从驱动器报告的 track 0 起点开始，检查 R-W 写入能力，锁定后再核对导入区地址。按 MMC SAO 的 CUE 格式 41h、写入参数类型 3，每扇区发送 96 字节原始 R-W，每次最多 682 扇区，持续到 LBA -151；再发送两秒预间隙及原有主通道。每帧顺序循环四个 18 字节 pack，补全写出 CRC，不改变输入 CDT。负地址与分块方式也有[原版日志对照](https://forum.imgburn.com/topic/25716-io-error-write-error/)，但该日志记录的是一次失败写入，不作为成功介质证据。
 
-CATALOG 是 Q 子通道的 MCN，与 CD-TEXT 的 UPC 独立，映射依据[原版作者说明](https://forum.imgburn.com/topic/22155-supported-cd-text-keysfields-in-imgburn/)。只有 CATALOG/ISRC 时保留原主通道及 Q 写入流程，不额外生成 CD-TEXT。有效 CDT 可保留多语言、未知字符集和未映射字段；CUE 文字生成仍限上述 Latin1 范围。UPC 当前接受 13 位数字，其他原版输入变体尚待对照。Read 的 ISRC/MCN 原始 Q 提取尚未接通，不将文字区 ISRC 冒充为已读到的 Q 数据。
+CATALOG 是 Q 子通道的 MCN，与 CD-TEXT 的 UPC 独立，映射依据[原版作者说明](https://forum.imgburn.com/topic/22155-supported-cd-text-keysfields-in-imgburn/)。只有 CATALOG/ISRC 时保留原主通道及 Q 写入流程，不额外生成 CD-TEXT。有效 CDT 可保留多语言、未知字符集和未映射字段；CUE 文字生成仍限上述 Latin1 范围。UPC 当前接受 13 位数字，其他原版输入变体尚待对照。Read 已接通 ISRC/MCN 的查询和原始 Q 提取，不将文字区 ISRC 冒充为已读到的 Q 数据。
 
 ```bat
 ImgBurn.exe burn R: disc.iso --verify
@@ -244,3 +246,5 @@ CUE 按原版拒绝 CDG 轨道，REM PREGAP 仍作为注释处理；完整特殊
 第二十四阶段接通 CD-TEXT 的 SAO 导入区、R-W 能力及负 LBA 检查，补齐原版支持的 CUE 文字字段，并修正本实现将 CATALOG 误映射为文字区 UPC 的错误。独立编码参考核对每帧 R-W、跨块循环及完整导入区，隔离设备模型检查主通道、命令顺序、输入锁、错误和取消；Read 与文件工具同步保留新增字段。原有模式继续回归，实体刻录、播放器显示及更多驱动器兼容仍待验收。
 
 第二十五阶段接通首轨存储 INDEX 00 的 SAO 写入，修正显式首索引和后续 FILE 前缀的地址计算，使解析、Write、Verify 与原版单会话样本一致。六组原版只读镜像信息与两个架构的正式文件命令核对总长及轨道范围；独立 PCM、数据扇区和设备 CUE 参考核对完整输出，并检查 Read 输出再 Verify、GUI 后台、实际 CLI、解码缓存、错误和取消。标准负地址预间隙仍由设备生成，不将正区隐藏内容宣称为负 LBA 音频支持。多会话新 FILE 非零索引与默认会话间隙的组合仍待原版对照，实际介质验收仍未完成。
+
+第二十六阶段接通 Read 的盘级 MCN、逐音轨 ISRC 双路径提取及 CUE 导出，读取前后复查有效查询值，并保留缺失、坏样本、冲突和轨道归属不确定的边界。使用标准位布局、独立 Q 编码与 CRC 参考核对编号；Read 输出再交给生产 Write/Verify，逐字节检查完整主通道和设备 CUE，覆盖 GUI 后台、实际 CLI、CD-TEXT 来源分离、错误、取消与旧输出保护。既有模式继续回归；协议模型和文件闭环不代表已在实体光驱读取或刻录验收。

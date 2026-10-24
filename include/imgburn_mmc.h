@@ -207,6 +207,9 @@ typedef struct { unsigned trackCount; uint32_t leadOutLba; MmcCdTrack tracks[99]
 bool mmc_read_cd_toc(OpticalDrive* drive, MmcCdToc* toc);
 /* 返回去除READ TOC头的18字节CD-TEXT包；无文本时成功返回NULL和0，调用者用free释放。 */
 bool mmc_read_cd_text(OpticalDrive* drive, uint8_t** packs, uint32_t* bytes);
+/* READ SUB-CHANNEL 的盘级MCN及指定音轨ISRC；无有效值返回空串，失败也清空输出。 */
+bool mmc_read_cd_catalog(OpticalDrive* drive, char catalog[14]);
+bool mmc_read_cd_isrc(OpticalDrive* drive, unsigned track, char isrc[13]);
 bool mmc_read_cd_blocks(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer);
 /* Verify 只请求 2352 字节主通道，不要求设备额外返回 Q。 */
 bool mmc_read_cd_main_blocks(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer);
