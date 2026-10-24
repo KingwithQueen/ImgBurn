@@ -21,6 +21,9 @@ typedef struct {
     bool dvdVideo, bluray, optimize, verify, seamless, oppositeTrackPath, replaceExisting, testMode, testWriteSupported, readCdText, rawCdMds, includeSessionPregaps;
     uint32_t speed, discoverySectors, discoveryCapacity;
     uint32_t readSplitSectors;
+    unsigned readRetries;
+    bool readAutoSplit, readEject, setReadSpeeds;
+    double readSpeedMultiplier, audioReadSpeedMultiplier;
     double discoverySpeedMultiplier;
     uint32_t layerBreak;
     uint32_t comparedSectors, readableOnlySectors, miscompares;

@@ -358,9 +358,12 @@ typedef struct { HANDLE file; bool created; } CdReadOutput;
 
 bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callback, void* context) {
     PipelineStats stats = {0}; if (!config || !config->drive || !config->imagePath || !config->imagePath[0] || config->retryCount > 20) return cd_fail(&stats,ERROR_INVALID_PARAMETER,callback,context);
+    ReadConfig resolved = *config; config = &resolved;
     if (cd_cancelled(config)) return cd_fail(&stats,ERROR_CANCELLED,callback,context);
     wchar_t destination[MAX_PATH] = L"", textPath[MAX_PATH] = L"", parent[MAX_PATH]; if (!cd_target(config->imagePath,destination,config->replaceExisting)) return cd_fail(&stats,GetLastError(),callback,context);
     bool mds = !_wcsicmp(wcsrchr(destination,L'.'),L".mds");
+    if (config->autoSplit && !mds) return cd_fail(&stats,ERROR_NOT_SUPPORTED,callback,context);
+    if (!pipeline_read_resolve_split(destination,2352,config->splitSectors,config->autoSplit,&resolved.splitSectors)) return cd_fail(&stats,GetLastError(),callback,context);
     if (config->splitSectors && !mds) return cd_fail(&stats,ERROR_NOT_SUPPORTED,callback,context);
     if (mds && (config->readCdText || config->includeSessionPregaps)) return cd_fail(&stats,ERROR_NOT_SUPPORTED,callback,context);
     stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Inspecting raw CD layout..."); if (callback) callback(&stats,context);
@@ -383,6 +386,9 @@ bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callbac
     }
     if (plan->toc.leadOutLba > 100 * 60 * 75 - 150 || (mds && (plan->toc.trackCount != 1 || plan->toc.tracks[0].startLba || plan->toc.tracks[0].control != 4))) { error = ERROR_NOT_SUPPORTED; goto done; }
     if (config->includeSessionPregaps && !full) { error = ERROR_NOT_SUPPORTED; goto done; }
+    uint32_t currentSpeed = (plan->toc.tracks[0].control & 4) ? config->readSpeedKbps : config->audioReadSpeedKbps ? config->audioReadSpeedKbps : config->readSpeedKbps;
+    if (!currentSpeed && config->audioReadSpeedKbps) currentSpeed = UINT32_MAX;
+    if (!mmc_set_read_speed(drive,profile,currentSpeed)) { error = cd_error(drive); goto done; }
     if (config->readCdText && (!cd_read_text(drive,&plan->cdText) || !cd_text_metadata(plan))) { error = GetLastError(); goto done; }
     if (!cd_identifier_query(config,plan,false)) { error = GetLastError(); goto done; }
     if (mds && plan->catalog[0]) { error = ERROR_NOT_SUPPORTED; goto done; }
@@ -436,6 +442,13 @@ bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callbac
             if (full) { snprintf(stats.statusMessage,sizeof(stats.statusMessage),config->includeSessionPregaps && part ? "Reading CD session %u/%u, LBA %u (INDEX00 to lead-out)..." : "Reading CD session %u/%u, LBA %u (INDEX01 to lead-out)...",part + 1,partCount,lba); if (callback) callback(&stats,context); }
             if (cd_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
             uint16_t count = (uint16_t)(end - lba < 27 ? end - lba : 27);
+            if (config->readSpeedKbps || config->audioReadSpeedKbps) {
+                unsigned track = full ? full->sessions[part].firstTrackIndex : 0; while (track + 1 < plan->toc.trackCount && plan->toc.tracks[track + 1].startLba <= lba) track++;
+                uint32_t speed = (plan->toc.tracks[track].control & 4) ? config->readSpeedKbps : config->audioReadSpeedKbps ? config->audioReadSpeedKbps : config->readSpeedKbps;
+                if (!speed) speed = UINT32_MAX;
+                if (speed != currentSpeed) { if (!mmc_set_read_speed(drive,profile,speed)) { error = cd_error(drive); goto done; } currentSpeed = speed; }
+                if (track + 1 < plan->toc.trackCount && count > plan->toc.tracks[track + 1].startLba - lba) count = (uint16_t)(plan->toc.tracks[track + 1].startLba - lba);
+            }
             if (!cd_read(config,lba,count,data,true,&stats)) { error = cd_cancelled(config) ? ERROR_CANCELLED : cd_error(drive); goto done; }
             for (unsigned i = 0; i < count; i++) { if (!cd_capture(plan,lba + i,data + (size_t)i * 2368)) { error = GetLastError(); goto done; } memmove(data + (size_t)i * 2352,data + (size_t)i * 2368,2352); }
             if (!cd_write(outputs[part].file,data,(DWORD)count * 2352)) { error = GetLastError(); goto done; }
@@ -491,6 +504,7 @@ done:
     if (textOutput != INVALID_HANDLE_VALUE) CloseHandle(textOutput); if (!success && textCreated) DeleteFileW(textPath);
     if (plan) { imgburn_cdtext_free(&plan->cdText); free(plan->metadata); } free(data); free(outputs); free(binaries); free(full); free(plan);
     if (!success) return cd_fail(&stats,error,callback,context);
+    if (config->ejectWhenDone && !mmc_load_eject(drive,true)) { error = cd_error(drive); stats.state = PIPELINE_STATE_FAILED; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Image published, but disc ejection failed (error %lu).",error); if (callback) callback(&stats,context); SetLastError(error); return false; }
     stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; stats.remainingTimeSec = 0;
     if (!mds && partCount > 1) snprintf(stats.statusMessage,sizeof(stats.statusMessage),config->includeSessionPregaps ? "CD sessions and INDEX00 read; each session BIN retains 150 unreferenced pause frames.%s" : "CD session data read; gaps and session-first INDEX00 excluded.%s",idWarning ? " Invalid MCN/ISRC ignored." : "");
     else snprintf(stats.statusMessage,sizeof(stats.statusMessage),idWarning ? "Raw CD image read; invalid MCN/ISRC samples ignored." : "Raw CD image read successfully.");

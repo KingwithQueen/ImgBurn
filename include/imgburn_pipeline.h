@@ -127,11 +127,17 @@ typedef struct {
     bool rawCdMds;                  /* MDS 显式选择 MODE1/MODE2 的2352字节主通道；默认仍为2048字节数据。 */
     bool includeSessionPregaps;     /* 显式读取多会话首轨 Q 确认的 INDEX00；自动150帧保留在BIN未引用前缀。 */
     uint32_t splitSectors;          /* MDS 每卷最多的实际输出扇区数（2048或2352字节），0表示不分卷。 */
+    bool autoSplit;                /* 按目标卷文件系统上限分卷；ISO确需分卷时改为同名MDS配套。 */
+    uint32_t readSpeedKbps;         /* 0保留光驱当前速度，0xFFFF或UINT32_MAX请求最高读取速度。 */
+    uint32_t audioReadSpeedKbps;    /* 原始CD音频速度；0沿用readSpeedKbps。 */
+    bool ejectWhenDone;            /* 镜像完整发布后弹盘；失败及取消不弹盘。 */
 } ReadConfig;
+
+bool pipeline_read_resolve_split(const wchar_t* path, uint32_t sectorBytes, uint32_t requestedSectors, bool automatic, uint32_t* sectors);
 
 bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callback, void* userData);
 
-/* 原始 CD：2352 字节主通道和经 Q 校验的索引，发布 CUE 或精简单轨 MODE1 MDS。 */
+/* 原始 CD：2352 字节主通道和经 Q 校验的索引，发布 CUE 或精简单轨 MODE1/MODE2 MDS。 */
 bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callback, void* userData);
 
 /* Verify：空镜像检查可读性，ISO/BIN/数据 MDS 比较逻辑扇区，CUE/原始 MODE1 MDS 比较 CD 主通道。 */

@@ -136,6 +136,8 @@ bool mmc_read_track_information(OpticalDrive* drive, uint32_t lbaOrTrack, bool i
  * @param writeSpeedKbps 0xFFFF for Maximum
  */
 bool mmc_set_speed(OpticalDrive* drive, uint16_t readSpeedKbps, uint16_t writeSpeedKbps);
+/* CD/DVD使用SET CD SPEED，BD使用32位SET STREAMING；另一方向使用MAX参数。 */
+bool mmc_set_read_speed(OpticalDrive* drive, MmcProfile profile, uint32_t readSpeedKbps);
 /* 蓝光使用 SET STREAMING 的 32 位速率，CD/DVD 保留 SET CD SPEED。 */
 bool mmc_set_burn_speed(OpticalDrive* drive, MmcProfile profile, uint32_t writeSpeedKbps);
 /* 当前 BD Write 能力；返回设备是否支持 WRITE (12) 的 VNR 位。 */

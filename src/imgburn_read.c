@@ -55,6 +55,15 @@ static bool read_sectors(const ReadConfig* config, uint32_t lba, uint16_t count,
 }
 
 typedef struct { wchar_t path[MAX_PATH]; HANDLE file; bool created; } ReadDataPart;
+bool pipeline_read_resolve_split(const wchar_t* path, uint32_t sectorBytes, uint32_t requestedSectors, bool automatic, uint32_t* sectors) {
+    if (!path || !path[0] || !sectors || (sectorBytes != 2048 && sectorBytes != 2352) || (automatic && requestedSectors)) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    *sectors = requestedSectors; if (!automatic) return true;
+    wchar_t volume[MAX_PATH], system[MAX_PATH];
+    if (!GetVolumePathNameW(path,volume,MAX_PATH) || !GetVolumeInformationW(volume,NULL,0,NULL,NULL,NULL,system,MAX_PATH)) return false;
+    /* FAT系列采用文件上限内的完整扇区，4GiB预设不能代替此处的Auto。 */
+    if (!_wcsicmp(system,L"FAT") || !_wcsicmp(system,L"FAT32") || !_wcsicmp(system,L"FAT12") || !_wcsicmp(system,L"FAT16")) *sectors = UINT32_MAX / sectorBytes;
+    return true;
+}
 static void read_release_parts(ReadDataPart* parts, unsigned count, bool remove) {
     for (unsigned i = 0; parts && i < count; i++) {
         if (parts[i].file && parts[i].file != INVALID_HANDLE_VALUE) CloseHandle(parts[i].file);
@@ -94,6 +103,7 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     if (!read_target(config->imagePath,destination,config->replaceExisting)) return read_failure(&stats,GetLastError(),"Invalid image destination",callback,context);
     bool mdsOutput = !_wcsicmp(wcsrchr(destination,L'.'),L".mds");
     if (config->splitSectors && !mdsOutput) return read_failure(&stats,ERROR_NOT_SUPPORTED,"Split data output requires an MDS destination",callback,context);
+    uint32_t splitSectors = 0; if (!pipeline_read_resolve_split(destination,2048,config->splitSectors,config->autoSplit,&splitSectors)) return read_failure(&stats,GetLastError(),"Cannot resolve image splitting",callback,context);
     stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Inspecting source disc..."); if (callback) callback(&stats,context);
     OpticalDrive* drive = config->drive;
     if (!mmc_test_unit_ready(drive)) return read_failure(&stats,read_device_error(drive),"Source disc is not ready",callback,context);
@@ -103,6 +113,9 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     if (!mmc_read_capacity(drive,&last,&bytes)) return read_failure(&stats,read_device_error(drive),"Cannot read disc capacity",callback,context);
     if (last == UINT32_MAX || bytes != 2048) return read_failure(&stats,ERROR_NOT_SUPPORTED,"Require bounded 2048-byte data sectors",callback,context);
     stats.totalSectors = last + 1;
+    if (!mdsOutput && splitSectors && stats.totalSectors > splitSectors) {
+        wcscpy(wcsrchr(destination,L'.'),L".mds"); wchar_t checked[MAX_PATH]; if (!read_target(destination,checked,config->replaceExisting)) return read_failure(&stats,GetLastError(),"Cannot publish automatic split descriptor",callback,context); mdsOutput = true;
+    }
     bool cdMds = mdsOutput && profile <= MMC_PROFILE_CD_RW;
     if (mdsOutput && !cdMds && (profile < MMC_PROFILE_DVD_ROM || profile > MMC_PROFILE_DVD_PLUS_R_DL)) return read_failure(&stats,ERROR_NOT_SUPPORTED,"MDS Read requires supported DVD or MODE1 CD media",callback,context);
     MmcDvdLayout dvdLayout = {0};
@@ -115,7 +128,7 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     }
     if (profile <= MMC_PROFILE_CD_RW && !mmc_check_iso_cd(drive,stats.totalSectors)) return read_failure(&stats,read_device_error(drive),"CD layout requires a raw track image",callback,context);
     if (mdsOutput) {
-        uint64_t count = config->splitSectors ? ((uint64_t)stats.totalSectors + config->splitSectors - 1) / config->splitSectors : 1;
+        uint64_t count = splitSectors ? ((uint64_t)stats.totalSectors + splitSectors - 1) / splitSectors : 1;
         if (count > MAX_MDS_FILES) return read_failure(&stats,ERROR_NOT_SUPPORTED,"Split image exceeds the supported MDS file count",callback,context); partCount = (unsigned)count;
     }
     wchar_t parent[MAX_PATH]; wcscpy(parent,destination); wchar_t* slash = wcsrchr(parent,L'\\'); if (!slash) return read_failure(&stats,ERROR_INVALID_NAME,"Invalid image directory",callback,context); slash[1] = 0;
@@ -123,6 +136,7 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     if (!GetDiskFreeSpaceExW(parent,&available,NULL,NULL)) return read_failure(&stats,GetLastError(),"Cannot query destination space",callback,context);
     if (available.QuadPart < (uint64_t)stats.totalSectors * 2048) return read_failure(&stats,ERROR_DISK_FULL,"Not enough destination space",callback,context);
     buffer = (uint8_t*)malloc(32 * 2048); if (!buffer) return read_failure(&stats,ERROR_NOT_ENOUGH_MEMORY,"Cannot allocate read buffer",callback,context);
+    if (!mmc_set_read_speed(drive,profile,config->readSpeedKbps)) { error = read_device_error(drive); goto done; }
     static volatile LONG serial;
     if (mdsOutput) {
         parts = calloc(partCount,sizeof(*parts)); if (!parts) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
@@ -144,8 +158,8 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
         if (read_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
         uint16_t count = (uint16_t)(stats.totalSectors - lba < 32 ? stats.totalSectors - lba : 32);
         if (dvdLayout.layerCount == 2 && lba < dvdLayout.layerBreakLba && count > dvdLayout.layerBreakLba - lba) count = (uint16_t)(dvdLayout.layerBreakLba - lba);
-        unsigned part = partCount > 1 ? lba / config->splitSectors : 0;
-        if (partCount > 1 && count > config->splitSectors - lba % config->splitSectors) count = (uint16_t)(config->splitSectors - lba % config->splitSectors);
+        unsigned part = partCount > 1 ? lba / splitSectors : 0;
+        if (partCount > 1 && count > splitSectors - lba % splitSectors) count = (uint16_t)(splitSectors - lba % splitSectors);
         if (!read_sectors(config,lba,count,buffer,&stats)) { error = read_cancelled(config) ? ERROR_CANCELLED : read_device_error(drive); goto done; }
         DWORD wanted = (DWORD)count * 2048, offset = 0;
         HANDLE target = mdsOutput ? parts[part].file : output;
@@ -197,6 +211,7 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
 done:
     if (output != INVALID_HANDLE_VALUE) CloseHandle(output); if (temporaryCreated && !success) DeleteFileW(temporary); if (descriptorCreated && !success) DeleteFileW(descriptor); read_release_parts(parts,partCount,!success); free(parts); free(buffer);
     if (!success) return read_failure(&stats,error,"Disc read did not complete",callback,context);
+    if (config->ejectWhenDone && !mmc_load_eject(drive,true)) return read_failure(&stats,read_device_error(drive),"Image published, but disc ejection failed",callback,context);
     stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),mdsOutput ? "Disc read successfully to MDS and data files." : "Disc image read successfully."); if (callback) callback(&stats,context); return true;
 }
 

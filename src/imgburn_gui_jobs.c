@@ -147,11 +147,16 @@ static bool job_drive(GuiJob* job) {
         if (ready) pipeline_discovery_capacity(&drive,&job->discoveryCapacity);
     } else if (!ready) SetLastError(ERROR_NOT_READY);
     else if (job->operation == GUI_READ_DISC) {
-        ReadConfig config = {0}; config.drive = &drive; config.imagePath = job->destination; config.cancelEvent = job->cancel; config.retryCount = 20; config.replaceExisting = job->replaceExisting; config.readCdText = job->readCdText; config.splitSectors = job->readSplitSectors; config.rawCdMds = job->rawCdMds; config.includeSessionPregaps = job->includeSessionPregaps;
+        ReadConfig config = {0}; config.drive = &drive; config.imagePath = job->destination; config.cancelEvent = job->cancel; config.retryCount = job->readRetries; config.autoSplit = job->readAutoSplit; config.ejectWhenDone = job->readEject; config.replaceExisting = job->replaceExisting; config.readCdText = job->readCdText; config.splitSectors = job->readSplitSectors; config.rawCdMds = job->rawCdMds; config.includeSessionPregaps = job->includeSessionPregaps;
+        if (job->setReadSpeeds) {
+            MmcProfile profile = mmc_get_current_profile(&drive); double unit = profile <= MMC_PROFILE_CD_RW ? 176.4 : profile >= MMC_PROFILE_BD_ROM ? 4495.5 : 1385.0;
+            config.readSpeedKbps = job->readSpeedMultiplier ? (uint32_t)(job->readSpeedMultiplier * unit + 0.5) : UINT32_MAX;
+            const wchar_t* type = wcsrchr(job->destination,L'.'); if (job->rawCdMds || (type && !_wcsicmp(type,L".cue"))) config.audioReadSpeedKbps = job->audioReadSpeedMultiplier ? (uint32_t)(job->audioReadSpeedMultiplier * 176.4 + 0.5) : UINT32_MAX;
+        }
         const wchar_t* extension = wcsrchr(job->destination,L'.'); ok = extension && !_wcsicmp(extension,L".cue") ? pipeline_read_cd(&config,job_pipeline_progress,job) : pipeline_read_disc(&config,job_pipeline_progress,job);
         bool mds = extension && !_wcsicmp(extension,L".mds");
-        if (ok) job_text(job,mds ? L"光盘镜像和 MDS 描述已读取：%ls\r\n配套数据文件按顺序记录在 MDS 中。\r\n" : L"光盘镜像已读取：%ls\r\n",job->destination);
-        else { job->error = GetLastError(); if (job->error == ERROR_NOT_SUPPORTED) job_text(job,mds ? L"MDS 配套读取支持单轨 MODE1 CD、单层 DVD 和已结束的单会话双层 DVD；音频及混合轨 CD 请选择 CUE 输出。\r\n" : L"当前光盘布局或光驱能力不支持所选镜像格式。\r\n"); else if (job->error == ERROR_DISK_FULL) job_text(job,L"目标位置的可用空间不足。\r\n"); }
+        if (ok) job_text(job,job->readAutoSplit ? L"光盘镜像已读取：%ls\r\n如受文件系统上限而分卷，请使用同名 MDS 载入整组数据。\r\n" : mds ? L"光盘镜像和 MDS 描述已读取：%ls\r\n配套数据文件按顺序记录在 MDS 中。\r\n" : L"光盘镜像已读取：%ls\r\n",job->destination);
+        else { job->error = GetLastError(); if (job->error == ERROR_NOT_SUPPORTED) job_text(job,mds ? L"MDS 支持单轨 MODE1 数据 CD，显式原始读取支持 MODE1/MODE2 的2352字节主通道，以及单层和已结束的单会话双层 DVD；音频及混合轨 CD 请选择 CUE。\r\n" : L"当前光盘布局或光驱能力不支持所选镜像格式。\r\n"); else if (job->error == ERROR_DISK_FULL) job_text(job,L"目标位置的可用空间不足。\r\n"); }
     }
     else if (job->operation == GUI_VERIFY_DISC) {
         VerifyConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.cancelEvent = job->cancel;

@@ -81,10 +81,10 @@ static void print_usage(void) {
     printf("  sector <drive> <lba|--last> [--raw|--raw-sub]\n");
     printf("                                 Inspect one sector as hexadecimal and ASCII\n");
     printf("  cd-toc <drive>                Display complete CD sessions, tracks and lead-outs\n");
-    printf("  read <drive> <out.iso|out.mds|out.cue> [--retries <0..20>] [--replace] [--cdtext] [--split <MiB>] [--raw-cd] [--session-pregaps]\n");
+    printf("  read <drive> <out.iso|out.mds|out.cue> [--retries <0..20>] [--replace] [--cdtext] [--split <MiB|auto>] [--raw-cd] [--session-pregaps] [--speed <Nx|MAX>] [--audio-speed <Nx|MAX>] [--eject]\n");
     printf("                                 Read data ISO or raw CD BIN/CUE with Q indexes\n");
     printf("                                 MDS destination saves MODE1 CD or single/dual-layer DVD data files\n");
-    printf("                                 --split sets a per-file MiB limit for MDS output; 0 disables splitting\n");
+    printf("                                 --split sets a per-file MiB limit for MDS; auto follows the target volume file limit\n");
     printf("  burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle] [--opc]\n");
     printf("                                 Burn ISO/BIN, data MDS or supported CD CUE images\n");
     printf("                                 DVD+R DL requires an OTP MDS with an aligned layer break\n");
@@ -453,14 +453,20 @@ static BOOL WINAPI cli_read_control(DWORD type) {
     AcquireSRWLockShared(&cliReadLock); BOOL handled = cliReadCancel != NULL; if (handled) SetEvent(cliReadCancel); ReleaseSRWLockShared(&cliReadLock); return handled;
 }
 static int cmd_read(int argc, char** argv) {
-    if (argc < 4) { printf("Usage: imgburn read <drive> <out.iso|out.mds|out.cue> [--retries <0..20>] [--replace] [--cdtext] [--split <MiB>] [--raw-cd] [--session-pregaps]\n"); return 1; }
-    ReadConfig config = {0}; config.retryCount = 20; uint32_t splitMiB = 0;
+    if (argc < 4) { printf("Usage: imgburn read <drive> <out.iso|out.mds|out.cue> [--retries <0..20>] [--replace] [--cdtext] [--split <MiB|auto>] [--raw-cd] [--session-pregaps] [--speed <Nx|MAX>] [--audio-speed <Nx|MAX>] [--eject]\n"); return 1; }
+    ReadConfig config = {0}; config.retryCount = 20; double dataSpeed = -1, audioSpeed = -1; uint32_t splitMiB = 0;
     for (int i = 4; i < argc; i++) {
         if (!_stricmp(argv[i],"--replace")) config.replaceExisting = true;
         else if (!_stricmp(argv[i],"--cdtext")) config.readCdText = true;
         else if (!_stricmp(argv[i],"--raw-cd")) config.rawCdMds = true;
         else if (!_stricmp(argv[i],"--session-pregaps")) config.includeSessionPregaps = true;
-        else if (!_stricmp(argv[i],"--split") && i + 1 < argc) { char* end; const char* value = argv[++i]; unsigned long n = strtoul(value,&end,10); if (!value[0] || *end || n > UINT32_MAX / 512 || value[0] == '-') { printf("Error: Split size must be a whole MiB value from 0 to %u.\n",UINT32_MAX / 512); return 1; } splitMiB = (uint32_t)n; }
+        else if (!_stricmp(argv[i],"--eject")) config.ejectWhenDone = true;
+        else if ((!_stricmp(argv[i],"--speed") || !_stricmp(argv[i],"--audio-speed")) && i + 1 < argc) {
+            bool audio = !_stricmp(argv[i],"--audio-speed"); const char* value = argv[++i]; double rate = 0;
+            if (_stricmp(value,"MAX")) { char* end; rate = strtod(value,&end); if ((*end == 'x' || *end == 'X') && !end[1]) end++; if (!value[0] || *end || !isfinite(rate) || rate < 1 || rate * 4495.5 + 0.5 >= UINT32_MAX) { printf("Error: Invalid read speed.\n"); return 1; } }
+            if (audio) audioSpeed = rate; else dataSpeed = rate;
+        }
+        else if (!_stricmp(argv[i],"--split") && i + 1 < argc) { char* end; const char* value = argv[++i]; if (!_stricmp(value,"auto")) { config.autoSplit = true; splitMiB = 0; continue; } config.autoSplit = false; unsigned long n = strtoul(value,&end,10); if (!value[0] || *end || n > UINT32_MAX / 512 || value[0] == '-') { printf("Error: Split size must be a whole MiB value from 0 to %u.\n",UINT32_MAX / 512); return 1; } splitMiB = (uint32_t)n; }
         else if (!_stricmp(argv[i],"--retries") && i + 1 < argc) { char* end; const char* value = argv[++i]; unsigned long n = strtoul(value,&end,10); if (!value[0] || *end || n > 20 || value[0] == '-') { printf("Error: Retry count must be 0..20.\n"); return 1; } config.retryCount = (unsigned)n; }
         else { printf("Error: Unknown or incomplete read option: %s\n",argv[i]); return 1; }
     }
@@ -470,16 +476,24 @@ static int cmd_read(int argc, char** argv) {
     if (config.rawCdMds && (!extension || _wcsicmp(extension,L".mds"))) { printf("Error: --raw-cd requires an MDS destination.\n"); return 1; }
     if (config.readCdText && !rawCd) { printf("Error: --cdtext requires a CUE destination.\n"); return 1; }
     if (config.includeSessionPregaps && !rawCd) { printf("Error: --session-pregaps requires a multi-session CUE destination.\n"); return 1; }
-    if (config.splitSectors && (!extension || _wcsicmp(extension,L".mds"))) { printf("Error: --split requires an MDS destination.\n"); return 1; }
+    if ((config.splitSectors || (config.autoSplit && rawCd)) && (!extension || _wcsicmp(extension,L".mds"))) { printf("Error: --split requires an MDS destination.\n"); return 1; }
     OpticalDrive drive; if (!spti_open_drive(&drive,device,false)) { printf("Error: Cannot open source drive (%lu).\n",drive.lastError); return 1; }
     if (drive.accessKnown && (drive.deviceAccess & (GENERIC_READ | GENERIC_WRITE)) != (GENERIC_READ | GENERIC_WRITE)) { printf("Error: Source device opened without read/write command access. SPTI requires both access rights; try running as administrator.\n"); spti_close_drive(&drive); return 1; }
+    if (audioSpeed >= 0 && !rawCd && !config.rawCdMds) { printf("Error: --audio-speed requires raw CD output.\n"); spti_close_drive(&drive); return 1; }
+    if (dataSpeed >= 0 || audioSpeed >= 0) {
+        MmcProfile profile = mmc_get_current_profile(&drive); if (profile == MMC_PROFILE_UNKNOWN) { printf("Error: Cannot identify media for read speed.\n"); spti_close_drive(&drive); return 1; }
+        double unit = profile <= MMC_PROFILE_CD_RW ? 176.4 : profile >= MMC_PROFILE_BD_ROM ? 4495.5 : 1385.0;
+        if (dataSpeed >= 0) config.readSpeedKbps = dataSpeed ? (uint32_t)(dataSpeed * unit + 0.5) : UINT32_MAX;
+        if (audioSpeed >= 0) config.audioReadSpeedKbps = audioSpeed ? (uint32_t)(audioSpeed * 176.4 + 0.5) : UINT32_MAX;
+        if (profile < MMC_PROFILE_BD_ROM && ((config.readSpeedKbps >= 0xFFFF && config.readSpeedKbps != UINT32_MAX) || (config.audioReadSpeedKbps >= 0xFFFF && config.audioReadSpeedKbps != UINT32_MAX))) { printf("Error: Read speed exceeds the CD/DVD command range.\n"); spti_close_drive(&drive); return 1; }
+    }
     HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; }
     AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock);
     bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
     config.drive = &drive; config.imagePath = image; config.cancelEvent = cancel;
     bool ok = rawCd || config.rawCdMds ? pipeline_read_cd(&config,on_cli_burn_progress,NULL) : pipeline_read_disc(&config,on_cli_burn_progress,NULL); DWORD error = GetLastError();
     if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock); spti_close_drive(&drive);
-    if (ok) printf(extension && !_wcsicmp(extension,L".mds") ? "\nDisc image and MDS descriptor created successfully; the MDS lists its data files in order.\n" : "\nDisc image read successfully.\n");
+    if (ok) printf(config.autoSplit ? "\nDisc image read successfully. If split, use its same-name MDS descriptor.\n" : extension && !_wcsicmp(extension,L".mds") ? "\nDisc image and MDS descriptor created successfully; the MDS lists its data files in order.\n" : "\nDisc image read successfully.\n");
     else printf("\nDisc read failed (error %lu).\n",error); return ok ? 0 : 1;
 }
 

@@ -31,7 +31,7 @@ enum {
     UI_SOURCE_EDIT = 1000, UI_SOURCE_LIST, UI_DEST_EDIT, UI_DRIVE, UI_GO, UI_CANCEL, UI_FS, UI_UDF, UI_LABEL,
     UI_DVD, UI_BD, UI_OPTIMIZE, UI_TAB, UI_TEST, UI_VERIFY_CHECK, UI_TOOL_ADD, UI_TOOL_REMOVE, UI_TOOL_UP, UI_TOOL_DOWN,
     UI_TOOL_LAYER, UI_TOOL_LBA, UI_TOOL_OTP, UI_TOOL_PTP, UI_TOOL_OK, UI_TOOL_CLOSE, UI_IMAGE_INFO, UI_REMOVE_SOURCE, UI_VERIFY_COMPARE, UI_READ_CDTEXT,
-    UI_DISCOVERY_ALL, UI_DISCOVERY_CUSTOM, UI_DISCOVERY_SECTORS, UI_DISCOVERY_CAPACITY, UI_DISCOVERY_SPEED, UI_DISCOVERY_SIZE, UI_READ_SPLIT, UI_READ_RAW_MDS, UI_SESSION_PREGAPS,
+    UI_DISCOVERY_ALL, UI_DISCOVERY_CUSTOM, UI_DISCOVERY_SECTORS, UI_DISCOVERY_CAPACITY, UI_DISCOVERY_SPEED, UI_DISCOVERY_SIZE, UI_READ_SPLIT, UI_READ_RAW_MDS, UI_SESSION_PREGAPS, UI_READ_SPEED, UI_READ_AUDIO_SPEED, UI_READ_RETRIES, UI_READ_EJECT,
     UI_EZ_FIRST = 1100
 };
 
@@ -47,7 +47,7 @@ typedef struct {
 struct GuiWindow {
     HINSTANCE instance;
     HWND window, status, logWindow, logList, sources, sourceEdit, destination, drives, info, progress, go, cancel, tabs;
-    HWND fs, udf, label, dvd, bd, optimize, verify, compare, readText, readSplit, readRawMds, sessionPregaps, discoverySectors, discoverySpeed;
+    HWND fs, udf, label, dvd, bd, optimize, verify, compare, readText, readSplit, readRawMds, sessionPregaps, discoverySectors, discoverySpeed, readSpeed, readAudioSpeed, readRetries, readEject;
     HFONT font, bold;
     GuiMode mode;
     unsigned dpi;
@@ -59,7 +59,8 @@ struct GuiWindow {
     UdfRevision revision;
     bool dvdVideo, bluray, deduplicate, verifyAfter, verifyAgainstImage, testMode, testWriteSupported, readCdText, rawCdMds, includeSessionPregaps;
     bool discoveryAll;
-    unsigned readSplitChoice;
+    bool readEjectWhenDone;
+    wchar_t readSplitText[40], readRate[24], readAudioRate[24], readRetryText[8];
     uint32_t discoveryCapacity;
     wchar_t discoveryCount[32], discoveryRate[24];
     OpticalDriveInfo devices[MAX_OPTICAL_DRIVES];
@@ -109,7 +110,24 @@ static bool gui_folder(HWND owner, wchar_t* result) {
     bool ok = SHGetPathFromIDListW(id, result) != FALSE; CoTaskMemFree(id); return ok;
 }
 static const wchar_t readFilter[] = L"数据镜像 (*.iso)\0*.iso\0原始 CD 镜像 (*.cue)\0*.cue\0数据镜像及 MDS 描述 (*.mds)\0*.mds\0\0";
-static const uint32_t readSplitMiB[] = {0,650,700,1024,2048,4096};
+typedef struct { const wchar_t* label; uint64_t bytes; } GuiReadSplit;
+static const GuiReadSplit readSplits[] = {
+    {L"Auto",0},{L"不分卷",0},{L"650 MiB",650ULL * 1048576},{L"700 MiB",700ULL * 1048576},{L"780 MiB",780ULL * 1048576},{L"810 MiB",810ULL * 1048576},{L"870 MiB",870ULL * 1048576},{L"890 MiB",890ULL * 1048576},
+    {L"1 GiB",1073741824ULL},{L"2 GiB",2ULL * 1073741824},{L"4 GiB",4ULL * 1073741824},{L"4.37 GiB",437ULL * 1073741824 / 100},{L"4.4 GiB",44ULL * 1073741824 / 10},{L"4.45 GiB",445ULL * 1073741824 / 100},
+    {L"4.5 GiB",45ULL * 1073741824 / 10},{L"4.55 GiB",455ULL * 1073741824 / 100},{L"4.6 GiB",46ULL * 1073741824 / 10},{L"4.65 GiB",465ULL * 1073741824 / 100},{L"4.7 GiB",47ULL * 1073741824 / 10},{L"7.95 GiB",795ULL * 1073741824 / 100},{L"23.3 GiB",233ULL * 1073741824 / 10},{L"46.6 GiB",466ULL * 1073741824 / 10}
+};
+static bool gui_read_split(const wchar_t* text, bool* automatic, uint64_t* bytes) {
+    *automatic = false; *bytes = 0;
+    for (unsigned i = 0; i < sizeof(readSplits) / sizeof(*readSplits); i++) if (!_wcsicmp(text,readSplits[i].label)) { *automatic = i == 0; *bytes = readSplits[i].bytes; return true; }
+    wchar_t* end; uint64_t value = _wcstoui64(text,&end,10); while (*end == L' ') end++;
+    if (!text[0] || text[0] == L'-' || (*end && _wcsicmp(end,L"MiB")) || value > UINT32_MAX / 512) return false;
+    *bytes = value * 1048576; return true;
+}
+static bool gui_read_rate(const wchar_t* text, double* value) {
+    *value = 0; if (!_wcsicmp(text,L"MAX")) return true;
+    wchar_t* end; double rate = wcstod(text,&end); if ((*end == L'x' || *end == L'X') && !end[1]) end++;
+    if (!text[0] || *end || !isfinite(rate) || rate < 1 || rate * 4495.5 + 0.5 >= UINT32_MAX) return false; *value = rate; return true;
+}
 static UINT_PTR CALLBACK gui_read_file_hook(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     (void)wp;
     if (message == WM_NOTIFY) { const OFNOTIFYW* notice = (const OFNOTIFYW*)lp; if (notice->hdr.code == CDN_TYPECHANGE || notice->hdr.code == CDN_INITDONE) SendMessageW(GetParent(window),CDM_SETDEFEXT,0,(LPARAM)(notice->lpOFN->nFilterIndex == 3 ? L"mds" : notice->lpOFN->nFilterIndex == 2 ? L"cue" : L"iso")); }
@@ -136,7 +154,11 @@ static void gui_read_controls(GuiWindow* ui) {
     if (ui->readText) ui->readCdText = SendMessageW(ui->readText, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (ui->readRawMds) ui->rawCdMds = SendMessageW(ui->readRawMds,BM_GETCHECK,0,0) == BST_CHECKED;
     if (ui->sessionPregaps) ui->includeSessionPregaps = SendMessageW(ui->sessionPregaps,BM_GETCHECK,0,0) == BST_CHECKED;
-    if (ui->readSplit) { LRESULT choice = SendMessageW(ui->readSplit,CB_GETCURSEL,0,0); if (choice >= 0 && choice < (LRESULT)(sizeof(readSplitMiB) / sizeof(*readSplitMiB))) ui->readSplitChoice = (unsigned)choice; }
+    if (ui->readSplit) GetWindowTextW(ui->readSplit,ui->readSplitText,40);
+    if (ui->readSpeed) GetWindowTextW(ui->readSpeed,ui->readRate,24);
+    if (ui->readAudioSpeed) GetWindowTextW(ui->readAudioSpeed,ui->readAudioRate,24);
+    if (ui->readRetries) GetWindowTextW(ui->readRetries,ui->readRetryText,8);
+    if (ui->readEject) ui->readEjectWhenDone = SendMessageW(ui->readEject,BM_GETCHECK,0,0) == BST_CHECKED;
     if (ui->mode == GUI_DISCOVERY && ui->discoverySectors) { ui->discoveryAll = SendMessageW(GetDlgItem(ui->window,UI_DISCOVERY_ALL),BM_GETCHECK,0,0) == BST_CHECKED; GetWindowTextW(ui->discoverySectors,ui->discoveryCount,32); GetWindowTextW(ui->discoverySpeed,ui->discoveryRate,24); }
     if (ui->drives) ui->selectedDrive = (int)SendMessageW(ui->drives, CB_GETCURSEL, 0, 0);
 }
@@ -157,7 +179,8 @@ static void gui_menu(GuiWindow* ui) {
     const wchar_t* readExtension = wcsrchr(ui->readImage,L'.');
     if (read && ui->readText) EnableWindow(ui->readText,idle && readExtension && !_wcsicmp(readExtension,L".cue"));
     if (read && ui->readRawMds) EnableWindow(ui->readRawMds,idle && readExtension && !_wcsicmp(readExtension,L".mds"));
-    if (read && ui->readSplit) EnableWindow(ui->readSplit,idle && readExtension && !_wcsicmp(readExtension,L".mds"));
+    if (read && ui->readSplit) EnableWindow(ui->readSplit,idle && (!readExtension || _wcsicmp(readExtension,L".cue")));
+    if (read) { EnableWindow(ui->readSpeed,idle); EnableWindow(ui->readAudioSpeed,idle && readExtension && (!_wcsicmp(readExtension,L".cue") || (!_wcsicmp(readExtension,L".mds") && ui->rawCdMds))); EnableWindow(ui->readRetries,idle); EnableWindow(ui->readEject,idle); }
     if (ui->sessionPregaps) { const wchar_t* extension = wcsrchr(ui->sourceImage,L'.'); EnableWindow(ui->sessionPregaps,idle && (read ? readExtension && !_wcsicmp(readExtension,L".cue") : !ui->verifyAgainstImage || (extension && !_wcsicmp(extension,L".cue")))); }
     if (verify) { EnableWindow(ui->compare,idle); EnableWindow(ui->destination,idle && ui->verifyAgainstImage); EnableWindow(GetDlgItem(ui->window,UI_SOURCE_FILE),idle && ui->verifyAgainstImage); }
     if (discovery) {
@@ -198,7 +221,7 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
     gui_read_controls(ui); HWND child = GetWindow(ui->window, GW_CHILD);
     while (child) { HWND next = GetWindow(child, GW_HWNDNEXT); if (child != ui->status) DestroyWindow(child); child = next; }
     ui->sources = ui->sourceEdit = ui->destination = ui->drives = ui->info = ui->progress = ui->go = ui->cancel = ui->tabs = NULL;
-    ui->fs = ui->udf = ui->label = ui->dvd = ui->bd = ui->optimize = ui->verify = ui->compare = ui->readText = ui->readSplit = ui->readRawMds = ui->sessionPregaps = ui->discoverySectors = ui->discoverySpeed = NULL; ui->mode = mode;
+    ui->fs = ui->udf = ui->label = ui->dvd = ui->bd = ui->optimize = ui->verify = ui->compare = ui->readText = ui->readSplit = ui->readRawMds = ui->sessionPregaps = ui->discoverySectors = ui->discoverySpeed = ui->readSpeed = ui->readAudioSpeed = ui->readRetries = ui->readEject = NULL; ui->mode = mode;
     if (mode == GUI_EZ) {
         ctl(ui, ui->window, L"BUTTON", L"您打算做什么？", BS_GROUPBOX, 0, 8, 8, 644, 364);
         const wchar_t* texts[] = {L"刻录镜像至光盘",L"刻录文件/文件夹至光盘",L"将光盘抓取成镜像文件",L"从文件/文件夹制作镜像",L"验证光盘",L"品质测试"};
@@ -217,8 +240,8 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
         ctl(ui, ui->window, L"STATIC", mode == GUI_READ ? L"读取为 ISO、MDS 或原始 CD CUE/BIN" : L"检查光盘可读性，可选与镜像比较。\r\n音频轨默认只检查可读性。", 0, 0, 18, 64, 290, mode == GUI_READ ? 22 : 55);
         if (mode == GUI_VERIFY) { ui->compare = ctl(ui,ui->window,L"BUTTON",L"与镜像文件比较",WS_TABSTOP | BS_AUTOCHECKBOX,UI_VERIFY_COMPARE,18,122,280,22); SendMessageW(ui->compare,BM_SETCHECK,ui->verifyAgainstImage ? BST_CHECKED : BST_UNCHECKED,0); }
         if (mode == GUI_READ) {
-            ctl(ui,ui->window,L"STATIC",L"分卷（仅 MDS）：",0,0,18,94,110,22); ui->readSplit = ctl(ui,ui->window,L"COMBOBOX",L"",WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,UI_READ_SPLIT,132,90,185,180);
-            const wchar_t* splits[] = {L"不分卷",L"650 MiB",L"700 MiB",L"1 GiB",L"2 GiB",L"4 GiB"}; for (unsigned i = 0; i < sizeof(splits) / sizeof(*splits); i++) SendMessageW(ui->readSplit,CB_ADDSTRING,0,(LPARAM)splits[i]); SendMessageW(ui->readSplit,CB_SETCURSEL,ui->readSplitChoice,0);
+            ctl(ui,ui->window,L"STATIC",L"分卷 / 自定义MiB：",0,0,18,94,126,22); ui->readSplit = ctl(ui,ui->window,L"COMBOBOX",L"",WS_TABSTOP | CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL,UI_READ_SPLIT,145,90,172,330);
+            for (unsigned i = 0; i < sizeof(readSplits) / sizeof(*readSplits); i++) SendMessageW(ui->readSplit,CB_ADDSTRING,0,(LPARAM)readSplits[i].label); SetWindowTextW(ui->readSplit,ui->readSplitText); SendMessageW(ui->readSplit,CB_LIMITTEXT,39,0);
             ui->readText = ctl(ui,ui->window,L"BUTTON",L"读取 CD-TEXT（仅 CUE）",WS_TABSTOP | BS_AUTOCHECKBOX,UI_READ_CDTEXT,18,122,280,22); SendMessageW(ui->readText,BM_SETCHECK,ui->readCdText ? BST_CHECKED : BST_UNCHECKED,0);
             ui->readRawMds = ctl(ui,ui->window,L"BUTTON",L"原始数据 CD（2352 字节 MDS）",WS_TABSTOP | BS_AUTOCHECKBOX,UI_READ_RAW_MDS,18,145,300,22); SendMessageW(ui->readRawMds,BM_SETCHECK,ui->rawCdMds ? BST_CHECKED : BST_UNCHECKED,0);
         }
@@ -238,7 +261,16 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
         ui->destination = ctl(ui, ui->window, L"EDIT", mode == GUI_VERIFY ? ui->sourceImage : mode == GUI_READ ? ui->readImage : ui->destinationImage, WS_TABSTOP | ES_AUTOHSCROLL, UI_DEST_EDIT, 16, targetY + 24, 276, 24);
         ctl(ui, ui->window, L"BUTTON", L"…", WS_TABSTOP, mode == GUI_VERIFY ? UI_SOURCE_FILE : UI_DESTINATION, 297, targetY + 24, 23, 24);
     } else ui->drives = ctl(ui, ui->window, L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, UI_DRIVE, 16, targetY + 24, 302, 160);
-    ui->info = ctl(ui, ui->window, L"EDIT", L"", ES_MULTILINE | ES_READONLY | WS_VSCROLL, 0, 344, 38, 298, 282);
+    ui->info = ctl(ui, ui->window, L"EDIT", L"", ES_MULTILINE | ES_READONLY | WS_VSCROLL, 0, 344, 38, 298, mode == GUI_READ ? 143 : 282);
+    if (mode == GUI_READ) {
+        ctl(ui,ui->window,L"BUTTON",L"读取设置",BS_GROUPBOX,0,336,187,316,168);
+        ctl(ui,ui->window,L"STATIC",L"数据速度：",0,0,350,211,82,23); ui->readSpeed = ctl(ui,ui->window,L"COMBOBOX",L"",WS_TABSTOP | CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL,UI_READ_SPEED,436,207,110,180);
+        ctl(ui,ui->window,L"STATIC",L"音频速度：",0,0,350,240,82,23); ui->readAudioSpeed = ctl(ui,ui->window,L"COMBOBOX",L"",WS_TABSTOP | CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL,UI_READ_AUDIO_SPEED,436,236,110,180);
+        const wchar_t* rates[] = {L"MAX",L"1x",L"2x",L"4x",L"6x",L"8x",L"12x",L"16x",L"24x",L"32x",L"48x",L"52x"}; for (unsigned i = 0; i < sizeof(rates) / sizeof(*rates); i++) { SendMessageW(ui->readSpeed,CB_ADDSTRING,0,(LPARAM)rates[i]); SendMessageW(ui->readAudioSpeed,CB_ADDSTRING,0,(LPARAM)rates[i]); }
+        SetWindowTextW(ui->readSpeed,ui->readRate); SetWindowTextW(ui->readAudioSpeed,ui->readAudioRate); SendMessageW(ui->readSpeed,CB_LIMITTEXT,23,0); SendMessageW(ui->readAudioSpeed,CB_LIMITTEXT,23,0);
+        ctl(ui,ui->window,L"STATIC",L"软件重试：",0,0,350,269,82,23); ui->readRetries = ctl(ui,ui->window,L"EDIT",ui->readRetryText,WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,UI_READ_RETRIES,436,265,70,24); SendMessageW(ui->readRetries,EM_SETLIMITTEXT,2,0);
+        ui->readEject = ctl(ui,ui->window,L"BUTTON",L"读取成功后弹出光盘",WS_TABSTOP | BS_AUTOCHECKBOX,UI_READ_EJECT,350,301,270,23); SendMessageW(ui->readEject,BM_SETCHECK,ui->readEjectWhenDone ? BST_CHECKED : BST_UNCHECKED,0);
+    }
     if (build) {
         ui->tabs = ctl(ui, ui->window, WC_TABCONTROLW, L"", WS_TABSTOP, UI_TAB, 336, 8, 316, 359);
         const wchar_t* pages[] = {L"信息",L"选项",L"标签",L"高级"}; for (int i = 0; i < 4; i++) { TCITEMW tab = {0}; tab.mask = TCIF_TEXT; tab.pszText = (wchar_t*)pages[i]; TabCtrl_InsertItem(ui->tabs, i, &tab); }
@@ -301,7 +333,11 @@ static void gui_source(GuiWindow* ui, bool folder) {
 static GuiJob* gui_job(GuiWindow* ui, GuiOperation operation, const GuiPath* paths, size_t count) {
     GuiJob* job = (GuiJob*)calloc(1, sizeof(*job)); if (!job) return NULL;
     const wchar_t* readExtension = wcsrchr(ui->readImage,L'.'); job->readCdText = operation == GUI_READ_DISC && ui->readCdText && readExtension && !_wcsicmp(readExtension,L".cue");
-    if (operation == GUI_READ_DISC && readExtension && !_wcsicmp(readExtension,L".mds")) { job->rawCdMds = ui->rawCdMds; job->readSplitSectors = (uint32_t)((uint64_t)readSplitMiB[ui->readSplitChoice] * 1048576 / (job->rawCdMds ? 2352 : 2048)); }
+    if (operation == GUI_READ_DISC && readExtension && !_wcsicmp(readExtension,L".mds")) { job->rawCdMds = ui->rawCdMds; uint64_t bytes = 0; gui_read_split(ui->readSplitText,&job->readAutoSplit,&bytes); job->readSplitSectors = (uint32_t)(bytes / (job->rawCdMds ? 2352 : 2048)); }
+    if (operation == GUI_READ_DISC) {
+        if (!readExtension || !_wcsicmp(readExtension,L".iso")) job->readAutoSplit = !_wcsicmp(ui->readSplitText,L"Auto");
+        job->readRetries = (unsigned)wcstoul(ui->readRetryText,NULL,10); job->readEject = ui->readEjectWhenDone; job->setReadSpeeds = true; gui_read_rate(ui->readRate,&job->readSpeedMultiplier); gui_read_rate(ui->readAudioRate,&job->audioReadSpeedMultiplier);
+    }
     if (operation == GUI_READ_DISC) job->includeSessionPregaps = ui->includeSessionPregaps && readExtension && !_wcsicmp(readExtension,L".cue");
     if (operation == GUI_VERIFY_DISC) { const wchar_t* extension = wcsrchr(ui->sourceImage,L'.'); job->includeSessionPregaps = ui->includeSessionPregaps && (!ui->verifyAgainstImage || (extension && !_wcsicmp(extension,L".cue"))); }
     job->sources = (GuiPath*)calloc(count, sizeof(*paths)); job->cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -345,6 +381,12 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
     if (operation == GUI_READ_DISC) {
         if (!ui->readImage[0]) { if (!gui_file(ui->window,ui->readImage,true,readFilter,L"iso")) return; if (ui->destination) SetWindowTextW(ui->destination,ui->readImage); replace = GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES; }
         else if (GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES) { if (MessageBoxW(ui->window,L"目标文件已存在，是否替换？",L"ImgBurn",MB_YESNO | MB_ICONQUESTION) != IDYES) return; replace = true; }
+    }
+    if (operation == GUI_READ_DISC) {
+        bool automatic; uint64_t bytes; double rate; wchar_t* end; unsigned long retries = wcstoul(ui->readRetryText,&end,10); const wchar_t* extension = wcsrchr(ui->readImage,L'.'); bool cue = extension && !_wcsicmp(extension,L".cue");
+        if (!cue && (!gui_read_split(ui->readSplitText,&automatic,&bytes) || (extension && !_wcsicmp(extension,L".iso") && bytes))) { MessageBoxW(ui->window,L"请选择 Auto、不分卷，或为 MDS 输入有效的自定义 MiB 容量。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
+        if (!ui->readRetryText[0] || *end || retries > 20 || ui->readRetryText[0] == L'-') { MessageBoxW(ui->window,L"软件重试次数应为 0 至 20。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
+        if (!gui_read_rate(ui->readRate,&rate) || !gui_read_rate(ui->readAudioRate,&rate)) { MessageBoxW(ui->window,L"请输入有效读取速度，例如 4x 或 MAX。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
     }
     GuiJob* job = gui_job(ui,operation,sources,count); if (job) { job->replaceExisting = replace; job->discoverySectors = discoverySectors; job->discoverySpeedMultiplier = discoverySpeed; }
     if (!gui_launch(ui,job)) MessageBoxW(ui->window, L"无法启动操作。", L"ImgBurn", MB_OK | MB_ICONERROR);
@@ -512,7 +554,7 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
             case UI_CLEAR: free(ui->paths); ui->paths = NULL; ui->pathCount = 0; gui_mode(ui,ui->mode); break;
             case UI_REMOVE_SOURCE: if (ui->sources) { for (size_t i = ui->pathCount; i > 0; i--) if (SendMessageW(ui->sources,LB_GETSEL,i - 1,0) > 0) { memmove(ui->paths + i - 1,ui->paths + i,(ui->pathCount - i) * sizeof(*ui->paths)); ui->pathCount--; } gui_mode(ui,GUI_BUILD); } break;
             case UI_NEW:
-                gui_read_controls(ui); free(ui->paths); ui->paths = NULL; ui->pathCount = 0; ui->destinationImage[0] = 0; ui->fsTypes = FS_TYPE_ALL; ui->revision = UDF_REV_102; ui->dvdVideo = ui->bluray = false; ui->deduplicate = true; wcscpy(ui->volumeLabel,L"IMGBURN_DISC");
+                gui_read_controls(ui); free(ui->paths); ui->paths = NULL; ui->pathCount = 0; ui->destinationImage[0] = 0; ui->fsTypes = FS_TYPE_ALL; ui->revision = UDF_REV_102; ui->dvdVideo = ui->bluray = false; ui->deduplicate = true; wcscpy(ui->volumeLabel,L"IMGBURN_DISC"); wcscpy(ui->readSplitText,L"Auto"); wcscpy(ui->readRate,L"MAX"); wcscpy(ui->readAudioRate,L"MAX"); wcscpy(ui->readRetryText,L"20");
                 ui->fs = ui->udf = ui->label = ui->dvd = ui->bd = ui->optimize = NULL; if (ui->destination) SetWindowTextW(ui->destination,L""); gui_mode(ui,GUI_BUILD); break;
             case UI_DESTINATION: { wchar_t path[MAX_PATH]; wchar_t* target = ui->mode == GUI_READ ? ui->readImage : ui->destinationImage; wcscpy(path,target); if (gui_file(window,path,true,ui->mode == GUI_READ ? readFilter : L"ISO 镜像\0*.iso\0\0",L"iso")) { wcscpy(target,path); if (ui->destination) SetWindowTextW(ui->destination,path); } break; }
             case UI_CALCULATE: gui_start(ui,GUI_CALCULATE); break;
@@ -542,7 +584,7 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
 
 int imgburn_gui_show(HINSTANCE instance, int show) {
     GuiWindow* ui = (GuiWindow*)calloc(1,sizeof(*ui)); if (!ui) return 1;
-    ui->instance = instance; ui->dpi = 96; ui->fsTypes = FS_TYPE_ALL; ui->revision = UDF_REV_102; ui->deduplicate = true; ui->verifyAfter = true; ui->verifyAgainstImage = true; ui->selectedDrive = -1; ui->discoveryAll = true; wcscpy(ui->discoveryCount,L"2295000"); wcscpy(ui->discoveryRate,L"MAX"); wcscpy(ui->volumeLabel,L"IMGBURN_DISC");
+    ui->instance = instance; ui->dpi = 96; ui->fsTypes = FS_TYPE_ALL; ui->revision = UDF_REV_102; ui->deduplicate = true; ui->verifyAfter = true; ui->verifyAgainstImage = true; ui->selectedDrive = -1; ui->discoveryAll = true; wcscpy(ui->discoveryCount,L"2295000"); wcscpy(ui->discoveryRate,L"MAX"); wcscpy(ui->volumeLabel,L"IMGBURN_DISC"); wcscpy(ui->readSplitText,L"Auto"); wcscpy(ui->readRate,L"MAX"); wcscpy(ui->readAudioRate,L"MAX"); wcscpy(ui->readRetryText,L"20");
     HDC screen = GetDC(NULL); if (screen) { ui->dpi = (unsigned)GetDeviceCaps(screen,LOGPIXELSX); ReleaseDC(NULL,screen); }
     ui->font = CreateFontW(-MulDiv(9,(int)ui->dpi,72),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,DEFAULT_PITCH,L"Segoe UI"); ui->bold = CreateFontW(-MulDiv(10,(int)ui->dpi,72),0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     HRESULT comResult = CoInitializeEx(NULL,COINIT_APARTMENTTHREADED); imgburn_gui_assets_load(&ui->assets,NULL); INITCOMMONCONTROLSEX controls = {sizeof(controls),ICC_WIN95_CLASSES}; InitCommonControlsEx(&controls);
