@@ -552,7 +552,7 @@ bool imgburn_mds_create_files(const wchar_t* mdsFilePath, const wchar_t* const* 
     return imgburn_mds_create_files_ex(mdsFilePath, dataFiles, fileCount, totalSectors, layerBreakLba, true);
 }
 
-static bool mds_create_data(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, bool sourceLayout, bool cd, uint16_t sectorSize) {
+static bool mds_create_data(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, bool sourceLayout, bool cd, uint16_t sectorSize, uint8_t cdMode) {
     if (!mdsFilePath || !dataFiles || !fileCount || fileCount > MAX_MDS_FILES || wcslen(mdsFilePath) >= MAX_PATH || !totalSectors || totalSectors > INT32_MAX) return false;
     if (layerBreakLba && (layerBreakLba >= totalSectors || (oppositeTrackPath && layerBreakLba < (totalSectors + 1) / 2) || layerBreakLba > 0xFD0000 || totalSectors - layerBreakLba > 0xFD0000)) return false;
     if (!sourceLayout && layerBreakLba && (layerBreakLba > 2086912 || totalSectors - layerBreakLba > 2086912 || layerBreakLba % 16)) return false;
@@ -579,7 +579,7 @@ static bool mds_create_data(const wchar_t* mdsFilePath, const wchar_t* const* da
     MdsSessionBlock* session = (MdsSessionBlock*)(data + 88);
     session->sessionStartLba = cd ? -150 : 0; session->sessionEndLba = (int32_t)totalSectors; session->sessionNumber = 1; session->totalTracks = 1; session->leadInTracks = 3; session->firstTrack = 1; session->lastTrack = 1; session->tracksOffset = 112;
     MdsTrackBlock* track = (MdsTrackBlock*)(data + 112);
-    track->trackMode = cd ? 0xAA : 0x02; track->adrControl = 0x14; track->point = 1; track->time[5] = 2; track->extraOffset = cd ? structures : totalSectors; track->sectorSize = sectorSize; track->fileCount = (uint32_t)fileCount; track->footerOffset = 192;
+    track->trackMode = cd ? cdMode : 0x02; track->adrControl = 0x14; track->point = 1; track->time[5] = 2; track->extraOffset = cd ? structures : totalSectors; track->sectorSize = sectorSize; track->fileCount = (uint32_t)fileCount; track->footerOffset = 192;
     uint32_t nameOffset = 192 + (uint32_t)fileCount * 16;
     for (size_t i = 0; i < fileCount; i++) {
         uint32_t footer[4] = {nameOffset, 1, 0, 0}, nameBytes = (uint32_t)(wcslen(dataFiles[i]) + 1) * 2;
@@ -617,19 +617,23 @@ static bool mds_create_data(const wchar_t* mdsFilePath, const wchar_t* const* da
 }
 
 bool imgburn_mds_create_files_ex(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath) {
-    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,false,false,2048);
+    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,false,false,2048,0);
 }
 bool imgburn_mds_create_dvd_read(const wchar_t* mdsFilePath, const wchar_t* dataFile, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath) {
     const wchar_t* files[] = {dataFile}; return imgburn_mds_create_dvd_read_files(mdsFilePath,files,1,totalSectors,layerBreakLba,oppositeTrackPath);
 }
 bool imgburn_mds_create_dvd_read_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath) {
-    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,true,false,2048);
+    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,true,false,2048,0);
 }
 bool imgburn_mds_create_cd_read_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors) {
-    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,0,false,true,true,2048);
+    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,0,false,true,true,2048,0xAA);
 }
 bool imgburn_mds_create_cd_raw_read(const wchar_t* mdsFilePath, const wchar_t* dataFile, uint32_t totalSectors) {
-    const wchar_t* files[] = {dataFile}; return mds_create_data(mdsFilePath,files,1,totalSectors,0,false,true,true,2352);
+    const wchar_t* files[] = {dataFile}; return imgburn_mds_create_cd_raw_read_files(mdsFilePath,files,1,totalSectors,0xAA);
+}
+bool imgburn_mds_create_cd_raw_read_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint8_t mode) {
+    if (mode != 0xAA && mode != 0xAB) return false;
+    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,0,false,true,true,2352,mode);
 }
 
 /* -------------------------------------------------------------------------

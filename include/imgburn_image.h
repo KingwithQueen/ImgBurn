@@ -196,6 +196,8 @@ bool imgburn_mds_create_dvd_read_files(const wchar_t* mdsPath, const wchar_t* co
 bool imgburn_mds_create_cd_read_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors);
 /* 原版可载入的精简单轨 MODE1/2352 CD 描述；主通道文件从 LBA 0 开始。 */
 bool imgburn_mds_create_cd_raw_read(const wchar_t* mdsPath, const wchar_t* dataFile, uint32_t totalSectors);
+/* 原始单轨主通道可跨分卷保存；mode仅为AA/Mode1或AB/Mode2，各卷包含完整2352字节扇区。 */
+bool imgburn_mds_create_cd_raw_read_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint8_t mode);
 
 /* -------------------------------------------------------------------------
  * DVD-Video Layer Break Candidate Structure

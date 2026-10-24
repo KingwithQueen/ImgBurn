@@ -157,7 +157,7 @@ static void gui_menu(GuiWindow* ui) {
     const wchar_t* readExtension = wcsrchr(ui->readImage,L'.');
     if (read && ui->readText) EnableWindow(ui->readText,idle && readExtension && !_wcsicmp(readExtension,L".cue"));
     if (read && ui->readRawMds) EnableWindow(ui->readRawMds,idle && readExtension && !_wcsicmp(readExtension,L".mds"));
-    if (read && ui->readSplit) EnableWindow(ui->readSplit,idle && readExtension && !_wcsicmp(readExtension,L".mds") && !ui->rawCdMds);
+    if (read && ui->readSplit) EnableWindow(ui->readSplit,idle && readExtension && !_wcsicmp(readExtension,L".mds"));
     if (ui->sessionPregaps) { const wchar_t* extension = wcsrchr(ui->sourceImage,L'.'); EnableWindow(ui->sessionPregaps,idle && (read ? readExtension && !_wcsicmp(readExtension,L".cue") : !ui->verifyAgainstImage || (extension && !_wcsicmp(extension,L".cue")))); }
     if (verify) { EnableWindow(ui->compare,idle); EnableWindow(ui->destination,idle && ui->verifyAgainstImage); EnableWindow(GetDlgItem(ui->window,UI_SOURCE_FILE),idle && ui->verifyAgainstImage); }
     if (discovery) {
@@ -220,7 +220,7 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
             ctl(ui,ui->window,L"STATIC",L"分卷（仅 MDS）：",0,0,18,94,110,22); ui->readSplit = ctl(ui,ui->window,L"COMBOBOX",L"",WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,UI_READ_SPLIT,132,90,185,180);
             const wchar_t* splits[] = {L"不分卷",L"650 MiB",L"700 MiB",L"1 GiB",L"2 GiB",L"4 GiB"}; for (unsigned i = 0; i < sizeof(splits) / sizeof(*splits); i++) SendMessageW(ui->readSplit,CB_ADDSTRING,0,(LPARAM)splits[i]); SendMessageW(ui->readSplit,CB_SETCURSEL,ui->readSplitChoice,0);
             ui->readText = ctl(ui,ui->window,L"BUTTON",L"读取 CD-TEXT（仅 CUE）",WS_TABSTOP | BS_AUTOCHECKBOX,UI_READ_CDTEXT,18,122,280,22); SendMessageW(ui->readText,BM_SETCHECK,ui->readCdText ? BST_CHECKED : BST_UNCHECKED,0);
-            ui->readRawMds = ctl(ui,ui->window,L"BUTTON",L"原始 MODE1 CD（2352 字节 MDS）",WS_TABSTOP | BS_AUTOCHECKBOX,UI_READ_RAW_MDS,18,145,300,22); SendMessageW(ui->readRawMds,BM_SETCHECK,ui->rawCdMds ? BST_CHECKED : BST_UNCHECKED,0);
+            ui->readRawMds = ctl(ui,ui->window,L"BUTTON",L"原始数据 CD（2352 字节 MDS）",WS_TABSTOP | BS_AUTOCHECKBOX,UI_READ_RAW_MDS,18,145,300,22); SendMessageW(ui->readRawMds,BM_SETCHECK,ui->rawCdMds ? BST_CHECKED : BST_UNCHECKED,0);
         }
         ui->sessionPregaps = ctl(ui,ui->window,L"BUTTON",L"包含多会话首轨 INDEX 00",WS_TABSTOP | BS_AUTOCHECKBOX,UI_SESSION_PREGAPS,18,mode == GUI_READ ? 168 : 145,300,22); SendMessageW(ui->sessionPregaps,BM_SETCHECK,ui->includeSessionPregaps ? BST_CHECKED : BST_UNCHECKED,0);
     } else if (mode == GUI_DISCOVERY) {
@@ -301,7 +301,7 @@ static void gui_source(GuiWindow* ui, bool folder) {
 static GuiJob* gui_job(GuiWindow* ui, GuiOperation operation, const GuiPath* paths, size_t count) {
     GuiJob* job = (GuiJob*)calloc(1, sizeof(*job)); if (!job) return NULL;
     const wchar_t* readExtension = wcsrchr(ui->readImage,L'.'); job->readCdText = operation == GUI_READ_DISC && ui->readCdText && readExtension && !_wcsicmp(readExtension,L".cue");
-    if (operation == GUI_READ_DISC && readExtension && !_wcsicmp(readExtension,L".mds")) { job->rawCdMds = ui->rawCdMds; if (!job->rawCdMds) job->readSplitSectors = readSplitMiB[ui->readSplitChoice] * 512; }
+    if (operation == GUI_READ_DISC && readExtension && !_wcsicmp(readExtension,L".mds")) { job->rawCdMds = ui->rawCdMds; job->readSplitSectors = (uint32_t)((uint64_t)readSplitMiB[ui->readSplitChoice] * 1048576 / (job->rawCdMds ? 2352 : 2048)); }
     if (operation == GUI_READ_DISC) job->includeSessionPregaps = ui->includeSessionPregaps && readExtension && !_wcsicmp(readExtension,L".cue");
     if (operation == GUI_VERIFY_DISC) { const wchar_t* extension = wcsrchr(ui->sourceImage,L'.'); job->includeSessionPregaps = ui->includeSessionPregaps && (!ui->verifyAgainstImage || (extension && !_wcsicmp(extension,L".cue"))); }
     job->sources = (GuiPath*)calloc(count, sizeof(*paths)); job->cancel = CreateEventW(NULL, TRUE, FALSE, NULL);

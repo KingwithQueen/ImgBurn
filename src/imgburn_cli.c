@@ -454,19 +454,20 @@ static BOOL WINAPI cli_read_control(DWORD type) {
 }
 static int cmd_read(int argc, char** argv) {
     if (argc < 4) { printf("Usage: imgburn read <drive> <out.iso|out.mds|out.cue> [--retries <0..20>] [--replace] [--cdtext] [--split <MiB>] [--raw-cd] [--session-pregaps]\n"); return 1; }
-    ReadConfig config = {0}; config.retryCount = 20;
+    ReadConfig config = {0}; config.retryCount = 20; uint32_t splitMiB = 0;
     for (int i = 4; i < argc; i++) {
         if (!_stricmp(argv[i],"--replace")) config.replaceExisting = true;
         else if (!_stricmp(argv[i],"--cdtext")) config.readCdText = true;
         else if (!_stricmp(argv[i],"--raw-cd")) config.rawCdMds = true;
         else if (!_stricmp(argv[i],"--session-pregaps")) config.includeSessionPregaps = true;
-        else if (!_stricmp(argv[i],"--split") && i + 1 < argc) { char* end; const char* value = argv[++i]; unsigned long n = strtoul(value,&end,10); if (!value[0] || *end || n > UINT32_MAX / 512 || value[0] == '-') { printf("Error: Split size must be a whole MiB value from 0 to %u.\n",UINT32_MAX / 512); return 1; } config.splitSectors = (uint32_t)n * 512; }
+        else if (!_stricmp(argv[i],"--split") && i + 1 < argc) { char* end; const char* value = argv[++i]; unsigned long n = strtoul(value,&end,10); if (!value[0] || *end || n > UINT32_MAX / 512 || value[0] == '-') { printf("Error: Split size must be a whole MiB value from 0 to %u.\n",UINT32_MAX / 512); return 1; } splitMiB = (uint32_t)n; }
         else if (!_stricmp(argv[i],"--retries") && i + 1 < argc) { char* end; const char* value = argv[++i]; unsigned long n = strtoul(value,&end,10); if (!value[0] || *end || n > 20 || value[0] == '-') { printf("Error: Retry count must be 0..20.\n"); return 1; } config.retryCount = (unsigned)n; }
         else { printf("Error: Unknown or incomplete read option: %s\n",argv[i]); return 1; }
     }
     wchar_t device[MAX_PATH], image[MAX_PATH]; if (!parse_drive_path(argv[2],device,MAX_PATH) || !utf8_path(argv[3],image,MAX_PATH)) return 1;
     const wchar_t* extension = wcsrchr(image,L'.'); bool rawCd = extension && !_wcsicmp(extension,L".cue");
-    if (config.rawCdMds && (!extension || _wcsicmp(extension,L".mds") || config.splitSectors)) { printf("Error: --raw-cd requires an unsplit MDS destination.\n"); return 1; }
+    config.splitSectors = (uint32_t)((uint64_t)splitMiB * 1048576 / (config.rawCdMds ? 2352 : 2048));
+    if (config.rawCdMds && (!extension || _wcsicmp(extension,L".mds"))) { printf("Error: --raw-cd requires an MDS destination.\n"); return 1; }
     if (config.readCdText && !rawCd) { printf("Error: --cdtext requires a CUE destination.\n"); return 1; }
     if (config.includeSessionPregaps && !rawCd) { printf("Error: --session-pregaps requires a multi-session CUE destination.\n"); return 1; }
     if (config.splitSectors && (!extension || _wcsicmp(extension,L".mds"))) { printf("Error: --split requires an MDS destination.\n"); return 1; }

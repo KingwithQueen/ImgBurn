@@ -124,9 +124,9 @@ typedef struct {
     unsigned retryCount;            /* 单扇区额外重试次数，最多 20 次。 */
     bool replaceExisting;
     bool readCdText;                /* 显式读取并保留原始CD-TEXT；设备不支持时返回失败，不丢弃请求。 */
-    bool rawCdMds;                  /* MDS 显式选择 MODE1/2352；默认仍为 2048 字节数据。 */
+    bool rawCdMds;                  /* MDS 显式选择 MODE1/MODE2 的2352字节主通道；默认仍为2048字节数据。 */
     bool includeSessionPregaps;     /* 显式读取多会话首轨 Q 确认的 INDEX00；自动150帧保留在BIN未引用前缀。 */
-    uint32_t splitSectors;          /* MDS 配套数据每卷最多的 2048 字节扇区数，0 表示不分卷。 */
+    uint32_t splitSectors;          /* MDS 每卷最多的实际输出扇区数（2048或2352字节），0表示不分卷。 */
 } ReadConfig;
 
 bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callback, void* userData);
