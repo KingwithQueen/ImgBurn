@@ -80,6 +80,7 @@ static void print_usage(void) {
     printf("Burning & Verification Commands:\n");
     printf("  sector <drive> <lba|--last> [--raw|--raw-sub]\n");
     printf("                                 Inspect one sector as hexadecimal and ASCII\n");
+    printf("  cd-toc <drive>                Display complete CD sessions, tracks and lead-outs\n");
     printf("  read <drive> <out.iso|out.mds|out.cue> [--retries <0..20>] [--replace] [--cdtext] [--split <MiB>]\n");
     printf("                                 Read data ISO or raw CD BIN/CUE with Q indexes\n");
     printf("                                 MDS destination saves MODE1 CD or single/dual-layer DVD data files\n");
@@ -913,6 +914,25 @@ done:
     if (ok) printf("CD-TEXT exported successfully.\n"); else printf("Error: CD-TEXT export failed (%lu).\n",error); SetLastError(error); return ok ? 0 : 1;
 }
 
+static int cmd_cd_toc(int argc, char** argv) {
+    if (argc != 3) { printf("Usage: imgburn cd-toc <drive>\n"); return 1; }
+    wchar_t path[MAX_PATH]; if (!parse_drive_path(argv[2],path,MAX_PATH)) return 1;
+    OpticalDrive drive; if (!spti_open_drive(&drive,path,false)) { printf("Error: Cannot open source drive (%lu).\n",GetLastError()); return 1; }
+    MmcCdFullToc* toc = calloc(1,sizeof(*toc)); bool ok = false;
+    if (!toc) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto done; }
+    if (!mmc_test_unit_ready(&drive)) goto done;
+    MmcProfile profile = mmc_get_current_profile(&drive);
+    if (profile != MMC_PROFILE_CD_ROM && profile != MMC_PROFILE_CD_R && profile != MMC_PROFILE_CD_RW) { SetLastError(ERROR_NOT_SUPPORTED); goto done; }
+    if (!mmc_read_cd_full_toc(&drive,toc)) goto done;
+    printf("CD Full TOC: %u complete sessions, %u tracks; final lead-out LBA %u\n",toc->sessionCount,toc->trackCount,toc->leadOutLba);
+    for (unsigned i = 0; i < toc->sessionCount; i++) {
+        const MmcCdSession* session = &toc->sessions[i]; printf("  Session %u: tracks %u-%u, type 0x%02X, lead-out LBA %u\n",session->number,session->firstTrack,session->lastTrack,session->discType,session->leadOutLba);
+        for (unsigned j = 0; j < session->trackCount; j++) { const MmcCdTrack* track = &toc->tracks[session->firstTrackIndex + j]; printf("    Track %u: INDEX01 LBA %u, control 0x%X\n",track->number,track->startLba,track->control); }
+    }
+    ok = true;
+done:
+    if (!ok) printf("Error: Cannot read complete CD session layout (%lu).\n",GetLastError()); free(toc); spti_close_drive(&drive); return ok ? 0 : 1;
+}
 static int cmd_mds(const char* mdsFile) {
     wchar_t path[MAX_PATH];
     if (!utf8_path(mdsFile, path, MAX_PATH)) return 1;
@@ -961,6 +981,8 @@ static int run_cli(int argc, char **argv) {
         return cmd_verify(argc, argv);
     } else if (_stricmp(cmd, "sector") == 0) {
         return cmd_sector(argc,argv);
+    } else if (_stricmp(cmd, "cd-toc") == 0) {
+        return cmd_cd_toc(argc,argv);
     } else if (_stricmp(cmd, "booktype") == 0) {
         return cmd_booktype(argc, argv);
     } else if (_stricmp(cmd, "pioneer") == 0) {

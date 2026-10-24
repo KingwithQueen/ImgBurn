@@ -289,7 +289,14 @@ bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callbac
     MmcProfile profile = mmc_get_current_profile(drive); if (profile != MMC_PROFILE_CD_ROM && profile != MMC_PROFILE_CD_R && profile != MMC_PROFILE_CD_RW) return cd_fail(&stats,ERROR_NOT_SUPPORTED,callback,context);
     CdReadPlan* plan = calloc(1,sizeof(*plan)); uint8_t* data = malloc(27 * 2368); HANDLE output = INVALID_HANDLE_VALUE, textOutput = INVALID_HANDLE_VALUE; bool created = false, textCreated = false, success = false, idWarning = false; DWORD error = ERROR_SUCCESS;
     if (!plan || !data) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
-    if (!mmc_read_cd_toc(drive,&plan->toc)) { error = cd_error(drive); goto done; }
+    if (!mmc_read_cd_toc(drive,&plan->toc)) {
+        error = cd_error(drive);
+        if (error == ERROR_NOT_SUPPORTED) {
+            MmcCdFullToc full;
+            if (mmc_read_cd_full_toc(drive,&full)) { snprintf(stats.statusMessage,sizeof(stats.statusMessage),"CD has %u complete sessions and %u tracks; multi-session CUE output is not yet supported.",full.sessionCount,full.trackCount); if (callback) callback(&stats,context); }
+        }
+        goto done;
+    }
     if (plan->toc.leadOutLba > 100 * 60 * 75 - 150) { error = ERROR_NOT_SUPPORTED; goto done; }
     stats.totalSectors = plan->toc.leadOutLba;
     if (config->readCdText && (!cd_read_text(drive,&plan->cdText) || !cd_text_metadata(plan))) { error = GetLastError(); goto done; }
@@ -447,6 +454,41 @@ static bool cd_verify_read(const CdVerifySpan* span, uint32_t lba, uint16_t coun
     return true;
 }
 
+static bool cd_full_toc_equal(const MmcCdFullToc* first, const MmcCdFullToc* second) {
+    return first->sessionCount == second->sessionCount && first->trackCount == second->trackCount && first->leadOutLba == second->leadOutLba && !memcmp(first->sessions,second->sessions,first->sessionCount * sizeof(*first->sessions)) && !memcmp(first->tracks,second->tracks,first->trackCount * sizeof(*first->tracks));
+}
+static bool cd_verify_sessions(const VerifyConfig* config, MmcProfile profile, PipelineProgressCallback callback, void* context) {
+    PipelineStats stats = {0}; MmcCdFullToc* toc = calloc(2,sizeof(*toc)); uint8_t* data = malloc(27 * 2352); DWORD error = ERROR_SUCCESS; bool success = false;
+    if (!toc || !data) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
+    if (!mmc_read_cd_full_toc(config->drive,toc)) { error = cd_error(config->drive); goto done; }
+    if (toc->sessionCount < 2) { error = ERROR_MEDIA_CHANGED; goto done; }
+    /* Full TOC 不声明 INDEX00；只检查每会话首个 INDEX01 至 A2 之间的轨道数据区。 */
+    for (unsigned i = 0; i < toc->sessionCount; i++) stats.totalSectors += toc->sessions[i].leadOutLba - toc->tracks[toc->sessions[i].firstTrackIndex].startLba;
+    ReadConfig reader = {0}; reader.drive = config->drive; reader.cancelEvent = config->cancelEvent; reader.retryCount = config->retryCount;
+    ULONGLONG started = GetTickCount64(); stats.state = PIPELINE_STATE_VERIFYING;
+    for (unsigned i = 0; i < toc->sessionCount; i++) {
+        const MmcCdSession* session = &toc->sessions[i]; uint32_t start = toc->tracks[session->firstTrackIndex].startLba;
+        for (uint32_t lba = start; lba < session->leadOutLba;) {
+            snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Checking CD session %u/%u, LBA %u (INDEX01 to lead-out)...",session->number,toc->sessionCount,lba); if (callback) callback(&stats,context);
+            if (cd_cancelled(&reader)) { error = ERROR_CANCELLED; goto done; }
+            uint16_t count = (uint16_t)(session->leadOutLba - lba < 27 ? session->leadOutLba - lba : 27);
+            if (!cd_read(&reader,lba,count,data,false,&stats)) { error = cd_cancelled(&reader) ? ERROR_CANCELLED : cd_error(config->drive); goto done; }
+            lba += count; stats.readableOnlySectors += count; stats.currentLba = stats.readableOnlySectors; stats.progressPercent = (int)((uint64_t)stats.currentLba * 99 / stats.totalSectors);
+            ULONGLONG elapsed = GetTickCount64() - started; stats.elapsedTimeSec = (uint32_t)(elapsed / 1000);
+            if (elapsed) { stats.currentSpeedKBps = (double)stats.currentLba * 2296.875 / elapsed; stats.speedMultiplier = stats.currentSpeedKBps / 150; stats.remainingTimeSec = (uint32_t)((stats.totalSectors - stats.currentLba) * 2.296875 / stats.currentSpeedKBps); }
+            if (callback) callback(&stats,context);
+        }
+    }
+    if (cd_cancelled(&reader)) { error = ERROR_CANCELLED; goto done; }
+    if (!mmc_test_unit_ready(config->drive) || !mmc_read_cd_full_toc(config->drive,toc + 1)) { error = cd_error(config->drive); goto done; }
+    if (mmc_get_current_profile(config->drive) != profile || !cd_full_toc_equal(toc,toc + 1)) { error = ERROR_MEDIA_CHANGED; goto done; } success = true;
+done:
+    free(toc); free(data); stats.state = success ? PIPELINE_STATE_COMPLETED : error == ERROR_CANCELLED ? PIPELINE_STATE_ABORTED : PIPELINE_STATE_FAILED;
+    if (success) { stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"CD session data readability passed: %u sectors; session gaps excluded.",stats.readableOnlySectors); }
+    else snprintf(stats.statusMessage,sizeof(stats.statusMessage),"CD session readability did not complete (error %lu).",error);
+    if (callback) callback(&stats,context); SetLastError(success ? ERROR_SUCCESS : error); return success;
+}
+
 bool pipeline_verify_cd(const VerifyConfig* config, PipelineProgressCallback callback, void* context) {
     PipelineStats stats = {0}; DWORD error = ERROR_SUCCESS; bool success = false; HANDLE descriptor = INVALID_HANDLE_VALUE; CdVerifyImage* image = NULL; uint8_t* data = NULL; uint8_t* reference = NULL;
     if (!config || !config->drive || config->retryCount > 20) { error = ERROR_INVALID_PARAMETER; goto verify_done; }
@@ -466,7 +508,9 @@ bool pipeline_verify_cd(const VerifyConfig* config, PipelineProgressCallback cal
     if (cd_cancelled(&reader)) { error = ERROR_CANCELLED; goto verify_done; }
     OpticalDrive* drive = config->drive; if (!mmc_test_unit_ready(drive)) { error = cd_error(drive); goto verify_done; }
     MmcProfile profile = mmc_get_current_profile(drive); if (profile != MMC_PROFILE_CD_ROM && profile != MMC_PROFILE_CD_R && profile != MMC_PROFILE_CD_RW) { error = ERROR_NOT_SUPPORTED; goto verify_done; }
-    MmcCdToc discToc; if (!mmc_read_cd_toc(drive,&discToc)) { error = cd_error(drive); goto verify_done; } stats.totalSectors = discToc.leadOutLba;
+    MmcCdToc discToc; if (!mmc_read_cd_toc(drive,&discToc)) {
+        error = cd_error(drive); if (!compare && error == ERROR_NOT_SUPPORTED) return cd_verify_sessions(config,profile,callback,context); goto verify_done;
+    } stats.totalSectors = discToc.leadOutLba;
     if (compare) {
         if (image->sheet.trackCount != (int)discToc.trackCount || image->sheet.totalSectors != discToc.leadOutLba) { error = ERROR_INVALID_DATA; goto verify_done; }
         for (unsigned i = 0; i < discToc.trackCount; i++) if (image->sheet.tracks[i].startLba != discToc.tracks[i].startLba || image->spans[i].audio == ((discToc.tracks[i].control & 4) != 0)) { error = ERROR_INVALID_DATA; goto verify_done; }

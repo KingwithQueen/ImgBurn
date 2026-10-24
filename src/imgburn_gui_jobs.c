@@ -136,7 +136,14 @@ static bool job_drive(GuiJob* job) {
         if (ready && mmc_read_capacity(&drive, &last, &bytes)) job_text(job, L"容量：%llu 扇区，每扇区 %u 字节\r\n", (uint64_t)last + 1, bytes);
         if (ready && mmc_get_current_profile(&drive) == MMC_PROFILE_DVD_R_SEQ) { MmcDvdWriteFeatures features; if (mmc_get_dvd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
         if (ready && mmc_get_current_profile(&drive) == MMC_PROFILE_CD_R) { MmcCdWriteFeatures features; if (mmc_get_cd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
-        if (ready) { MmcDiscInfo disc; if (mmc_read_disc_information(&drive,&disc)) job->eraseSupported = disc.isErasable && (disc.currentProfile == MMC_PROFILE_CD_RW || disc.currentProfile == MMC_PROFILE_DVD_RW_SEQ || disc.currentProfile == MMC_PROFILE_DVD_RW_RO); }
+        if (ready) { MmcDiscInfo disc; if (mmc_read_disc_information(&drive,&disc)) {
+            job->eraseSupported = disc.isErasable && (disc.currentProfile == MMC_PROFILE_CD_RW || disc.currentProfile == MMC_PROFILE_DVD_RW_SEQ || disc.currentProfile == MMC_PROFILE_DVD_RW_RO);
+            if (disc.currentProfile >= MMC_PROFILE_CD_ROM && disc.currentProfile <= MMC_PROFILE_CD_RW && disc.numSessions > 1) {
+                MmcCdFullToc* toc = calloc(1,sizeof(*toc));
+                if (toc && mmc_read_cd_full_toc(&drive,toc)) for (unsigned i = 0; i < toc->sessionCount; i++) { const MmcCdSession* session = &toc->sessions[i]; job_text(job,L"会话 %u：轨道 %u–%u，首轨 LBA %u，lead-out LBA %u。\r\n",session->number,session->firstTrack,session->lastTrack,toc->tracks[session->firstTrackIndex].startLba,session->leadOutLba); }
+                else job_text(job,L"无法读取完整 CD 会话结构。\r\n"); free(toc);
+            }
+        } }
         if (ready) pipeline_discovery_capacity(&drive,&job->discoveryCapacity);
     } else if (!ready) SetLastError(ERROR_NOT_READY);
     else if (job->operation == GUI_READ_DISC) {

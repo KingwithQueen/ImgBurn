@@ -589,6 +589,63 @@ invalid:
     memset(toc,0,sizeof(*toc)); drive->lastError = ERROR_INVALID_DATA; SetLastError(ERROR_INVALID_DATA); return false;
 }
 
+static bool mmc_full_toc_lba(const uint8_t* msf, uint32_t* lba) {
+    /* Full TOC 返回二进制 MSF，不沿用逐扇区 Q 的 BCD 解码。 */
+    if (msf[0] >= 100 || msf[1] >= 60 || msf[2] >= 75) return false;
+    uint32_t frames = ((uint32_t)msf[0] * 60 + msf[1]) * 75 + msf[2];
+    if (frames < 150) return false; *lba = frames - 150; return true;
+}
+bool mmc_read_cd_full_toc(OpticalDrive* drive, MmcCdFullToc* toc) {
+    if (!toc) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER); memset(toc,0,sizeof(*toc));
+    uint8_t cdb[10] = {0x43,2,2,0,0,0,1}, header[4] = {0}; write_be16(cdb + 7,sizeof(header));
+    if (!spti_send_cdb(drive,cdb,10,header,sizeof(header),true,10)) return false;
+    if (drive->lastTransferBytes != sizeof(header)) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
+    unsigned bytes = (unsigned)read_be16(header) + 2;
+    if (bytes < 48 || bytes > UINT16_MAX || (bytes - 4) % 11 || header[2] != 1 || !header[3] || header[3] > 99) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+    uint8_t* data = malloc(bytes); if (!data) return mmc_write_parameter_error(drive,ERROR_NOT_ENOUGH_MEMORY);
+    memset(data,0,bytes); write_be16(cdb + 7,(uint16_t)bytes);
+    if (!spti_send_cdb(drive,cdb,10,data,bytes,true,10)) { free(data); return false; }
+    if (drive->lastTransferBytes != bytes) { free(data); return mmc_write_parameter_error(drive,ERROR_READ_FAULT); }
+    MmcCdFullToc parsed = {0}; MmcCdTrack numbered[99] = {0}; uint8_t owner[99] = {0}, seen[99] = {0}; unsigned previousSession = 0;
+    if (memcmp(header,data,sizeof(header))) goto invalid_full;
+    parsed.sessionCount = data[3];
+    for (unsigned offset = 4; offset < bytes; offset += 11) {
+        const uint8_t* entry = data + offset; unsigned session = entry[0], point = entry[3], adr = entry[1] >> 4;
+        if (adr != 1 || (!point || (point > 99 && point != 0xA0 && point != 0xA1 && point != 0xA2))) continue;
+        if (!session || session > parsed.sessionCount || session < previousSession) goto invalid_full; previousSession = session;
+        if (entry[2] || entry[7]) goto invalid_full;
+        MmcCdSession* target = &parsed.sessions[session - 1]; target->number = (uint8_t)session;
+        if (point == 0xA0 || point == 0xA1) {
+            unsigned flag = point == 0xA0 ? 1 : 2;
+            if ((seen[session - 1] & flag) || !entry[8] || entry[8] > 99 || entry[10] || (point == 0xA1 && entry[9])) goto invalid_full;
+            seen[session - 1] |= (uint8_t)flag;
+            if (point == 0xA0) { target->firstTrack = entry[8]; target->discType = entry[9]; } else target->lastTrack = entry[8];
+        } else if (point == 0xA2) {
+            if ((seen[session - 1] & 4) || !mmc_full_toc_lba(entry + 8,&target->leadOutLba)) goto invalid_full; seen[session - 1] |= 4;
+        } else {
+            if (owner[point - 1] || !mmc_full_toc_lba(entry + 8,&numbered[point - 1].startLba)) goto invalid_full;
+            owner[point - 1] = (uint8_t)session; numbered[point - 1].number = (uint8_t)point; numbered[point - 1].control = entry[1] & 15;
+        }
+    }
+    unsigned previousTrack = 0; uint32_t previousLeadOut = 0;
+    for (unsigned i = 0; i < parsed.sessionCount; i++) {
+        MmcCdSession* session = &parsed.sessions[i];
+        if (seen[i] != 7 || session->firstTrack > session->lastTrack || (previousTrack && session->firstTrack != previousTrack + 1)) goto invalid_full;
+        session->firstTrackIndex = parsed.trackCount; session->trackCount = (unsigned)session->lastTrack - session->firstTrack + 1;
+        if (session->trackCount > 99 - parsed.trackCount) goto invalid_full;
+        for (unsigned number = session->firstTrack; number <= session->lastTrack; number++) {
+            MmcCdTrack* track = &numbered[number - 1];
+            if (owner[number - 1] != i + 1 || (number == session->firstTrack ? track->startLba < previousLeadOut : track->startLba <= parsed.tracks[parsed.trackCount - 1].startLba) || track->startLba >= session->leadOutLba) goto invalid_full;
+            parsed.tracks[parsed.trackCount++] = *track; previousTrack = number;
+        }
+        previousLeadOut = session->leadOutLba;
+    }
+    for (unsigned number = 0; number < 99; number++) if (owner[number] && (number + 1 < parsed.sessions[owner[number] - 1].firstTrack || number + 1 > parsed.sessions[owner[number] - 1].lastTrack)) goto invalid_full;
+    parsed.leadOutLba = previousLeadOut; *toc = parsed; free(data); drive->lastError = ERROR_SUCCESS; SetLastError(ERROR_SUCCESS); return true;
+invalid_full:
+    free(data); return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+}
+
 static bool mmc_read_cd_transfer(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer, unsigned subChannel) {
     uint32_t stride = subChannel == 1 ? 2448 : subChannel == 2 ? 2368 : 2352;
     if (!buffer || !count || subChannel > 2 || count > 65536 / stride || lba > UINT32_MAX - ((uint32_t)count - 1)) { if (drive) drive->lastError = ERROR_INVALID_PARAMETER; SetLastError(ERROR_INVALID_PARAMETER); return false; }

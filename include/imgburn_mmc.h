@@ -215,6 +215,11 @@ bool mmc_check_iso_cd(OpticalDrive* drive, uint32_t sectors);
 typedef struct { uint32_t startLba; uint8_t number, control; } MmcCdTrack;
 typedef struct { unsigned trackCount; uint32_t leadOutLba; MmcCdTrack tracks[99]; } MmcCdToc;
 
+/* Full TOC 保留每个完整会话的轨道范围和独立导出区，轨道索引指向下面的统一数组。 */
+typedef struct { uint32_t leadOutLba; unsigned firstTrackIndex, trackCount; uint8_t number, firstTrack, lastTrack, discType; } MmcCdSession;
+typedef struct { unsigned sessionCount, trackCount; uint32_t leadOutLba; MmcCdSession sessions[99]; MmcCdTrack tracks[99]; } MmcCdFullToc;
+bool mmc_read_cd_full_toc(OpticalDrive* drive, MmcCdFullToc* toc);
+
 /* 单会话 CD 的完整 TOC；READ CD 同时返回原始主通道与格式化 Q。 */
 bool mmc_read_cd_toc(OpticalDrive* drive, MmcCdToc* toc);
 /* 返回去除READ TOC头的18字节CD-TEXT包；无文本时成功返回NULL和0，调用者用free释放。 */

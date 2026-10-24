@@ -326,7 +326,8 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
         uint32_t origin = first || initial->indices[0].indexNumber == 0 ? initial->indices[0].lba : 0;
         if (initial->sessionNumber != previousSession) {
             total += (uint64_t)sheet->sessionLeadOut[previousSession - 1] + sheet->sessionLeadIn[initial->sessionNumber - 1];
-            if (!initial->pregapSectors && initial->indexCount && initial->indices[0].indexNumber == 1 && !initial->indices[0].lba) total += 150;
+            /* 新FILE的会话首轨自动暂停与FILE裁剪、显式PREGAP及存储INDEX00独立。 */
+            total += 150;
             previousSession = initial->sessionNumber;
         }
         uint64_t sourceBytes; uint32_t cached = initial->sourceType >= CUE_FILE_WAVE ? decodedHints[groups[first]] : 0;
