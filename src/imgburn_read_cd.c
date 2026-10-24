@@ -14,12 +14,12 @@
 
 typedef struct {
     uint32_t indices[100], oldGapLast, newGapFirst, copySamples, copyTransitions;
-    bool present[100], seen, modeKnown, oldGapSeen, newGapSeen, gapModeKnown, scms;
+    bool present[100], seen, modeKnown, oldGapSeen, newGapSeen, gapModeKnown, scms, sessionFirst;
     unsigned lastIndex, mode, gapMode, copyValues, oldCopyValues, copyPhases, lastCopy;
     char isrc[13], queriedIsrc[13];
 } CdReadTrack;
 typedef struct {
-    MmcCdToc toc; CdReadTrack tracks[99]; unsigned lastTrack; uint32_t lastPosition; bool positioned; CdText cdText; CueSheet* metadata;
+    MmcCdToc toc; CdReadTrack tracks[99]; unsigned lastTrack; uint32_t lastPosition, sessionStarts[99]; bool positioned; CdText cdText; CueSheet* metadata;
     char catalog[14], queriedCatalog[14], pendingIsrc[13]; unsigned pendingTrack, captureFirstTrack; uint32_t captureStart; bool pendingConflict, idWarning;
 } CdReadPlan;
 static bool cd_cancelled(const ReadConfig* config) { return config->cancelEvent && WaitForSingleObject(config->cancelEvent,0) == WAIT_OBJECT_0; }
@@ -57,6 +57,33 @@ static bool cd_identifier_merge(char* target, const char* value) {
     if (!value[0]) return true;
     if (target[0] && strcmp(target,value)) { SetLastError(ERROR_INVALID_DATA); return false; }
     strcpy(target,value); return true;
+}
+static bool cd_find_session_index00(const ReadConfig* config, const MmcCdFullToc* full, unsigned sessionIndex, PipelineStats* stats, uint32_t* start, PipelineProgressCallback callback, void* context) {
+    if (!config || !full || !stats || !start || !sessionIndex || sessionIndex >= full->sessionCount) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    const MmcCdSession* session = &full->sessions[sessionIndex]; const MmcCdTrack* first = &full->tracks[session->firstTrackIndex];
+    uint32_t lower = full->sessions[sessionIndex - 1].leadOutLba, found = first->startLba; bool seen = false, unlocated = false; uint8_t data[2368];
+    for (uint32_t lba = first->startLba; lba > lower;) {
+        lba--;
+        if ((first->startLba - lba - 1) % 27 == 0) { snprintf(stats->statusMessage,sizeof(stats->statusMessage),"Locating CD session %u INDEX00 from Q, LBA %u...",session->number,lba); if (callback) callback(stats,context); }
+        if (cd_cancelled(config)) { SetLastError(ERROR_CANCELLED); return false; }
+        if (!cd_read(config,lba,1,data,true,stats)) { SetLastError(cd_cancelled(config) ? ERROR_CANCELLED : cd_error(config->drive)); return false; }
+        const uint8_t* q = data + 2352; unsigned adr = q[0] & 15;
+        if (!cd_q_crc(q)) { SetLastError(ERROR_CRC); return false; }
+        if (adr == 2 || adr == 3) { unlocated = true; continue; }
+        if (adr != 1 || q[6]) { SetLastError(ERROR_INVALID_DATA); return false; }
+        /* 导入区的TNO为00，POINT载荷不是普通INDEX与绝对MSF；不能套轨道位置解析。 */
+        if (!q[1] || q[1] == 0xAA) {
+            if (!q[1] && q[2] != 0xA0 && q[2] != 0xA1 && q[2] != 0xA2) { int point = cd_bcd(q[2]); if (point < 1 || point > 99) { SetLastError(ERROR_NOT_SUPPORTED); return false; } }
+            if (q[1] == 0xAA) { uint32_t absolute; if (!cd_msf(q + 7,&absolute) || absolute != lba + 150) { SetLastError(ERROR_INVALID_DATA); return false; } }
+            if (!seen || unlocated) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+            *start = found; SetLastError(ERROR_SUCCESS); return true;
+        }
+        int number = cd_bcd(q[1]), index = cd_bcd(q[2]); uint32_t absolute, relative;
+        if (number != first->number || index || !cd_msf(q + 7,&absolute) || !cd_msf(q + 3,&relative) || absolute != lba + 150 || relative != first->startLba - lba || ((q[0] >> 4) & 13) != (first->control & 13)) { SetLastError(ERROR_INVALID_DATA); return false; }
+        found = lba; seen = true; unlocated = false;
+    }
+    /* 只有相邻的已定位Q能证明00起点；读失败或非位置Q都不能充当边界。 */
+    SetLastError(ERROR_NOT_SUPPORTED); return false;
 }
 static bool cd_identifier_query(const ReadConfig* config, CdReadPlan* plan, bool final) {
     for (unsigned i = 0; i <= plan->toc.trackCount; i++) {
@@ -129,7 +156,7 @@ static bool cd_capture_complete(CdReadPlan* plan) {
     for (unsigned i = 0; i < plan->toc.trackCount; i++) {
         CdReadTrack* track = &plan->tracks[i]; unsigned control = plan->toc.tracks[i].control;
         if (!track->seen || !track->modeKnown || !track->copySamples) goto invalid;
-        bool extended = i && (control & 4) && track->oldGapSeen && (((control ^ plan->toc.tracks[i - 1].control) & 13) || track->mode != plan->tracks[i - 1].mode);
+        bool extended = i && !track->sessionFirst && (control & 4) && track->oldGapSeen && (((control ^ plan->toc.tracks[i - 1].control) & 13) || track->mode != plan->tracks[i - 1].mode);
         if (extended) {
             uint32_t start = plan->toc.tracks[i].startLba;
             if (!track->present[0] || start - track->indices[0] < 225 || !track->oldGapSeen || !track->newGapSeen || track->oldGapLast != start - 151 || track->newGapFirst != start - 150) goto unsupported;
@@ -170,7 +197,7 @@ static bool cd_capture(CdReadPlan* plan, uint32_t lba, const uint8_t* data) {
     }
     unsigned control = q[0] >> 4, expected = plan->toc.tracks[track].control;
     bool oldGap = false;
-    if (!index && track && (expected & 4) && start - current->indices[0] >= 225 && lba < start - 150) {
+    if (!index && track && !current->sessionFirst && (expected & 4) && start - current->indices[0] >= 225 && lba < start - 150) {
         unsigned previous = plan->toc.tracks[track - 1].control;
         /* 只有实际保持前轨结构的帧才进入扩展例外；普通长间隙可以始终保持当前结构。 */
         oldGap = (control & 13) == (previous & 13) && plan->tracks[track - 1].modeKnown && (!(previous & 4) || cd_frame_mode(data) == plan->tracks[track - 1].mode);
@@ -254,7 +281,7 @@ static bool cd_publish(const ReadConfig* config, const CdReadPlan* plan, const w
     unsigned sessionIndex = 0; uint32_t origin = 0;
     for (unsigned i = 0; ok && i < plan->toc.trackCount; i++) {
         if (full && i == full->sessions[sessionIndex].firstTrackIndex) {
-            const MmcCdSession* session = &full->sessions[sessionIndex]; origin = full->tracks[i].startLba;
+            const MmcCdSession* session = &full->sessions[sessionIndex]; origin = plan->sessionStarts[sessionIndex];
             const wchar_t* partName = wcsrchr(binaries[sessionIndex],L'\\');
             if (!partName || !WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,partName + 1,-1,fileName,sizeof(fileName),NULL,NULL)) { ok = false; break; }
             ok = cd_append(text,&used,"REM SESSION %u\r\n",session->number);
@@ -269,7 +296,14 @@ static bool cd_publish(const ReadConfig* config, const CdReadPlan* plan, const w
         }
         if (ok && ((control & 11) || t->scms)) ok = cd_append(text,&used,"    FLAGS%s%s%s%s\r\n",!t->scms && (control & 2) ? " DCP" : "",control & 1 ? " PRE" : "",control & 8 ? " 4CH" : "",t->scms ? " SCMS" : "");
         if (ok && t->isrc[0]) ok = cd_append(text,&used,"    ISRC %s\r\n",t->isrc);
-        for (unsigned j = 0; ok && j < 100; j++) if (t->present[j]) { uint32_t lba = t->indices[j] - origin; ok = cd_append(text,&used,"    INDEX %02u %02u:%02u:%02u\r\n",j,lba / 4500,lba / 75 % 60,lba % 75); }
+        for (unsigned j = 0; ok && j < 100; j++) if (t->present[j]) {
+            uint32_t lba = t->indices[j] - origin;
+            if (config->includeSessionPregaps && full && sessionIndex && i == full->sessions[sessionIndex].firstTrackIndex && !j) {
+                /* 每会话自动暂停150帧由原版生成；BIN保留全部00，前150帧不作CUE引用。 */
+                if (t->indices[1] - origin == 150) continue; lba = 150;
+            }
+            ok = cd_append(text,&used,"    INDEX %02u %02u:%02u:%02u\r\n",j,lba / 4500,lba / 75 % 60,lba % 75);
+        }
         if (full && i + 1 == full->sessions[sessionIndex].firstTrackIndex + full->sessions[sessionIndex].trackCount) {
             uint32_t end = full->sessions[sessionIndex].leadOutLba - origin;
             if (ok) ok = cd_append(text,&used,"REM LEAD-OUT %02u:%02u:%02u\r\n",end / 4500,end / 75 % 60,end % 75);
@@ -328,7 +362,7 @@ bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callbac
     if (cd_cancelled(config)) return cd_fail(&stats,ERROR_CANCELLED,callback,context);
     wchar_t destination[MAX_PATH] = L"", textPath[MAX_PATH] = L"", parent[MAX_PATH]; if (!cd_target(config->imagePath,destination,config->replaceExisting)) return cd_fail(&stats,GetLastError(),callback,context);
     bool mds = !_wcsicmp(wcsrchr(destination,L'.'),L".mds");
-    if (mds && config->readCdText) return cd_fail(&stats,ERROR_NOT_SUPPORTED,callback,context);
+    if (mds && (config->readCdText || config->includeSessionPregaps)) return cd_fail(&stats,ERROR_NOT_SUPPORTED,callback,context);
     stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Inspecting raw CD layout..."); if (callback) callback(&stats,context);
     OpticalDrive* drive = config->drive; if (!mmc_test_unit_ready(drive)) return cd_fail(&stats,cd_error(drive),callback,context);
     MmcProfile profile = mmc_get_current_profile(drive); if (profile != MMC_PROFILE_CD_ROM && profile != MMC_PROFILE_CD_R && profile != MMC_PROFILE_CD_RW) return cd_fail(&stats,ERROR_NOT_SUPPORTED,callback,context);
@@ -340,20 +374,31 @@ bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callbac
         full = calloc(2,sizeof(*full)); if (!full) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
         if (!mmc_read_cd_full_toc(drive,full)) { error = cd_error(drive); goto done; }
         if (full->sessionCount < 2 || full->tracks[0].startLba) { error = ERROR_NOT_SUPPORTED; goto done; }
-        /* 每会话独立FILE，只保存首INDEX01至A2；仅导出已获原版对照的默认会话间隔。 */
+        /* 默认只保存首INDEX01至A2；显式保留会话00时由实际Q确定起点。 */
         for (unsigned i = 1; i < full->sessionCount; i++) {
             uint32_t first = full->tracks[full->sessions[i].firstTrackIndex].startLba, previous = full->sessions[i - 1].leadOutLba;
-            if (first - previous != (i == 1 ? 11400u : 6900u)) { error = ERROR_NOT_SUPPORTED; goto done; }
+            if (!config->includeSessionPregaps && first - previous != (i == 1 ? 11400u : 6900u)) { error = ERROR_NOT_SUPPORTED; goto done; }
         }
         plan->toc.trackCount = full->trackCount; plan->toc.leadOutLba = full->leadOutLba; memcpy(plan->toc.tracks,full->tracks,full->trackCount * sizeof(*full->tracks)); partCount = full->sessionCount;
     }
     if (plan->toc.leadOutLba > 100 * 60 * 75 - 150 || (mds && (plan->toc.trackCount != 1 || plan->toc.tracks[0].startLba || plan->toc.tracks[0].control != 4))) { error = ERROR_NOT_SUPPORTED; goto done; }
-    if (full) for (unsigned i = 0; i < partCount; i++) stats.totalSectors += full->sessions[i].leadOutLba - full->tracks[full->sessions[i].firstTrackIndex].startLba;
-    else stats.totalSectors = plan->toc.leadOutLba;
+    if (config->includeSessionPregaps && !full) { error = ERROR_NOT_SUPPORTED; goto done; }
     if (config->readCdText && (!cd_read_text(drive,&plan->cdText) || !cd_text_metadata(plan))) { error = GetLastError(); goto done; }
     if (!cd_identifier_query(config,plan,false)) { error = GetLastError(); goto done; }
     if (mds && plan->catalog[0]) { error = ERROR_NOT_SUPPORTED; goto done; }
     if (cd_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
+    if (full) for (unsigned i = 0; i < partCount; i++) {
+        const MmcCdSession* session = &full->sessions[i]; uint32_t first = full->tracks[session->firstTrackIndex].startLba;
+        plan->sessionStarts[i] = first; plan->tracks[session->firstTrackIndex].sessionFirst = true;
+        if (config->includeSessionPregaps && i) {
+            snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Locating CD session %u INDEX00 from Q...",session->number); if (callback) callback(&stats,context);
+            if (!cd_find_session_index00(config,full,i,&stats,&plan->sessionStarts[i],callback,context)) { error = GetLastError(); goto done; }
+            uint32_t expected = full->sessions[i - 1].leadOutLba + (i == 1 ? 6750u : 2250u) + 4500;
+            if (plan->sessionStarts[i] != expected || first - plan->sessionStarts[i] < 150) { error = ERROR_NOT_SUPPORTED; goto done; }
+        }
+        stats.totalSectors += session->leadOutLba - plan->sessionStarts[i];
+    }
+    else stats.totalSectors = plan->toc.leadOutLba;
     for (unsigned i = 0; i < plan->toc.trackCount; i++) { plan->tracks[i].indices[1] = plan->toc.tracks[i].startLba; plan->tracks[i].present[1] = true; plan->tracks[i].modeKnown = !(plan->toc.tracks[i].control & 4); }
     wcscpy(parent,destination); wchar_t* slash = wcsrchr(parent,L'\\'); if (!slash) { error = ERROR_INVALID_NAME; goto done; } slash[1] = 0;
     ULARGE_INTEGER available; if (!GetDiskFreeSpaceExW(parent,&available,NULL,NULL)) { error = GetLastError(); goto done; }
@@ -376,10 +421,10 @@ bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callbac
     if (!outputs[partCount - 1].created) goto done;
     stats.state = PIPELINE_STATE_READING; ULONGLONG started = GetTickCount64(); snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Reading raw CD and Q indexes..."); if (callback) callback(&stats,context);
     for (unsigned part = 0; part < partCount; part++) {
-        uint32_t first = full ? full->tracks[full->sessions[part].firstTrackIndex].startLba : 0, end = full ? full->sessions[part].leadOutLba : plan->toc.leadOutLba;
+        uint32_t first = full ? plan->sessionStarts[part] : 0, end = full ? full->sessions[part].leadOutLba : plan->toc.leadOutLba;
         if (full) { plan->positioned = false; plan->captureFirstTrack = full->sessions[part].firstTrack; plan->captureStart = first; if (!cd_resolve_isrc(plan,0)) { error = GetLastError(); goto done; } }
         for (uint32_t lba = first; lba < end;) {
-            if (full) { snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Reading CD session %u/%u, LBA %u (INDEX01 to lead-out)...",part + 1,partCount,lba); if (callback) callback(&stats,context); }
+            if (full) { snprintf(stats.statusMessage,sizeof(stats.statusMessage),config->includeSessionPregaps && part ? "Reading CD session %u/%u, LBA %u (INDEX00 to lead-out)..." : "Reading CD session %u/%u, LBA %u (INDEX01 to lead-out)...",part + 1,partCount,lba); if (callback) callback(&stats,context); }
             if (cd_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
             uint16_t count = (uint16_t)(end - lba < 27 ? end - lba : 27);
             if (!cd_read(config,lba,count,data,true,&stats)) { error = cd_cancelled(config) ? ERROR_CANCELLED : cd_error(drive); goto done; }
@@ -438,7 +483,7 @@ done:
     if (plan) { imgburn_cdtext_free(&plan->cdText); free(plan->metadata); } free(data); free(binaries); free(full); free(plan);
     if (!success) return cd_fail(&stats,error,callback,context);
     stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; stats.remainingTimeSec = 0;
-    if (partCount > 1) snprintf(stats.statusMessage,sizeof(stats.statusMessage),"CD session data read; gaps and session-first INDEX00 excluded.%s",idWarning ? " Invalid MCN/ISRC ignored." : "");
+    if (partCount > 1) snprintf(stats.statusMessage,sizeof(stats.statusMessage),config->includeSessionPregaps ? "CD sessions and INDEX00 read; each session BIN retains 150 unreferenced pause frames.%s" : "CD session data read; gaps and session-first INDEX00 excluded.%s",idWarning ? " Invalid MCN/ISRC ignored." : "");
     else snprintf(stats.statusMessage,sizeof(stats.statusMessage),idWarning ? "Raw CD image read; invalid MCN/ISRC samples ignored." : "Raw CD image read successfully.");
     if (callback) callback(&stats,context); SetLastError(ERROR_SUCCESS); return true;
 }
@@ -590,6 +635,7 @@ static bool cd_full_toc_equal(const MmcCdFullToc* first, const MmcCdFullToc* sec
 }
 static bool cd_verify_sessions(const VerifyConfig* config, MmcProfile profile, CdVerifyImage* image, PipelineProgressCallback callback, void* context) {
     PipelineStats stats = {0}; MmcCdFullToc* toc = calloc(2,sizeof(*toc)); uint8_t* data = malloc(27 * 2352); uint8_t* reference = image ? malloc(27 * 2352) : NULL; DWORD error = ERROR_SUCCESS; bool success = false;
+    uint32_t starts[99] = {0};
     if (!toc || !data || (image && !reference)) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
     if (!mmc_read_cd_full_toc(config->drive,toc)) { error = cd_error(config->drive); goto done; }
     if (toc->sessionCount < 2) { error = ERROR_MEDIA_CHANGED; goto done; }
@@ -605,24 +651,34 @@ static bool cd_verify_sessions(const VerifyConfig* config, MmcProfile profile, C
             }
         }
     }
-    /* Full TOC 不声明 INDEX00；只检查每会话首个 INDEX01 至 A2 之间的轨道数据区。 */
-    for (unsigned i = 0; i < toc->sessionCount; i++) stats.totalSectors += toc->sessions[i].leadOutLba - toc->tracks[toc->sessions[i].firstTrackIndex].startLba;
     ReadConfig reader = {0}; reader.drive = config->drive; reader.cancelEvent = config->cancelEvent; reader.retryCount = config->retryCount;
+    /* Full TOC 只有 INDEX01；首00必须用实际 Q 确认，探测帧不计入完成进度。 */
+    for (unsigned i = 0; i < toc->sessionCount; i++) {
+        starts[i] = toc->tracks[toc->sessions[i].firstTrackIndex].startLba;
+        if (config->includeSessionPregaps && i) {
+            stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Locating session %u INDEX00 using Q...",i + 1); if (callback) callback(&stats,context);
+            if (!cd_find_session_index00(&reader,toc,i,&stats,&starts[i],callback,context)) { error = GetLastError(); goto done; }
+            if (image && (starts[i] > UINT32_MAX - 150 || starts[i] + 150 != image->spans[toc->sessions[i].firstTrackIndex].start)) { error = ERROR_INVALID_DATA; goto done; }
+        }
+        stats.totalSectors += toc->sessions[i].leadOutLba - starts[i];
+    }
     ULONGLONG started = GetTickCount64(); stats.state = PIPELINE_STATE_VERIFYING;
     for (unsigned i = 0; i < toc->sessionCount; i++) {
-        const MmcCdSession* session = &toc->sessions[i]; uint32_t start = toc->tracks[session->firstTrackIndex].startLba; unsigned track = session->firstTrackIndex;
+        const MmcCdSession* session = &toc->sessions[i]; uint32_t start = starts[i]; unsigned track = session->firstTrackIndex;
         for (uint32_t lba = start; lba < session->leadOutLba;) {
-            snprintf(stats.statusMessage,sizeof(stats.statusMessage),image ? "Comparing CD session %u/%u, LBA %u (INDEX01 to lead-out)..." : "Checking CD session %u/%u, LBA %u (INDEX01 to lead-out)...",session->number,toc->sessionCount,lba); if (callback) callback(&stats,context);
+            snprintf(stats.statusMessage,sizeof(stats.statusMessage),"%s CD session %u/%u, LBA %u (%s to lead-out)...",image ? "Comparing" : "Checking",session->number,toc->sessionCount,lba,config->includeSessionPregaps && i ? "Q-confirmed INDEX00" : "INDEX01"); if (callback) callback(&stats,context);
             if (cd_cancelled(&reader)) { error = ERROR_CANCELLED; goto done; }
-            uint32_t end = session->leadOutLba;
+            uint32_t end = session->leadOutLba; bool referenced = image != NULL;
             if (image) {
                 while (track + 1 < session->firstTrackIndex + session->trackCount && lba >= image->spans[track].end) track++;
-                const CdVerifySpan* span = &image->spans[track]; if (lba < span->start || lba >= span->end) { error = ERROR_INVALID_DATA; goto done; }
-                if (span->end < end) end = span->end; if (lba < span->extendedUntil && span->extendedUntil < end) end = span->extendedUntil;
+                const CdVerifySpan* span = &image->spans[track]; if (lba >= span->end) { error = ERROR_INVALID_DATA; goto done; }
+                /* 自动150帧不由普通CUE引用；只检查可读性，不把任意源前缀当参考内容。 */
+                if (lba < span->start) { referenced = false; end = span->start; }
+                else { if (span->end < end) end = span->end; if (lba < span->extendedUntil && span->extendedUntil < end) end = span->extendedUntil; }
             }
             uint16_t count = (uint16_t)(end - lba < 27 ? end - lba : 27);
             if (!cd_read(&reader,lba,count,data,false,&stats)) { error = cd_cancelled(&reader) ? ERROR_CANCELLED : cd_error(config->drive); goto done; }
-            if (image && (cd_verify_mode(&image->spans[track],lba) != TRACK_MODE_AUDIO || config->compareAudio)) {
+            if (referenced && (cd_verify_mode(&image->spans[track],lba) != TRACK_MODE_AUDIO || config->compareAudio)) {
                 if (!cd_verify_read(&image->spans[track],lba,count,reference)) { error = GetLastError(); goto done; }
                 for (unsigned j = 0; j < count; j++) if (memcmp(data + (size_t)j * 2352,reference + (size_t)j * 2352,2352)) stats.miscomparesCount++;
                 stats.comparedSectors += count;
@@ -639,7 +695,7 @@ static bool cd_verify_sessions(const VerifyConfig* config, MmcProfile profile, C
     if (stats.miscomparesCount) { error = ERROR_CRC; goto done; } success = true;
 done:
     free(toc); free(data); free(reference); stats.state = success ? PIPELINE_STATE_COMPLETED : error == ERROR_CANCELLED ? PIPELINE_STATE_ABORTED : PIPELINE_STATE_FAILED;
-    if (success) { stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"CD sessions verified: %u compared, %u readability-only sectors; session gaps excluded.",stats.comparedSectors,stats.readableOnlySectors); }
+    if (success) { stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"CD sessions verified: %u compared, %u readability-only sectors%s.",stats.comparedSectors,stats.readableOnlySectors,config->includeSessionPregaps ? "; automatic pauses are readability-only" : "; session gaps excluded"); }
     else snprintf(stats.statusMessage,sizeof(stats.statusMessage),"CD session Verify did not complete (error %lu).",error);
     if (callback) callback(&stats,context); SetLastError(success ? ERROR_SUCCESS : error); return success;
 }
@@ -662,6 +718,7 @@ bool pipeline_verify_cd(const VerifyConfig* config, PipelineProgressCallback cal
             if (!imgburn_cue_parse_ex(config->imagePath,&image->sheet,cd_verify_resolve,image)) { error = image->prepareError ? image->prepareError : GetLastError() == ERROR_NOT_SUPPORTED ? ERROR_NOT_SUPPORTED : ERROR_INVALID_DATA; goto verify_done; }
             if (!cd_verify_plan(image)) { error = GetLastError(); goto verify_done; }
         }
+        if (config->includeSessionPregaps && (image->parts || image->sheet.sessionCount < 2)) { error = ERROR_NOT_SUPPORTED; goto verify_done; }
     }
     if (cd_cancelled(&reader)) { error = ERROR_CANCELLED; goto verify_done; }
     OpticalDrive* drive = config->drive; if (!mmc_test_unit_ready(drive)) { error = cd_error(drive); goto verify_done; }
@@ -670,6 +727,7 @@ bool pipeline_verify_cd(const VerifyConfig* config, PipelineProgressCallback cal
     MmcCdToc discToc; if (!mmc_read_cd_toc(drive,&discToc)) {
         error = cd_error(drive); if (!compare && error == ERROR_NOT_SUPPORTED) return cd_verify_sessions(config,profile,NULL,callback,context); goto verify_done;
     } stats.totalSectors = discToc.leadOutLba;
+    if (config->includeSessionPregaps) { error = ERROR_NOT_SUPPORTED; goto verify_done; }
     if (compare) {
         if (image->sheet.trackCount != (int)discToc.trackCount || image->sheet.totalSectors != discToc.leadOutLba) { error = ERROR_INVALID_DATA; goto verify_done; }
         for (unsigned i = 0; i < discToc.trackCount; i++) if (image->sheet.tracks[i].startLba != discToc.tracks[i].startLba || image->spans[i].audio == ((discToc.tracks[i].control & 4) != 0)) { error = ERROR_INVALID_DATA; goto verify_done; }

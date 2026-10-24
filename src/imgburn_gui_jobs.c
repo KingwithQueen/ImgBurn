@@ -147,7 +147,7 @@ static bool job_drive(GuiJob* job) {
         if (ready) pipeline_discovery_capacity(&drive,&job->discoveryCapacity);
     } else if (!ready) SetLastError(ERROR_NOT_READY);
     else if (job->operation == GUI_READ_DISC) {
-        ReadConfig config = {0}; config.drive = &drive; config.imagePath = job->destination; config.cancelEvent = job->cancel; config.retryCount = 20; config.replaceExisting = job->replaceExisting; config.readCdText = job->readCdText; config.splitSectors = job->readSplitSectors; config.rawCdMds = job->rawCdMds;
+        ReadConfig config = {0}; config.drive = &drive; config.imagePath = job->destination; config.cancelEvent = job->cancel; config.retryCount = 20; config.replaceExisting = job->replaceExisting; config.readCdText = job->readCdText; config.splitSectors = job->readSplitSectors; config.rawCdMds = job->rawCdMds; config.includeSessionPregaps = job->includeSessionPregaps;
         const wchar_t* extension = wcsrchr(job->destination,L'.'); ok = extension && !_wcsicmp(extension,L".cue") ? pipeline_read_cd(&config,job_pipeline_progress,job) : pipeline_read_disc(&config,job_pipeline_progress,job);
         bool mds = extension && !_wcsicmp(extension,L".mds");
         if (ok) job_text(job,mds ? L"光盘镜像和 MDS 描述已读取：%ls\r\n配套数据文件按顺序记录在 MDS 中。\r\n" : L"光盘镜像已读取：%ls\r\n",job->destination);
@@ -155,6 +155,7 @@ static bool job_drive(GuiJob* job) {
     }
     else if (job->operation == GUI_VERIFY_DISC) {
         VerifyConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.cancelEvent = job->cancel;
+        config.includeSessionPregaps = job->includeSessionPregaps;
         ok = pipeline_verify_disc_ex(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
         if (ok) job_text(job,L"校验通过：已比较 %u 扇区，仅检查可读性 %u 扇区。\r\n",job->comparedSectors,job->readableOnlySectors);
         else if (job->miscompares) job_text(job,L"发现 %u 个内容不一致的扇区。\r\n",job->miscompares);

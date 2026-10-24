@@ -324,7 +324,7 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
         if (!initial->indexCount) goto done;
         /* 仅首轨省略INDEX00时保留源零帧起的隐式前缀，其余FILE从首个声明INDEX裁去未引用内容。 */
         uint32_t origin = first || initial->indices[0].indexNumber == 0 ? initial->indices[0].lba : 0;
-        bool localSessionEnd = initial->sessionNumber > 1 && sheet->tracks[last - 1].sessionNumber == initial->sessionNumber;
+        bool localSessionEnd = initial->sessionNumber > 1;
         if (initial->sessionNumber != previousSession) {
             total += (uint64_t)sheet->sessionLeadOut[previousSession - 1] + sheet->sessionLeadIn[initial->sessionNumber - 1];
             /* 新FILE的会话首轨自动暂停与FILE裁剪、显式PREGAP及存储INDEX00独立。 */
@@ -346,21 +346,21 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
             if (!current->indexCount) goto done;
             bool indexOne = false; uint32_t start = 0, segment = i == first ? 0 : current->indices[0].lba;
             for (int j = 0; j < current->indexCount; j++) if (current->indices[j].indexNumber == 1) { indexOne = true; start = current->indices[j].lba; }
+            if (current->sessionNumber != previousSession) {
+                /* 同FILE也重置会话逻辑原点；INDEX仍引用原FILE位置，不能把源间隔从字节偏移中扣掉。 */
+                if (segment < fileEnd) goto done;
+                usedBytes += (uint64_t)(segment - fileEnd) * sheet->tracks[i - 1].sectorSize; sourceFrames += segment - fileEnd;
+                total = (uint64_t)sheet->sessionEndLba[previousSession - 1] + sheet->sessionLeadOut[previousSession - 1] + sheet->sessionLeadIn[current->sessionNumber - 1] + 150;
+                origin = current->indices[0].lba; gaps = 0; localSessionEnd = true; previousSession = current->sessionNumber;
+            }
             if (!indexOne || start < segment || start < origin || usedBytes > sourceBytes) goto done;
             uint64_t available = sourceBytes - usedBytes;
             uint64_t end = i + 1 < last && sheet->tracks[i + 1].indexCount ? sheet->tracks[i + 1].indices[0].lba : segment + (available + current->sectorSize - 1) / current->sectorSize;
-            if (i + 1 < last && sheet->tracks[i + 1].sessionNumber != current->sessionNumber) {
-                const CueTrack* following = &sheet->tracks[i + 1];
-                uint64_t sessionGap = (uint64_t)sheet->sessionLeadOut[current->sessionNumber - 1] + sheet->sessionLeadIn[following->sessionNumber - 1];
-                if (following->indices[0].indexNumber == 1 && !following->pregapSectors) sessionGap += 150;
-                /* 单BIN的INDEX可包含未存入文件的会话间隔，物理字节偏移必须扣除此段。 */
-                if (end < sessionGap) goto done; end -= sessionGap;
-            }
             if (i + 1 == last && current->sourceType < CUE_FILE_WAVE && available % current->sectorSize) goto done;
-            if (i + 1 == last && (i + 1 == sheet->trackCount || sheet->tracks[i + 1].sessionNumber != current->sessionNumber)) {
+            if (i + 1 == sheet->trackCount || sheet->tracks[i + 1].sessionNumber != current->sessionNumber) {
                 uint32_t declared = declaredSessionEnd[current->sessionNumber - 1];
                 uint64_t overhead = total + gaps + current->pregapSectors + current->postgapSectors;
-                /* 原版后续独立FILE的LEAD-OUT使用文件坐标；旧单会话及同BIN分支保留原规则。 */
+                /* 后续会话的LEAD-OUT使用FILE坐标；首会话保留既有结束地址换算。 */
                 uint64_t declaredEnd = localSessionEnd ? declared : (uint64_t)declared + origin;
                 if (localSessionEnd) overhead = 0;
                 if (declared) { if (declaredEnd <= overhead || declaredEnd - overhead > end) goto done; end = declaredEnd - overhead; }

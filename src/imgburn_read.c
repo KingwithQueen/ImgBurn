@@ -88,6 +88,7 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     ReadDataPart* parts = NULL; unsigned partCount = 0;
     DWORD error = ERROR_SUCCESS; bool success = false, temporaryCreated = false, descriptorCreated = false;
     if (!config || !config->drive || !config->imagePath || !config->imagePath[0] || config->retryCount > 20) return read_failure(&stats,ERROR_INVALID_PARAMETER,"Invalid read configuration",callback,context);
+    if (config->includeSessionPregaps) return read_failure(&stats,ERROR_NOT_SUPPORTED,"Session INDEX00 requires multi-session CUE output",callback,context);
     if (config->readCdText) return read_failure(&stats,ERROR_NOT_SUPPORTED,"CD-TEXT requires raw CD CUE output",callback,context);
     if (read_cancelled(config)) return read_failure(&stats,ERROR_CANCELLED,"Read cancelled",callback,context);
     if (!read_target(config->imagePath,destination,config->replaceExisting)) return read_failure(&stats,GetLastError(),"Invalid image destination",callback,context);
@@ -205,6 +206,7 @@ bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallbac
     ReadConfig reader = {0}; reader.drive = config->drive; reader.cancelEvent = config->cancelEvent; reader.retryCount = config->retryCount;
     if (read_cancelled(&reader)) return read_failure(&stats,ERROR_CANCELLED,"Verify cancelled",callback,context);
     bool zeroSource = config->zeroSectors != 0, compare = zeroSource || (config->imagePath && config->imagePath[0]);
+    if (config->includeSessionPregaps && (zeroSource || (compare && (!wcsrchr(config->imagePath,L'.') || _wcsicmp(wcsrchr(config->imagePath,L'.'),L".cue"))))) return read_failure(&stats,ERROR_NOT_SUPPORTED,"Session INDEX00 comparison requires a multi-session CUE",callback,context);
     if (zeroSource) stats.totalSectors = config->zeroSectors;
     else if (compare) {
         const wchar_t* extension = wcsrchr(config->imagePath,L'.');
@@ -220,6 +222,7 @@ bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallbac
     OpticalDrive* drive = config->drive; if (!mmc_test_unit_ready(drive)) { error = read_device_error(drive); goto verify_done; }
     MmcProfile profile = mmc_get_current_profile(drive); if (!read_profile(profile)) { error = ERROR_NOT_SUPPORTED; goto verify_done; }
     if (!compare && profile <= MMC_PROFILE_CD_RW) return pipeline_verify_cd(config,callback,context);
+    if (config->includeSessionPregaps) { error = ERROR_NOT_SUPPORTED; goto verify_done; }
     uint32_t last = 0, bytes = 0;
     if (!mmc_read_capacity(drive,&last,&bytes)) { error = read_device_error(drive); goto verify_done; }
     if (last == UINT32_MAX || bytes != 2048 || (compare && stats.totalSectors > last + 1)) { error = ERROR_INVALID_DATA; goto verify_done; }

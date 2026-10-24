@@ -31,7 +31,7 @@ enum {
     UI_SOURCE_EDIT = 1000, UI_SOURCE_LIST, UI_DEST_EDIT, UI_DRIVE, UI_GO, UI_CANCEL, UI_FS, UI_UDF, UI_LABEL,
     UI_DVD, UI_BD, UI_OPTIMIZE, UI_TAB, UI_TEST, UI_VERIFY_CHECK, UI_TOOL_ADD, UI_TOOL_REMOVE, UI_TOOL_UP, UI_TOOL_DOWN,
     UI_TOOL_LAYER, UI_TOOL_LBA, UI_TOOL_OTP, UI_TOOL_PTP, UI_TOOL_OK, UI_TOOL_CLOSE, UI_IMAGE_INFO, UI_REMOVE_SOURCE, UI_VERIFY_COMPARE, UI_READ_CDTEXT,
-    UI_DISCOVERY_ALL, UI_DISCOVERY_CUSTOM, UI_DISCOVERY_SECTORS, UI_DISCOVERY_CAPACITY, UI_DISCOVERY_SPEED, UI_DISCOVERY_SIZE, UI_READ_SPLIT, UI_READ_RAW_MDS,
+    UI_DISCOVERY_ALL, UI_DISCOVERY_CUSTOM, UI_DISCOVERY_SECTORS, UI_DISCOVERY_CAPACITY, UI_DISCOVERY_SPEED, UI_DISCOVERY_SIZE, UI_READ_SPLIT, UI_READ_RAW_MDS, UI_SESSION_PREGAPS,
     UI_EZ_FIRST = 1100
 };
 
@@ -47,7 +47,7 @@ typedef struct {
 struct GuiWindow {
     HINSTANCE instance;
     HWND window, status, logWindow, logList, sources, sourceEdit, destination, drives, info, progress, go, cancel, tabs;
-    HWND fs, udf, label, dvd, bd, optimize, verify, compare, readText, readSplit, readRawMds, discoverySectors, discoverySpeed;
+    HWND fs, udf, label, dvd, bd, optimize, verify, compare, readText, readSplit, readRawMds, sessionPregaps, discoverySectors, discoverySpeed;
     HFONT font, bold;
     GuiMode mode;
     unsigned dpi;
@@ -57,7 +57,7 @@ struct GuiWindow {
     wchar_t sourceImage[MAX_PATH], destinationImage[MAX_PATH], readImage[MAX_PATH], volumeLabel[127];
     FsTypeFlags fsTypes;
     UdfRevision revision;
-    bool dvdVideo, bluray, deduplicate, verifyAfter, verifyAgainstImage, testMode, testWriteSupported, readCdText, rawCdMds;
+    bool dvdVideo, bluray, deduplicate, verifyAfter, verifyAgainstImage, testMode, testWriteSupported, readCdText, rawCdMds, includeSessionPregaps;
     bool discoveryAll;
     unsigned readSplitChoice;
     uint32_t discoveryCapacity;
@@ -135,6 +135,7 @@ static void gui_read_controls(GuiWindow* ui) {
     if (ui->compare) ui->verifyAgainstImage = SendMessageW(ui->compare, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (ui->readText) ui->readCdText = SendMessageW(ui->readText, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (ui->readRawMds) ui->rawCdMds = SendMessageW(ui->readRawMds,BM_GETCHECK,0,0) == BST_CHECKED;
+    if (ui->sessionPregaps) ui->includeSessionPregaps = SendMessageW(ui->sessionPregaps,BM_GETCHECK,0,0) == BST_CHECKED;
     if (ui->readSplit) { LRESULT choice = SendMessageW(ui->readSplit,CB_GETCURSEL,0,0); if (choice >= 0 && choice < (LRESULT)(sizeof(readSplitMiB) / sizeof(*readSplitMiB))) ui->readSplitChoice = (unsigned)choice; }
     if (ui->mode == GUI_DISCOVERY && ui->discoverySectors) { ui->discoveryAll = SendMessageW(GetDlgItem(ui->window,UI_DISCOVERY_ALL),BM_GETCHECK,0,0) == BST_CHECKED; GetWindowTextW(ui->discoverySectors,ui->discoveryCount,32); GetWindowTextW(ui->discoverySpeed,ui->discoveryRate,24); }
     if (ui->drives) ui->selectedDrive = (int)SendMessageW(ui->drives, CB_GETCURSEL, 0, 0);
@@ -157,6 +158,7 @@ static void gui_menu(GuiWindow* ui) {
     if (read && ui->readText) EnableWindow(ui->readText,idle && readExtension && !_wcsicmp(readExtension,L".cue"));
     if (read && ui->readRawMds) EnableWindow(ui->readRawMds,idle && readExtension && !_wcsicmp(readExtension,L".mds"));
     if (read && ui->readSplit) EnableWindow(ui->readSplit,idle && readExtension && !_wcsicmp(readExtension,L".mds") && !ui->rawCdMds);
+    if (ui->sessionPregaps) { const wchar_t* extension = wcsrchr(ui->sourceImage,L'.'); EnableWindow(ui->sessionPregaps,idle && (read ? readExtension && !_wcsicmp(readExtension,L".cue") : !ui->verifyAgainstImage || (extension && !_wcsicmp(extension,L".cue")))); }
     if (verify) { EnableWindow(ui->compare,idle); EnableWindow(ui->destination,idle && ui->verifyAgainstImage); EnableWindow(GetDlgItem(ui->window,UI_SOURCE_FILE),idle && ui->verifyAgainstImage); }
     if (discovery) {
         EnableWindow(GetDlgItem(ui->window,UI_DISCOVERY_ALL),idle); EnableWindow(GetDlgItem(ui->window,UI_DISCOVERY_CUSTOM),idle); EnableWindow(ui->discoverySectors,idle && !ui->discoveryAll); EnableWindow(ui->discoverySpeed,idle); EnableWindow(GetDlgItem(ui->window,UI_DISCOVERY_CAPACITY),idle && ui->discoveryCapacity != 0);
@@ -196,7 +198,7 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
     gui_read_controls(ui); HWND child = GetWindow(ui->window, GW_CHILD);
     while (child) { HWND next = GetWindow(child, GW_HWNDNEXT); if (child != ui->status) DestroyWindow(child); child = next; }
     ui->sources = ui->sourceEdit = ui->destination = ui->drives = ui->info = ui->progress = ui->go = ui->cancel = ui->tabs = NULL;
-    ui->fs = ui->udf = ui->label = ui->dvd = ui->bd = ui->optimize = ui->verify = ui->compare = ui->readText = ui->readSplit = ui->readRawMds = ui->discoverySectors = ui->discoverySpeed = NULL; ui->mode = mode;
+    ui->fs = ui->udf = ui->label = ui->dvd = ui->bd = ui->optimize = ui->verify = ui->compare = ui->readText = ui->readSplit = ui->readRawMds = ui->sessionPregaps = ui->discoverySectors = ui->discoverySpeed = NULL; ui->mode = mode;
     if (mode == GUI_EZ) {
         ctl(ui, ui->window, L"BUTTON", L"您打算做什么？", BS_GROUPBOX, 0, 8, 8, 644, 364);
         const wchar_t* texts[] = {L"刻录镜像至光盘",L"刻录文件/文件夹至光盘",L"将光盘抓取成镜像文件",L"从文件/文件夹制作镜像",L"验证光盘",L"品质测试"};
@@ -204,7 +206,7 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
         gui_status(ui, L"Ready"); gui_menu(ui); return;
     }
     bool build = mode == GUI_BUILD; bool imageDestination = build && !ui->outputDevice;
-    ctl(ui, ui->window, L"BUTTON", mode == GUI_DISCOVERY ? L"品质测试" : build || mode == GUI_WRITE ? L"来源" : L"来源 / 光盘", BS_GROUPBOX, 0, 8, 8, 320, build ? 188 : 151);
+    ctl(ui, ui->window, L"BUTTON", mode == GUI_DISCOVERY ? L"品质测试" : build || mode == GUI_WRITE ? L"来源" : L"来源 / 光盘", BS_GROUPBOX, 0, 8, 8, 320, build ? 188 : mode == GUI_READ ? 182 : mode == GUI_VERIFY ? 160 : 151);
     if (build) {
         ui->sourceEdit = ctl(ui, ui->window, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, UI_SOURCE_EDIT, 16, 25, 280, 23);
         ui->sources = ctl(ui, ui->window, L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | WS_HSCROLL | LBS_EXTENDEDSEL | LBS_NOINTEGRALHEIGHT, UI_SOURCE_LIST, 16, 50, 280, 132);
@@ -220,6 +222,7 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
             ui->readText = ctl(ui,ui->window,L"BUTTON",L"读取 CD-TEXT（仅 CUE）",WS_TABSTOP | BS_AUTOCHECKBOX,UI_READ_CDTEXT,18,122,280,22); SendMessageW(ui->readText,BM_SETCHECK,ui->readCdText ? BST_CHECKED : BST_UNCHECKED,0);
             ui->readRawMds = ctl(ui,ui->window,L"BUTTON",L"原始 MODE1 CD（2352 字节 MDS）",WS_TABSTOP | BS_AUTOCHECKBOX,UI_READ_RAW_MDS,18,145,300,22); SendMessageW(ui->readRawMds,BM_SETCHECK,ui->rawCdMds ? BST_CHECKED : BST_UNCHECKED,0);
         }
+        ui->sessionPregaps = ctl(ui,ui->window,L"BUTTON",L"包含多会话首轨 INDEX 00",WS_TABSTOP | BS_AUTOCHECKBOX,UI_SESSION_PREGAPS,18,mode == GUI_READ ? 168 : 145,300,22); SendMessageW(ui->sessionPregaps,BM_SETCHECK,ui->includeSessionPregaps ? BST_CHECKED : BST_UNCHECKED,0);
     } else if (mode == GUI_DISCOVERY) {
         ctl(ui,ui->window,L"BUTTON",L"全部扇区",WS_TABSTOP | BS_AUTORADIOBUTTON | WS_GROUP,UI_DISCOVERY_ALL,18,29,126,23); ctl(ui,ui->window,L"BUTTON",L"自定义扇区：",WS_TABSTOP | BS_AUTORADIOBUTTON,UI_DISCOVERY_CUSTOM,18,62,126,23);
         SendMessageW(GetDlgItem(ui->window,ui->discoveryAll ? UI_DISCOVERY_ALL : UI_DISCOVERY_CUSTOM),BM_SETCHECK,BST_CHECKED,0);
@@ -230,7 +233,7 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
         ctl(ui, ui->window, L"BUTTON", L"…", WS_TABSTOP, UI_SOURCE_FILE, 297, 28, 23, 24);
         ctl(ui, ui->window, L"BUTTON", L"镜像信息", WS_TABSTOP, UI_IMAGE_INFO, 16, 68, 90, 26);
     }
-    int targetY = build ? 205 : 170; ctl(ui, ui->window, L"BUTTON", imageDestination || mode == GUI_READ ? L"目标" : mode == GUI_VERIFY ? L"镜像文件" : L"目标驱动器", BS_GROUPBOX, 0, 8, targetY, 320, 67);
+    int targetY = build ? 205 : mode == GUI_READ ? 195 : 170; ctl(ui, ui->window, L"BUTTON", imageDestination || mode == GUI_READ ? L"目标" : mode == GUI_VERIFY ? L"镜像文件" : L"目标驱动器", BS_GROUPBOX, 0, 8, targetY, 320, 67);
     if (imageDestination || mode == GUI_READ || mode == GUI_VERIFY) {
         ui->destination = ctl(ui, ui->window, L"EDIT", mode == GUI_VERIFY ? ui->sourceImage : mode == GUI_READ ? ui->readImage : ui->destinationImage, WS_TABSTOP | ES_AUTOHSCROLL, UI_DEST_EDIT, 16, targetY + 24, 276, 24);
         ctl(ui, ui->window, L"BUTTON", L"…", WS_TABSTOP, mode == GUI_VERIFY ? UI_SOURCE_FILE : UI_DESTINATION, 297, targetY + 24, 23, 24);
@@ -299,6 +302,8 @@ static GuiJob* gui_job(GuiWindow* ui, GuiOperation operation, const GuiPath* pat
     GuiJob* job = (GuiJob*)calloc(1, sizeof(*job)); if (!job) return NULL;
     const wchar_t* readExtension = wcsrchr(ui->readImage,L'.'); job->readCdText = operation == GUI_READ_DISC && ui->readCdText && readExtension && !_wcsicmp(readExtension,L".cue");
     if (operation == GUI_READ_DISC && readExtension && !_wcsicmp(readExtension,L".mds")) { job->rawCdMds = ui->rawCdMds; if (!job->rawCdMds) job->readSplitSectors = readSplitMiB[ui->readSplitChoice] * 512; }
+    if (operation == GUI_READ_DISC) job->includeSessionPregaps = ui->includeSessionPregaps && readExtension && !_wcsicmp(readExtension,L".cue");
+    if (operation == GUI_VERIFY_DISC) { const wchar_t* extension = wcsrchr(ui->sourceImage,L'.'); job->includeSessionPregaps = ui->includeSessionPregaps && (!ui->verifyAgainstImage || (extension && !_wcsicmp(extension,L".cue"))); }
     job->sources = (GuiPath*)calloc(count, sizeof(*paths)); job->cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!job->sources || !job->cancel) { imgburn_gui_job_free(job); return NULL; }
     memcpy(job->sources, paths, count * sizeof(*paths)); job->sourceCount = count; job->owner = ui->window; job->operation = operation;
@@ -495,7 +500,7 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
         switch (command) {
             case UI_MODE_EZ: gui_mode(ui,GUI_EZ); break; case UI_MODE_READ: gui_mode(ui,GUI_READ); break; case UI_MODE_BUILD: gui_mode(ui,GUI_BUILD); break; case UI_MODE_WRITE: gui_mode(ui,GUI_WRITE); break; case UI_MODE_VERIFY: gui_mode(ui,GUI_VERIFY); break; case UI_MODE_DISCOVERY: gui_mode(ui,GUI_DISCOVERY); break;
             case UI_SOURCE_FILE: gui_source(ui,false); break; case UI_SOURCE_FOLDER: gui_source(ui,true); break;
-            case UI_VERIFY_COMPARE: case UI_READ_CDTEXT: case UI_READ_RAW_MDS: gui_read_controls(ui); gui_menu(ui); break;
+            case UI_VERIFY_COMPARE: case UI_READ_CDTEXT: case UI_READ_RAW_MDS: case UI_SESSION_PREGAPS: gui_read_controls(ui); gui_menu(ui); break;
             case UI_READ_SPLIT: if (HIWORD(wp) == CBN_SELCHANGE) { gui_read_controls(ui); gui_menu(ui); } break;
             case UI_TEST: ui->testMode = ui->testWriteSupported && SendMessageW(GetDlgItem(window,UI_TEST),BM_GETCHECK,0,0) == BST_CHECKED; gui_write_checks(ui); break;
             case UI_VERIFY_CHECK: gui_read_controls(ui); gui_write_checks(ui); break;

@@ -357,29 +357,15 @@ static bool cue_metadata_line(char* text, size_t capacity, size_t* used, const c
 
 static bool cue_lead_outs(const AudioCompilation* comp, uint32_t ends[99]) {
     memcpy(ends, comp->sessionEndLba, sizeof(comp->sessionEndLba));
-    wchar_t previous[MAX_PATH] = L""; CueFileType previousType = CUE_FILE_BINARY; unsigned previousGroup = 0; int first = 0;
-    for (int i = 0; i <= comp->trackCount; i++) {
-        wchar_t source[MAX_PATH] = L""; CueFileType type = CUE_FILE_BINARY; bool newFile = i == comp->trackCount;
-        if (i < comp->trackCount) {
-            const AudioTrack* track = &comp->tracks[i];
-            if (wcsnlen(track->filePath, MAX_PATH) == MAX_PATH) return false;
-            DWORD chars = GetFullPathNameW(track->filePath, MAX_PATH, source, NULL); if (!chars || chars >= MAX_PATH) return false;
-            type = track->sourceIsWave && track->sourceType == CUE_FILE_BINARY ? CUE_FILE_WAVE : track->sourceType;
-            newFile = wcscmp(previous, source) || previousType != type || (track->sourceFileGroup && track->sourceFileGroup != previousGroup);
-        }
-        if (!newFile) continue;
-        if (i) {
-            const AudioTrack* last = &comp->tracks[i - 1]; unsigned session = last->sessionNumber ? last->sessionNumber : 1;
-            /* 后续会话独立FILE的LEAD-OUT为文件坐标，POSTGAP另由布局生成。 */
-            if (session > 1 && session <= 99 && comp->tracks[first].sessionNumber == session && (i == comp->trackCount || comp->tracks[i].sessionNumber != session)) {
-                if (last->indexCount < 0 || last->indexCount > MAX_CUE_INDICES) return false;
-                uint32_t indexOne = msf_to_lba(last->startTime); bool found = !last->indexCount;
-                for (int j = 0; j < last->indexCount; j++) if (last->indices[j].indexNumber == 1) { indexOne = last->indices[j].lba; found = true; }
-                if (!found || last->sectorCount > UINT32_MAX - indexOne) return false;
-                ends[session - 1] = indexOne + last->sectorCount;
-            }
-        }
-        if (i < comp->trackCount) { first = i; wcscpy(previous, source); previousType = type; previousGroup = comp->tracks[i].sourceFileGroup; }
+    for (int i = 0; i < comp->trackCount; i++) {
+        const AudioTrack* last = &comp->tracks[i]; unsigned session = last->sessionNumber ? last->sessionNumber : 1;
+        if (session <= 1 || session > 99 || (i + 1 < comp->trackCount && comp->tracks[i + 1].sessionNumber == session)) continue;
+        /* 后续会话即使共用FILE，LEAD-OUT仍为文件坐标；自动暂停和POSTGAP另由布局生成。 */
+        if (last->indexCount < 0 || last->indexCount > MAX_CUE_INDICES) return false;
+        uint32_t indexOne = msf_to_lba(last->startTime); bool found = !last->indexCount;
+        for (int j = 0; j < last->indexCount; j++) if (last->indices[j].indexNumber == 1) { indexOne = last->indices[j].lba; found = true; }
+        if (!found || last->sectorCount > UINT32_MAX - indexOne) return false;
+        ends[session - 1] = indexOne + last->sectorCount;
     }
     return true;
 }

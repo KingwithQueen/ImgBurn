@@ -125,6 +125,7 @@ typedef struct {
     bool replaceExisting;
     bool readCdText;                /* 显式读取并保留原始CD-TEXT；设备不支持时返回失败，不丢弃请求。 */
     bool rawCdMds;                  /* MDS 显式选择 MODE1/2352；默认仍为 2048 字节数据。 */
+    bool includeSessionPregaps;     /* 显式读取多会话首轨 Q 确认的 INDEX00；自动150帧保留在BIN未引用前缀。 */
     uint32_t splitSectors;          /* MDS 配套数据每卷最多的 2048 字节扇区数，0 表示不分卷。 */
 } ReadConfig;
 
@@ -134,7 +135,7 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
 bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callback, void* userData);
 
 /* Verify：空镜像检查可读性，ISO/BIN/数据 MDS 比较逻辑扇区，CUE/原始 MODE1 MDS 比较 CD 主通道。 */
-typedef struct { OpticalDrive* drive; const wchar_t* imagePath; HANDLE cancelEvent; unsigned retryCount; bool compareAudio; bool saoData; uint32_t zeroSectors; } VerifyConfig; /* 写后参考按 SAO 重建数据头与纠错字段；zeroSectors 显式指定 Discovery 零数据比较范围。 */
+typedef struct { OpticalDrive* drive; const wchar_t* imagePath; HANDLE cancelEvent; unsigned retryCount; bool compareAudio; bool saoData; uint32_t zeroSectors; bool includeSessionPregaps; } VerifyConfig; /* 写后参考按 SAO 重建数据头与纠错字段；多会话首INDEX00可显式比较，自动150帧仅检查可读性。 */
 bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallback callback, void* userData);
 bool pipeline_verify_cd(const VerifyConfig* config, PipelineProgressCallback callback, void* userData);
 

@@ -18,7 +18,7 @@ typedef struct {
     wchar_t destination[MAX_PATH], drive[MAX_PATH], label[127];
     FsTypeFlags fsTypes;
     UdfRevision revision;
-    bool dvdVideo, bluray, optimize, verify, seamless, oppositeTrackPath, replaceExisting, testMode, testWriteSupported, readCdText, rawCdMds;
+    bool dvdVideo, bluray, optimize, verify, seamless, oppositeTrackPath, replaceExisting, testMode, testWriteSupported, readCdText, rawCdMds, includeSessionPregaps;
     uint32_t speed, discoverySectors, discoveryCapacity;
     uint32_t readSplitSectors;
     double discoverySpeedMultiplier;
