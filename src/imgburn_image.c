@@ -207,7 +207,7 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
     DWORD chars = GetFullPathNameW(cueFilePath, MAX_PATH, sheet->cueFilePath, NULL);
     if (!chars || chars >= MAX_PATH) goto done;
     wchar_t currentFile[MAX_PATH] = L""; CueFileType type = CUE_FILE_BINARY;
-    unsigned fileId = 0, session = 1, groups[99] = {0}; uint32_t decodedHints[100] = {0};
+    unsigned fileId = 0, session = 1, groups[99] = {0}; uint32_t decodedHints[100] = {0}, declaredSessionEnd[99] = {0};
     bool pregaps[99] = {0}, postgaps[99] = {0}, closedSessions[99] = {0}; CueTrack* track = NULL;
     sheet->sessionCount = 1;
     for (unsigned i = 1; i < 99; i++) sheet->sessionLeadIn[i] = 4500;
@@ -234,8 +234,8 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
             } else if (!_stricmp(command, "FILE-DECODED-SIZE")) {
                 if (!fileId || !cue_token(&cursor, second, sizeof(second)) || !cue_rem_end(cursor) || !cue_msf(second, &decodedHints[fileId])) goto done;
             } else if (!_stricmp(command, "LEAD-OUT")) {
-                /* 保留并核对声明的会话结束地址，不把它当成注释丢弃。 */
-                if (!sheet->trackCount || sheet->tracks[sheet->trackCount - 1].sessionNumber != session || closedSessions[session - 1] || !cue_token(&cursor, second, sizeof(second)) || !cue_rem_end(cursor) || !cue_msf(second, &sheet->sessionEndLba[session - 1]) || !sheet->sessionEndLba[session - 1]) goto done;
+                /* 暂存声明坐标；独立新FILE的后续会话再换算成绝对A2。 */
+                if (!sheet->trackCount || sheet->tracks[sheet->trackCount - 1].sessionNumber != session || closedSessions[session - 1] || !cue_token(&cursor, second, sizeof(second)) || !cue_rem_end(cursor) || !cue_msf(second, &declaredSessionEnd[session - 1]) || !declaredSessionEnd[session - 1]) goto done;
                 closedSessions[session - 1] = true; track = NULL;
             }
             continue;
@@ -324,6 +324,7 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
         if (!initial->indexCount) goto done;
         /* 仅首轨省略INDEX00时保留源零帧起的隐式前缀，其余FILE从首个声明INDEX裁去未引用内容。 */
         uint32_t origin = first || initial->indices[0].indexNumber == 0 ? initial->indices[0].lba : 0;
+        bool localSessionEnd = initial->sessionNumber > 1 && sheet->tracks[last - 1].sessionNumber == initial->sessionNumber;
         if (initial->sessionNumber != previousSession) {
             total += (uint64_t)sheet->sessionLeadOut[previousSession - 1] + sheet->sessionLeadIn[initial->sessionNumber - 1];
             /* 新FILE的会话首轨自动暂停与FILE裁剪、显式PREGAP及存储INDEX00独立。 */
@@ -357,10 +358,11 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
             }
             if (i + 1 == last && current->sourceType < CUE_FILE_WAVE && available % current->sectorSize) goto done;
             if (i + 1 == last && (i + 1 == sheet->trackCount || sheet->tracks[i + 1].sessionNumber != current->sessionNumber)) {
-                uint32_t declared = sheet->sessionEndLba[current->sessionNumber - 1];
+                uint32_t declared = declaredSessionEnd[current->sessionNumber - 1];
                 uint64_t overhead = total + gaps + current->pregapSectors + current->postgapSectors;
-                /* 显式LEAD-OUT限定末轨长度，源文件尾部允许保留未引用的数据。 */
-                uint64_t declaredEnd = (uint64_t)declared + origin;
+                /* 原版后续独立FILE的LEAD-OUT使用文件坐标；旧单会话及同BIN分支保留原规则。 */
+                uint64_t declaredEnd = localSessionEnd ? declared : (uint64_t)declared + origin;
+                if (localSessionEnd) overhead = 0;
                 if (declared) { if (declaredEnd <= overhead || declaredEnd - overhead > end) goto done; end = declaredEnd - overhead; }
             }
             if (end <= start || end > UINT32_MAX || current->indices[current->indexCount - 1].lba >= end) goto done;
@@ -375,8 +377,8 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
             if (current->sourceByteLength > sourceBytes - current->sourceByteOffset) current->sourceByteLength = sourceBytes - current->sourceByteOffset;
             usedBytes += segmentBytes; sourceFrames += end - segment; gaps += current->postgapSectors; fileEnd = (uint32_t)end;
             if (i + 1 == sheet->trackCount || sheet->tracks[i + 1].sessionNumber != current->sessionNumber) {
-                uint64_t sessionEnd = total + end - origin + gaps; uint32_t declared = sheet->sessionEndLba[current->sessionNumber - 1];
-                if (sessionEnd > UINT32_MAX || (declared && declared != sessionEnd)) goto done;
+                uint64_t sessionEnd = total + end - origin + gaps; uint32_t declared = declaredSessionEnd[current->sessionNumber - 1];
+                if (sessionEnd > UINT32_MAX || (declared && !localSessionEnd && declared != sessionEnd)) goto done;
                 sheet->sessionEndLba[current->sessionNumber - 1] = (uint32_t)sessionEnd;
             }
             previousSession = current->sessionNumber;
@@ -550,7 +552,7 @@ bool imgburn_mds_create_files(const wchar_t* mdsFilePath, const wchar_t* const* 
     return imgburn_mds_create_files_ex(mdsFilePath, dataFiles, fileCount, totalSectors, layerBreakLba, true);
 }
 
-static bool mds_create_data(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, bool sourceLayout, bool cd) {
+static bool mds_create_data(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, bool sourceLayout, bool cd, uint16_t sectorSize) {
     if (!mdsFilePath || !dataFiles || !fileCount || fileCount > MAX_MDS_FILES || wcslen(mdsFilePath) >= MAX_PATH || !totalSectors || totalSectors > INT32_MAX) return false;
     if (layerBreakLba && (layerBreakLba >= totalSectors || (oppositeTrackPath && layerBreakLba < (totalSectors + 1) / 2) || layerBreakLba > 0xFD0000 || totalSectors - layerBreakLba > 0xFD0000)) return false;
     if (!sourceLayout && layerBreakLba && (layerBreakLba > 2086912 || totalSectors - layerBreakLba > 2086912 || layerBreakLba % 16)) return false;
@@ -564,10 +566,10 @@ static bool mds_create_data(const wchar_t* mdsFilePath, const wchar_t* const* da
         WIN32_FILE_ATTRIBUTE_DATA attributes;
         if (!GetFileAttributesExW(source, GetFileExInfoStandard, &attributes) || (attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return false;
         uint64_t part = (uint64_t)attributes.nFileSizeHigh << 32 | attributes.nFileSizeLow;
-        if (!part || part % 2048 || sourceBytes > UINT64_MAX - part) return false;
+        if (!part || part % sectorSize || sourceBytes > UINT64_MAX - part) return false;
         sourceBytes += part; structures += (uint32_t)(wcslen(dataFiles[i]) + 1) * 2;
     }
-    if (sourceBytes != (uint64_t)totalSectors * 2048) return false;
+    if (sourceBytes != (uint64_t)totalSectors * sectorSize) return false;
     structures = (structures + 3) & ~3u;
     uint32_t bytes = structures + (cd ? 8 : layerBreakLba ? 8200 : 4100);
     uint8_t* data = (uint8_t*)calloc(1, bytes);
@@ -577,7 +579,7 @@ static bool mds_create_data(const wchar_t* mdsFilePath, const wchar_t* const* da
     MdsSessionBlock* session = (MdsSessionBlock*)(data + 88);
     session->sessionStartLba = cd ? -150 : 0; session->sessionEndLba = (int32_t)totalSectors; session->sessionNumber = 1; session->totalTracks = 1; session->leadInTracks = 3; session->firstTrack = 1; session->lastTrack = 1; session->tracksOffset = 112;
     MdsTrackBlock* track = (MdsTrackBlock*)(data + 112);
-    track->trackMode = cd ? 0xAA : 0x02; track->adrControl = 0x14; track->point = 1; track->time[5] = 2; track->extraOffset = cd ? structures : totalSectors; track->sectorSize = 2048; track->fileCount = (uint32_t)fileCount; track->footerOffset = 192;
+    track->trackMode = cd ? 0xAA : 0x02; track->adrControl = 0x14; track->point = 1; track->time[5] = 2; track->extraOffset = cd ? structures : totalSectors; track->sectorSize = sectorSize; track->fileCount = (uint32_t)fileCount; track->footerOffset = 192;
     uint32_t nameOffset = 192 + (uint32_t)fileCount * 16;
     for (size_t i = 0; i < fileCount; i++) {
         uint32_t footer[4] = {nameOffset, 1, 0, 0}, nameBytes = (uint32_t)(wcslen(dataFiles[i]) + 1) * 2;
@@ -615,16 +617,19 @@ static bool mds_create_data(const wchar_t* mdsFilePath, const wchar_t* const* da
 }
 
 bool imgburn_mds_create_files_ex(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath) {
-    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,false,false);
+    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,false,false,2048);
 }
 bool imgburn_mds_create_dvd_read(const wchar_t* mdsFilePath, const wchar_t* dataFile, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath) {
     const wchar_t* files[] = {dataFile}; return imgburn_mds_create_dvd_read_files(mdsFilePath,files,1,totalSectors,layerBreakLba,oppositeTrackPath);
 }
 bool imgburn_mds_create_dvd_read_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath) {
-    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,true,false);
+    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,true,false,2048);
 }
 bool imgburn_mds_create_cd_read_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors) {
-    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,0,false,true,true);
+    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,0,false,true,true,2048);
+}
+bool imgburn_mds_create_cd_raw_read(const wchar_t* mdsFilePath, const wchar_t* dataFile, uint32_t totalSectors) {
+    const wchar_t* files[] = {dataFile}; return mds_create_data(mdsFilePath,files,1,totalSectors,0,false,true,true,2352);
 }
 
 /* -------------------------------------------------------------------------

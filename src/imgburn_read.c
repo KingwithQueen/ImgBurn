@@ -83,6 +83,7 @@ static bool read_create_parts(const wchar_t* destination, ReadDataPart* parts, u
 }
 
 bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callback, void* context) {
+    if (config && config->rawCdMds) return pipeline_read_cd(config,callback,context);
     PipelineStats stats = {0}; HANDLE output = INVALID_HANDLE_VALUE; uint8_t* buffer = NULL; wchar_t destination[MAX_PATH], temporary[MAX_PATH] = L"", descriptor[MAX_PATH] = L"";
     ReadDataPart* parts = NULL; unsigned partCount = 0;
     DWORD error = ERROR_SUCCESS; bool success = false, temporaryCreated = false, descriptorCreated = false;
@@ -208,6 +209,11 @@ bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallbac
     else if (compare) {
         const wchar_t* extension = wcsrchr(config->imagePath,L'.');
         if (extension && !_wcsicmp(extension,L".cue")) return pipeline_verify_cd(config,callback,context);
+        if (extension && !_wcsicmp(extension,L".mds")) {
+            MdsSheet* metadata = calloc(1,sizeof(*metadata)); if (!metadata) return read_failure(&stats,ERROR_NOT_ENOUGH_MEMORY,"Cannot prepare comparison image",callback,context);
+            bool parsed = imgburn_mds_parse(config->imagePath,metadata), raw = parsed && metadata->trackCount && metadata->tracks[0].sectorSize == 2352; free(metadata);
+            if (raw) return pipeline_verify_cd(config,callback,context);
+        }
         if (!imgburn_data_source_open(&image,config->imagePath)) return read_failure(&stats,GetLastError(),"Cannot open comparison image",callback,context);
         imageOpen = true; stats.totalSectors = image.sectors;
     }

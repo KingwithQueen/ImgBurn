@@ -355,11 +355,41 @@ static bool cue_metadata_line(char* text, size_t capacity, size_t* used, const c
     return !value[0] || cue_append(text, capacity, used, "%s%s \"%s\"\n", prefix, command, value);
 }
 
+static bool cue_lead_outs(const AudioCompilation* comp, uint32_t ends[99]) {
+    memcpy(ends, comp->sessionEndLba, sizeof(comp->sessionEndLba));
+    wchar_t previous[MAX_PATH] = L""; CueFileType previousType = CUE_FILE_BINARY; unsigned previousGroup = 0; int first = 0;
+    for (int i = 0; i <= comp->trackCount; i++) {
+        wchar_t source[MAX_PATH] = L""; CueFileType type = CUE_FILE_BINARY; bool newFile = i == comp->trackCount;
+        if (i < comp->trackCount) {
+            const AudioTrack* track = &comp->tracks[i];
+            if (wcsnlen(track->filePath, MAX_PATH) == MAX_PATH) return false;
+            DWORD chars = GetFullPathNameW(track->filePath, MAX_PATH, source, NULL); if (!chars || chars >= MAX_PATH) return false;
+            type = track->sourceIsWave && track->sourceType == CUE_FILE_BINARY ? CUE_FILE_WAVE : track->sourceType;
+            newFile = wcscmp(previous, source) || previousType != type || (track->sourceFileGroup && track->sourceFileGroup != previousGroup);
+        }
+        if (!newFile) continue;
+        if (i) {
+            const AudioTrack* last = &comp->tracks[i - 1]; unsigned session = last->sessionNumber ? last->sessionNumber : 1;
+            /* 后续会话独立FILE的LEAD-OUT为文件坐标，POSTGAP另由布局生成。 */
+            if (session > 1 && session <= 99 && comp->tracks[first].sessionNumber == session && (i == comp->trackCount || comp->tracks[i].sessionNumber != session)) {
+                if (last->indexCount < 0 || last->indexCount > MAX_CUE_INDICES) return false;
+                uint32_t indexOne = msf_to_lba(last->startTime); bool found = !last->indexCount;
+                for (int j = 0; j < last->indexCount; j++) if (last->indices[j].indexNumber == 1) { indexOne = last->indices[j].lba; found = true; }
+                if (!found || last->sectorCount > UINT32_MAX - indexOne) return false;
+                ends[session - 1] = indexOne + last->sectorCount;
+            }
+        }
+        if (i < comp->trackCount) { first = i; wcscpy(previous, source); previousType = type; previousGroup = comp->tracks[i].sourceFileGroup; }
+    }
+    return true;
+}
+
 bool cue_sheet_generate(const AudioCompilation* comp, const wchar_t* outCuePath) {
     if (!comp || !outCuePath || comp->trackCount <= 0 || comp->trackCount > MAX_AUDIO_TRACKS || wcslen(outCuePath) >= MAX_PATH || !cue_metadata(comp->cdTitle, 128) || !cue_metadata(comp->cdPerformer, 128)) return false;
     wchar_t destination[MAX_PATH], temporary[MAX_PATH], previous[MAX_PATH] = L"";
     DWORD chars = GetFullPathNameW(outCuePath, MAX_PATH, destination, NULL);
     if (!chars || chars >= MAX_PATH) return false;
+    uint32_t sessionEnds[99]; if (!cue_lead_outs(comp, sessionEnds)) return false;
     const size_t capacity = 256 * 1024;
     char* text = (char*)calloc(1, capacity);
     if (!text) return false;
@@ -396,7 +426,7 @@ bool cue_sheet_generate(const AudioCompilation* comp, const wchar_t* outCuePath)
         if (currentSession != session) {
             if (currentSession != session + 1 || currentSession > 99) { ok = false; break; }
             if (session) {
-                uint32_t end = comp->sessionEndLba[session - 1];
+                uint32_t end = sessionEnds[session - 1];
                 if (!end || end >= 100 * 60 * 75) { ok = false; break; }
                 MsfTime leadOut = lba_to_msf(end);
                 /* 原版在下一会话前要求显式LEAD-OUT，不能只输出SESSION。 */
@@ -458,8 +488,8 @@ bool cue_sheet_generate(const AudioCompilation* comp, const wchar_t* outCuePath)
             else ok = cue_append(text, capacity, &used, "    POSTGAP %02u:%02u:%02u\n", gap.minute, gap.second, gap.frame);
         }
     }
-    if (ok && session && comp->sessionEndLba[session - 1]) {
-        uint32_t end = comp->sessionEndLba[session - 1];
+    if (ok && session && sessionEnds[session - 1]) {
+        uint32_t end = sessionEnds[session - 1];
         if (end >= 100 * 60 * 75) ok = false;
         else {
             /* 末会话也必须保留引用终点，避免截短音轨导出后重新包含源文件尾部。 */

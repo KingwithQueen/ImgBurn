@@ -194,6 +194,8 @@ bool imgburn_mds_create_dvd_read(const wchar_t* mdsPath, const wchar_t* dataFile
 bool imgburn_mds_create_dvd_read_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath);
 /* 原版可载入的精简单会话、单轨 MODE1/2048 CD 描述，不生成原始音频或子通道布局。 */
 bool imgburn_mds_create_cd_read_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors);
+/* 原版可载入的精简单轨 MODE1/2352 CD 描述；主通道文件从 LBA 0 开始。 */
+bool imgburn_mds_create_cd_raw_read(const wchar_t* mdsPath, const wchar_t* dataFile, uint32_t totalSectors);
 
 /* -------------------------------------------------------------------------
  * DVD-Video Layer Break Candidate Structure
