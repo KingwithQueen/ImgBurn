@@ -85,6 +85,9 @@ static void print_usage(void) {
     printf("  burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle] [--opc]\n");
     printf("                                 Burn disc image with real-time telemetry\n");
     printf("  erase <drive> [--quick|--full]   Erase CD-RW/DVD-RW; cancellation waits for the device\n");
+    printf("  discovery <drive> [--sectors <n>] [--speed <Nx|MAX>] [--test]\n");
+    printf("        [--verify|--no-verify] [--no-cycle] [--opc]\n");
+    printf("                                 Write zero data; all free sectors and verify by default\n");
     printf("  verify <drive> <image|--readable> [--retries <0..20>] [--compare-audio]\n");
     printf("                                 Verify data ISO/BIN or raw CD CUE; audio defaults to readability\n\n");
     printf("Examples:\n");
@@ -573,6 +576,37 @@ static int cmd_verify(int argc, char **argv) {
     return ok ? 0 : 1;
 }
 
+/* 品质测试直接写入零数据；默认使用全部可写容量，并在写入后回读验证。 */
+static int cmd_discovery(int argc, char** argv) {
+    if (argc < 3) { printf("Usage: imgburn discovery <drive> [--sectors <n>] [--speed <Nx|MAX>] [--test] [--verify|--no-verify] [--no-cycle] [--opc]\n"); return 1; }
+    DiscoveryConfig config = {0}; config.verifyAfterWrite = true; config.cycleTrayBeforeVerify = true; config.writeSpeedKbps = UINT32_MAX; config.ringBufferBytes = 32 * 1024 * 1024; double speed = 0;
+    for (int i = 3; i < argc; i++) {
+        if (!_stricmp(argv[i],"--test")) config.testMode = true;
+        else if (!_stricmp(argv[i],"--verify")) config.verifyAfterWrite = true;
+        else if (!_stricmp(argv[i],"--no-verify")) config.verifyAfterWrite = false;
+        else if (!_stricmp(argv[i],"--no-cycle")) config.cycleTrayBeforeVerify = false;
+        else if (!_stricmp(argv[i],"--opc")) config.performOpc = true;
+        else if (!_stricmp(argv[i],"--sectors") && i + 1 < argc) { char* end; const char* value = argv[++i]; uint64_t count = _strtoui64(value,&end,10); if (!value[0] || *end || !count || count > UINT32_MAX || value[0] == '-') { printf("Error: Invalid custom sector count.\n"); return 1; } config.sectors = (uint32_t)count; }
+        else if (!_stricmp(argv[i],"--speed") && i + 1 < argc) {
+            const char* value = argv[++i]; if (!_stricmp(value,"MAX")) speed = 0;
+            else { char* end; speed = strtod(value,&end); if ((*end == 'x' || *end == 'X') && !end[1]) end++; if (!value[0] || *end || !isfinite(speed) || speed < 1 || speed * 4495.5 + 0.5 >= UINT32_MAX) { printf("Error: Invalid write speed.\n"); return 1; } }
+        } else { printf("Error: Unknown or incomplete discovery option: %s\n",argv[i]); return 1; }
+    }
+    wchar_t device[MAX_PATH]; if (!parse_drive_path(argv[2],device,MAX_PATH)) return 1;
+    OpticalDrive drive; if (!spti_open_drive(&drive,device,true)) { printf("Error: Cannot open target drive exclusively (%lu).\n",GetLastError()); return 1; }
+    if (speed > 0) { MmcProfile profile = mmc_get_current_profile(&drive); if (profile == MMC_PROFILE_UNKNOWN) { printf("Error: Cannot identify media for write speed.\n"); spti_close_drive(&drive); return 1; } config.writeSpeedKbps = (uint32_t)(speed * (profile == MMC_PROFILE_BD_R_SRM ? 4495.5 : profile == MMC_PROFILE_CD_R ? 176.4 : 1385.0) + 0.5); }
+    HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; }
+    config.drive = &drive; config.cancelEvent = cancel;
+    AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock); bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
+    printf("Discovery: %s sectors, TestMode=%s, Verify=%s, Speed=%.2fx (0=MAX)\n",config.sectors ? "custom" : "all free",config.testMode ? "YES" : "NO",config.verifyAfterWrite && !config.testMode ? "YES" : "NO",speed);
+    PipelineStats report = {0}; bool ok = pipeline_discover_disc(&config,on_cli_verify_progress,&report); DWORD error = GetLastError();
+    if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock); spti_close_drive(&drive);
+    if (ok && config.testMode) printf("\nDiscovery device test write completed; recorded-data verification was skipped.\n");
+    else if (ok) printf("\nDiscovery completed: %u sectors written, %u sectors compared.\n",report.totalSectors,report.comparedSectors);
+    else printf("\nDiscovery %s (error %lu, %u mismatched sectors).\n",error == ERROR_CANCELLED ? "cancelled" : "failed",error,report.miscomparesCount);
+    return ok ? 0 : 1;
+}
+
 /* 与扇区查看器窗口使用同一只读接口，输出支持原始 CD 的 96 字节子通道。 */
 static int cmd_sector(int argc, char** argv) {
     if (argc < 4 || argc > 5) { printf("Usage: imgburn sector <drive> <lba|--last> [--raw|--raw-sub]\n"); return 1; }
@@ -913,6 +947,8 @@ static int run_cli(int argc, char **argv) {
         return cmd_burn(argc, argv);
     } else if (_stricmp(cmd, "erase") == 0) {
         return cmd_erase(argc,argv);
+    } else if (_stricmp(cmd, "discovery") == 0) {
+        return cmd_discovery(argc,argv);
     } else if (_stricmp(cmd, "read") == 0) {
         return cmd_read(argc,argv);
     } else if (_stricmp(cmd, "verify") == 0) {

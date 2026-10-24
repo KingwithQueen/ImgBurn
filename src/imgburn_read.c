@@ -116,8 +116,9 @@ bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallbac
     if (!config || !config->drive || config->retryCount > 20) return read_failure(&stats,ERROR_INVALID_PARAMETER,"Invalid verify configuration",callback,context);
     ReadConfig reader = {0}; reader.drive = config->drive; reader.cancelEvent = config->cancelEvent; reader.retryCount = config->retryCount;
     if (read_cancelled(&reader)) return read_failure(&stats,ERROR_CANCELLED,"Verify cancelled",callback,context);
-    bool compare = config->imagePath && config->imagePath[0];
-    if (compare) {
+    bool zeroSource = config->zeroSectors != 0, compare = zeroSource || (config->imagePath && config->imagePath[0]);
+    if (zeroSource) stats.totalSectors = config->zeroSectors;
+    else if (compare) {
         const wchar_t* extension = wcsrchr(config->imagePath,L'.');
         if (extension && !_wcsicmp(extension,L".cue")) return pipeline_verify_cd(config,callback,context);
         if (!extension || (_wcsicmp(extension,L".iso") && _wcsicmp(extension,L".bin"))) return read_failure(&stats,ERROR_NOT_SUPPORTED,"Require a data ISO or BIN",callback,context);
@@ -133,8 +134,8 @@ bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallbac
     if (last == UINT32_MAX || bytes != 2048 || (compare && stats.totalSectors > last + 1)) { error = ERROR_INVALID_DATA; goto verify_done; }
     uint32_t capacity = last + 1; if (!compare) stats.totalSectors = capacity;
     if (profile <= MMC_PROFILE_CD_RW && !mmc_check_iso_cd(drive,capacity)) { error = read_device_error(drive); goto verify_done; }
-    data = malloc(32 * 2048); if (compare) reference = malloc(32 * 2048); if (!data || (compare && !reference)) { error = ERROR_NOT_ENOUGH_MEMORY; goto verify_done; }
-    stats.state = PIPELINE_STATE_VERIFYING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),compare ? "Comparing disc data against image..." : "Checking disc data readability..."); ULONGLONG started = GetTickCount64();
+    data = malloc(32 * 2048); if (compare) reference = zeroSource ? calloc(32,2048) : malloc(32 * 2048); if (!data || (compare && !reference)) { error = ERROR_NOT_ENOUGH_MEMORY; goto verify_done; }
+    stats.state = PIPELINE_STATE_VERIFYING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),zeroSource ? "Comparing Discovery disc data against in-memory zero data..." : compare ? "Comparing disc data against image..." : "Checking disc data readability..."); ULONGLONG started = GetTickCount64();
     if (callback) callback(&stats,context);
     for (uint32_t lba = 0; lba < stats.totalSectors;) {
         if (read_cancelled(&reader)) { error = ERROR_CANCELLED; goto verify_done; }
@@ -142,7 +143,7 @@ bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallbac
         if (!read_sectors(&reader,lba,count,data,&stats)) { error = read_cancelled(&reader) ? ERROR_CANCELLED : read_device_error(drive); goto verify_done; }
         if (compare) {
             DWORD wanted = (DWORD)count * 2048, offset = 0;
-            while (offset < wanted) { DWORD actual = 0; if (!ReadFile(image,reference + offset,wanted - offset,&actual,NULL)) { error = GetLastError(); goto verify_done; } if (!actual || actual > wanted - offset) { error = ERROR_HANDLE_EOF; goto verify_done; } offset += actual; }
+            while (!zeroSource && offset < wanted) { DWORD actual = 0; if (!ReadFile(image,reference + offset,wanted - offset,&actual,NULL)) { error = GetLastError(); goto verify_done; } if (!actual || actual > wanted - offset) { error = ERROR_HANDLE_EOF; goto verify_done; } offset += actual; }
             for (unsigned i = 0; i < count; i++) if (memcmp(data + (size_t)i * 2048,reference + (size_t)i * 2048,2048)) stats.miscomparesCount++;
             stats.comparedSectors += count;
         } else stats.readableOnlySectors += count;
@@ -157,5 +158,5 @@ bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallbac
 verify_done:
     if (image != INVALID_HANDLE_VALUE) CloseHandle(image); free(data); free(reference);
     if (!success) return read_failure(&stats,error,"Verify did not complete",callback,context);
-    stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),compare ? "Disc data matches image." : "Disc data readability check passed."); if (callback) callback(&stats,context); return true;
+    stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),zeroSource ? "Discovery data matches the zero source." : compare ? "Disc data matches image." : "Disc data readability check passed."); if (callback) callback(&stats,context); return true;
 }

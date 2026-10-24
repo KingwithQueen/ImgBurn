@@ -5,9 +5,9 @@
 #include "imgburn_spti.h"
 
 typedef enum { GUI_EZ, GUI_READ, GUI_BUILD, GUI_WRITE, GUI_VERIFY, GUI_DISCOVERY } GuiMode;
-typedef enum { GUI_CALCULATE, GUI_BUILD_IMAGE, GUI_INSPECT, GUI_CREATE_CUE, GUI_CREATE_MDS, GUI_DRIVE_INFO, GUI_VERIFY_DISC, GUI_WRITE_DISC, GUI_DVD_INFO, GUI_DVD_PREVIEW, GUI_READ_DISC, GUI_ERASE_QUICK, GUI_ERASE_FULL } GuiOperation;
+typedef enum { GUI_CALCULATE, GUI_BUILD_IMAGE, GUI_INSPECT, GUI_CREATE_CUE, GUI_CREATE_MDS, GUI_DRIVE_INFO, GUI_VERIFY_DISC, GUI_WRITE_DISC, GUI_DVD_INFO, GUI_DVD_PREVIEW, GUI_READ_DISC, GUI_ERASE_QUICK, GUI_ERASE_FULL, GUI_DISCOVERY_DISC } GuiOperation;
 typedef struct { wchar_t path[MAX_PATH]; } GuiPath;
-enum { GUI_JOB_PROGRESS = WM_APP + 40, GUI_JOB_DONE };
+enum { GUI_JOB_PROGRESS = WM_APP + 40, GUI_JOB_DONE, GUI_JOB_STATUS };
 
 typedef struct {
     GuiOperation operation;
@@ -19,11 +19,13 @@ typedef struct {
     FsTypeFlags fsTypes;
     UdfRevision revision;
     bool dvdVideo, bluray, optimize, verify, seamless, oppositeTrackPath, replaceExisting, testMode, testWriteSupported, readCdText;
-    uint16_t speed;
+    uint32_t speed, discoverySectors, discoveryCapacity;
+    double discoverySpeedMultiplier;
     uint32_t layerBreak;
     uint32_t comparedSectors, readableOnlySectors, miscompares;
     bool succeeded, builderReady, mediaReady, eraseSupported;
     DWORD error;
+    char lastStatus[128];
     wchar_t result[8192];
     ImageBuilder builder;
     DvdNavigation navigation;

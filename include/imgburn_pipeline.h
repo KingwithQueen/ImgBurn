@@ -91,6 +91,19 @@ bool pipeline_burn_image(const BurnConfig* config,
                          PipelineProgressCallback callback,
                          void* userData);
 
+/* Discovery 使用内存零数据，sectors 为零时写入全部空余扇区。 */
+typedef struct {
+    OpticalDrive* drive;
+    uint32_t sectors;
+    uint32_t writeSpeedKbps;
+    bool testMode, verifyAfterWrite, ejectWhenDone;
+    size_t ringBufferBytes;
+    HANDLE cancelEvent;
+    bool cycleTrayBeforeVerify, performOpc;
+} DiscoveryConfig;
+bool pipeline_discovery_capacity(OpticalDrive* drive, uint32_t* sectors);
+bool pipeline_discover_disc(const DiscoveryConfig* config, PipelineProgressCallback callback, void* userData);
+
 /* CD-RW/DVD-RW 的整盘擦除。命令开始后的取消须等待设备结束，不能中断物理擦除。 */
 typedef struct { OpticalDrive* drive; HANDLE cancelEvent; bool full; } EraseConfig;
 bool pipeline_erase_disc(const EraseConfig* config, PipelineProgressCallback callback, void* userData);
@@ -119,7 +132,7 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
 bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callback, void* userData);
 
 /* Verify：空镜像检查可读性，ISO/BIN 比较数据扇区，CUE 比较受支持的原始 CD。 */
-typedef struct { OpticalDrive* drive; const wchar_t* imagePath; HANDLE cancelEvent; unsigned retryCount; bool compareAudio; bool saoData; } VerifyConfig; /* 写后参考按 SAO 重建数据头与纠错字段，独立原始校验默认保留全部字节。 */
+typedef struct { OpticalDrive* drive; const wchar_t* imagePath; HANDLE cancelEvent; unsigned retryCount; bool compareAudio; bool saoData; uint32_t zeroSectors; } VerifyConfig; /* 写后参考按 SAO 重建数据头与纠错字段；zeroSectors 显式指定 Discovery 零数据比较范围。 */
 bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallback callback, void* userData);
 bool pipeline_verify_cd(const VerifyConfig* config, PipelineProgressCallback callback, void* userData);
 

@@ -49,7 +49,7 @@ msbuild ImgBurn.sln /m /p:Configuration=Release /p:Platform=x64
 | DVD-Video / Blu-ray 布局 | DVD 使用 ISO+UDF 1.02，补建 AUDIO_TS、过滤 VIDEO_TS、按视频文件顺序排列，并保证 IFO 末尾与 BUP 开头至少间隔 32 KiB。在输出中修正 IFO/BUP 与标题集地址；标题导航交叉检查 PGC、PTT、Cell 地址、VOBU 表和 NAV 包，支持从实际布局选取 OTP 层切换单元、加入填充、更新 SPLIP 并生成 MDS。Blu-ray 使用纯 UDF 2.50、EFE、元数据副本、64 KiB 文件对齐、分离的主备描述区及 BDMV/BDAV 目录补齐。输入需要已经制作好的视频目录；单元预览与原版的逐项对照及介质验收仍待完成 |
 | Write | GUI/命令行已接通空白 CD-R MODE1 SAO、单层 DVD-R DAO、DVD+R 和 BD-R SRM 的单会话单轨 2048 字节 ISO/BIN 写入，并支持 BINARY/MOTOROLA、原生 PCM WAVE 与可解码音频、MODE1/2352、XA MODE2/2352 及混合轨 CUE 的单会话多轨 SAO 写入、索引及间隙。支持 CD-TEXT 的导入区写入，使用 CUE 文字或优先保留的原始 CDT。检查介质和容量，按介质发送布局、设置速度、预留轨道并收尾；BD-R 根据当前能力选择 VNR 或普通写入。CD-R、DVD-R 支持设备能力允许的测试写入；命令行/API 可显式请求 OPC。支持 CD-RW、单层 DVD-RW 快速/完整擦除、取消、保护恢复和写后回读比较。缺失解码器的音频、非 XA MODE2、DVD 双层写入、其他介质格式化及完整设置仍待实现；实体刻录未验收 |
 | Verify | GUI/命令行支持 2048 字节数据光盘可读性检查和 ISO/BIN 比较，新增单会话音频、混合轨道、MODE1/MODE2 CD 可读性检查及受支持的原始 CUE/BIN 比较。音频按原版默认仅检查可读性，可显式开启样本比较。支持重试、取消、完整传输检查、失配计数及结束布局复查；多会话、MDS、完整选项及真实介质流程尚未验收，其他音频格式取决于可用解码器 |
-| Discovery | 已有模式页面，测试流程尚未实现 |
+| Discovery | GUI/命令行已接通内存全零数据的写入与回读比较，可选择全部空余扇区或自定义扇区数，支持速度、取消及设备测试写入。当前介质范围为空白 CD-R、单层 DVD-R/+R 和 BD-R SRM；BD 的全容量测试不预留固定长度轨道。可擦写介质、双层、超刻、AWS、图表及完整选项仍待补齐，实体刻录未验收 |
 | 桌面界面、设置、任务队列 | 已有快速向导、六种页面、文件/查看/模式/工具/帮助菜单及 Build 的输入/输出菜单。已接通来源选择、镜像计算和构建、日志、CUE/MDS 生成窗口、镜像信息和只读扇区查看器；可选加载原版主图标、向导及部分按钮图像。完整工具窗口、方案保存载入、设置、队列、图表和高级布局编辑仍待补齐 |
 | 音频、CUE、MDS、层切换点 | CUE 支持 UTF-8、UTF-16 LE/BE、本机 ANSI、CR/LF/CRLF 换行、BINARY/MOTOROLA、混合扇区尺寸、INDEX 00–99、FLAGS、TITLE/PERFORMER/SONGWRITER/COMPOSER/ARRANGER/MESSAGE、DISCID、UPC、CDTEXTFILE 和多会话；下一会话前要求 LEAD-OUT，导出器保留该声明。WAVE、AIFF、MP3 等音频按解码后的实际 PCM 计数。MDS 支持 1.x 多会话 CD、DVD、多轨道、非零数据偏移及分卷引用，提供 OTP/PTP DVD 描述生成接口，PTP 可保留 L1 大于 L0 的布局。CD 多会话写入、完整格式兼容和刻录集成仍待完成 |
 | 厂商控制与换盘设备 | 有部分命令封装；参数覆盖及真实硬件行为未验收 |
@@ -58,6 +58,17 @@ msbuild ImgBurn.sln /m /p:Configuration=Release /p:Platform=x64
 功能范围以 [ImgBurn 官方说明](https://www.imgburn.com/) 和原版随附的命令行说明为参考。当前属于具有部分桌面操作流程的核心原型，不能认定为完整复刻或可交付的刻录软件。
 
 本机审计记录、原始基线、复现脚本及结果保存在被忽略的 `.local/` 下，不属于公开发布内容。尚未执行真实光盘写入、擦除、设备设置修改或原版逐项人工对照验收。
+
+Discovery 命令示例（会向所选光盘写入数据）：
+
+```bat
+ImgBurn.exe discovery R:
+ImgBurn.exe discovery R: --sectors 2295000 --speed 4x
+ImgBurn.exe discovery R: --sectors 2295000 --test
+ImgBurn.exe discovery R: --no-verify
+```
+
+按[原版作者说明](https://forum.imgburn.com/topic/4319-how-to-use-discovery-mode/)，Discovery 从内存连续生成 2048 字节扇区的全零用户数据，不建立临时 ISO 或文件系统。默认写入全部空余扇区并在重新装载后回读比较；`--sectors` 指定自定义数量，`--speed` 接受 MAX 或倍率，未指定时为 MAX。GUI 提供全部/自定义、容量复制、MiB 换算、速度、测试模式和校验选项。测试模式仅用于设备支持的 CD-R、DVD-R，跳过回读校验；`--no-verify` 关闭比较，`--no-cycle` 关闭校验前的托盘重载，`--opc` 显式请求功率校准。非测试模式会实际消耗空白光盘。当前不支持超刻、重写盘、双层或完整原版高级设置，命令行仍使用本工程子命令接口。
 
 Read 数据镜像命令示例：
 
@@ -74,7 +85,7 @@ CD 的 ISO 路径只接受能够以 2048 字节用户数据保存的单轨 MODE1
 
 原始读取保留 LBA 0 到 lead-out 之前的全部 2352 字节主通道，CUE 记录轨道模式、FLAGS、INDEX 00–99 及结束地址。Q 用于检查 CRC、轨道和绝对/相对地址，不写入 BIN；若非位置 Q 遮住不能确定的索引边界，会明确失败。不会推测缺失索引或填零。先完成新 BIN，最后发布 CUE；已有 BIN 不覆盖，有同名文件时依次使用 `.001.bin` 等文件名。明确替换 CUE 后，旧 BIN 仍保留；失败或取消时尝试删除本次创建的文件。该文件保护策略尚未完成与原版输出命名行为的逐项对照。
 
-CUE/BIN Read 默认通过 READ SUB-CHANNEL 查询盘级 MCN 和音轨 ISRC，同时从 READ CD 的 ADR2/ADR3 扫描获取编号；双路径依据[原版作者说明](https://forum.imgburn.com/topic/11942-bad-or-no-isrc-and-mcn-codes-from-cd-audio-discs/)和官方更新记录。有效编号分别导出为 CATALOG 和 ISRC，与 CD-TEXT 的 UPC/文字 ISRC 独立。ADR3 自身没有轨号，只有前后验证的位置 Q 同属一轨时才采纳，不按 TOC 起点猜测 INDEX00 中的归属。无有效值、全零编号或设备明确不支持不抹除另一来源已取得的值；坏可选编号仅忽略该样本，CLI 和状态回调给出提示，GUI 的详细状态日志仍待接通。传输失败、坏 Q CRC、有效编号冲突或前后有效查询不一致会结束读取并保护旧输出。当前未完整复刻异常驱动器的全部兼容策略，也未保存任意 P–W 子通道。
+CUE/BIN Read 默认通过 READ SUB-CHANNEL 查询盘级 MCN 和音轨 ISRC，同时从 READ CD 的 ADR2/ADR3 扫描获取编号；双路径依据[原版作者说明](https://forum.imgburn.com/topic/11942-bad-or-no-isrc-and-mcn-codes-from-cd-audio-discs/)和官方更新记录。有效编号分别导出为 CATALOG 和 ISRC，与 CD-TEXT 的 UPC/文字 ISRC 独立。ADR3 自身没有轨号，只有前后验证的位置 Q 同属一轨时才采纳，不按 TOC 起点猜测 INDEX00 中的归属。无有效值、全零编号或设备明确不支持不抹除另一来源已取得的值；坏可选编号仅忽略该样本，CLI、GUI 日志和状态回调给出提示。传输失败、坏 Q CRC、有效编号冲突或前后有效查询不一致会结束读取并保护旧输出。当前未完整复刻异常驱动器的全部兼容策略，也未保存任意 P–W 子通道。
 
 扩展预间隙读取允许新数据轨 INDEX00 的前段保留旧轨控制和数据结构，核对最后 150 帧的新结构、实际切换位置及 INDEX01；无法确定的边界仍拒绝。SCMS 根据位置 Q 的每四帧翻转周期识别，要求充分且唯一的相位证据，再导出 SCMS 标志；普通 DCP 保持不变。非周期拷贝位变化、证据不足或其他控制位错误不推测为 SCMS。已有普通短预间隙仍可原始读取，写入时另按合规布局检查。
 

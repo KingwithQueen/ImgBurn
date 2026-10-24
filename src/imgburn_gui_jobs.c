@@ -24,7 +24,11 @@ static void job_progress(int percent, uint32_t current, uint32_t total, void* co
     if (job->owner) PostMessageW(job->owner, GUI_JOB_PROGRESS, (WPARAM)percent, (LPARAM)job);
 }
 static void job_pipeline_progress(const PipelineStats* stats, void* context) {
-    GuiJob* job = context; if (job->operation == GUI_VERIFY_DISC) { job->comparedSectors = stats->comparedSectors; job->readableOnlySectors = stats->readableOnlySectors; job->miscompares = stats->miscomparesCount; }
+    GuiJob* job = context; if (job->operation == GUI_VERIFY_DISC || job->operation == GUI_DISCOVERY_DISC) { job->comparedSectors = stats->comparedSectors; job->readableOnlySectors = stats->readableOnlySectors; job->miscompares = stats->miscomparesCount; }
+    if (job->owner && stats->statusMessage[0] && strcmp(job->lastStatus,stats->statusMessage)) {
+        strcpy(job->lastStatus,stats->statusMessage); wchar_t* text = (wchar_t*)calloc(256,sizeof(wchar_t));
+        if (text) { MultiByteToWideChar(CP_UTF8,0,stats->statusMessage,-1,text,256); if (!PostMessageW(job->owner,GUI_JOB_STATUS,(WPARAM)job,(LPARAM)text)) free(text); }
+    }
     job_progress(stats->progressPercent, stats->currentLba, stats->totalSectors, context);
 }
 
@@ -123,7 +127,7 @@ static bool job_mds(GuiJob* job) {
 }
 
 static bool job_drive(GuiJob* job) {
-    OpticalDrive drive; if (!spti_open_drive(&drive, job->drive, job->operation == GUI_WRITE_DISC)) return false;
+    OpticalDrive drive; if (!spti_open_drive(&drive, job->drive, job->operation == GUI_WRITE_DISC || job->operation == GUI_DISCOVERY_DISC)) return false;
     bool ok = false; uint32_t last = 0, bytes = 0; bool ready = mmc_test_unit_ready(&drive);
     job->mediaReady = ready;
     if (job->operation == GUI_DRIVE_INFO) {
@@ -133,6 +137,7 @@ static bool job_drive(GuiJob* job) {
         if (ready && mmc_get_current_profile(&drive) == MMC_PROFILE_DVD_R_SEQ) { MmcDvdWriteFeatures features; if (mmc_get_dvd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
         if (ready && mmc_get_current_profile(&drive) == MMC_PROFILE_CD_R) { MmcCdWriteFeatures features; if (mmc_get_cd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
         if (ready) { MmcDiscInfo disc; if (mmc_read_disc_information(&drive,&disc)) job->eraseSupported = disc.isErasable && (disc.currentProfile == MMC_PROFILE_CD_RW || disc.currentProfile == MMC_PROFILE_DVD_RW_SEQ || disc.currentProfile == MMC_PROFILE_DVD_RW_RO); }
+        if (ready) pipeline_discovery_capacity(&drive,&job->discoveryCapacity);
     } else if (!ready) SetLastError(ERROR_NOT_READY);
     else if (job->operation == GUI_READ_DISC) {
         ReadConfig config = {0}; config.drive = &drive; config.imagePath = job->destination; config.cancelEvent = job->cancel; config.retryCount = 20; config.replaceExisting = job->replaceExisting; config.readCdText = job->readCdText;
@@ -151,6 +156,16 @@ static bool job_drive(GuiJob* job) {
         if (ok) job_text(job,config.full ? L"完整擦除完成，设备已报告空白介质。\r\n" : L"快速擦除完成，设备已报告空白介质。\r\n");
         else if (job->error == ERROR_CANCELLED) job_text(job,L"取消不会中断已经开始的物理擦除；若已开始，已等待设备结束。\r\n");
         else if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前擦除流程支持 CD-RW 和单层 DVD-RW。\r\n");
+    }
+    else if (job->operation == GUI_DISCOVERY_DISC) {
+        DiscoveryConfig config = {0}; config.drive = &drive; config.sectors = job->discoverySectors; config.writeSpeedKbps = job->speed; config.testMode = job->testMode; config.verifyAfterWrite = job->verify; config.ringBufferBytes = 32 * 1024 * 1024; config.cancelEvent = job->cancel; config.cycleTrayBeforeVerify = true;
+        if (job->discoverySpeedMultiplier > 0) { MmcProfile profile = mmc_get_current_profile(&drive); config.writeSpeedKbps = (uint32_t)(job->discoverySpeedMultiplier * (profile == MMC_PROFILE_BD_R_SRM ? 4495.5 : profile == MMC_PROFILE_CD_R ? 176.4 : 1385.0) + 0.5); }
+        ok = pipeline_discover_disc(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
+        if (ok && job->testMode) job_text(job,L"品质测试的设备测试写入完成；未执行记录数据的回读校验。\r\n");
+        else if (ok) job_text(job,L"品质测试写入完成%ls。\r\n已比较 %u 扇区。\r\n",job->verify ? L"并通过回读校验" : L"",job->comparedSectors);
+        else if (job->miscompares) job_text(job,L"品质测试发现 %u 个内容不一致的扇区。\r\n",job->miscompares);
+        else if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前品质测试支持空白 CD-R、单层 DVD-R/+R 与 BD-R SRM；测试模式需要光驱和介质支持。\r\n");
+        else if (job->error == ERROR_DISK_FULL) job_text(job,L"所选扇区数超过光盘可写容量。\r\n");
     }
     else if (job->operation == GUI_WRITE_DISC) {
         BurnConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.writeSpeedKbps = job->speed; config.verifyAfterWrite = job->verify; config.ringBufferBytes = 32 * 1024 * 1024; config.cancelEvent = job->cancel; config.cycleTrayBeforeVerify = true; config.testMode = job->testMode;
@@ -175,7 +190,7 @@ DWORD WINAPI imgburn_gui_job_run(void* context) {
         case GUI_INSPECT: job->succeeded = job_inspect(job); break;
         case GUI_CREATE_CUE: job->succeeded = job_cue(job); break;
         case GUI_CREATE_MDS: job->succeeded = job_mds(job); break;
-        case GUI_DRIVE_INFO: case GUI_VERIFY_DISC: case GUI_WRITE_DISC: case GUI_READ_DISC: case GUI_ERASE_QUICK: case GUI_ERASE_FULL: job->succeeded = job_drive(job); break;
+        case GUI_DRIVE_INFO: case GUI_VERIFY_DISC: case GUI_WRITE_DISC: case GUI_READ_DISC: case GUI_ERASE_QUICK: case GUI_ERASE_FULL: case GUI_DISCOVERY_DISC: job->succeeded = job_drive(job); break;
         case GUI_DVD_INFO: job->dvdVideo = true; job->succeeded = job_prepare(job) && imgburn_dvd_read_navigation(&job->builder, &job->navigation); break;
         case GUI_DVD_PREVIEW: job->succeeded = imgburn_dvd_preview_show(&job->builder, &job->preview, NULL) == 0; break;
     }
