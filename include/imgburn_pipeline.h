@@ -116,7 +116,7 @@ bool pipeline_verify_disc(OpticalDrive* drive,
                           PipelineProgressCallback callback,
                           void* userData);
 
-/* Read 主体：2048 字节 ISO，或单层/双层 DVD 的 MDS/ISO 配套；失败或取消时保护既有目标。 */
+/* Read 主体：2048 字节 ISO，或单轨 MODE1 CD、单层/双层 DVD 的 MDS 数据配套；失败或取消时保护既有目标。 */
 typedef struct {
     OpticalDrive* drive;
     const wchar_t* imagePath;
@@ -124,6 +124,7 @@ typedef struct {
     unsigned retryCount;            /* 单扇区额外重试次数，最多 20 次。 */
     bool replaceExisting;
     bool readCdText;                /* 显式读取并保留原始CD-TEXT；设备不支持时返回失败，不丢弃请求。 */
+    uint32_t splitSectors;          /* MDS 配套数据每卷最多的 2048 字节扇区数，0 表示不分卷。 */
 } ReadConfig;
 
 bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callback, void* userData);

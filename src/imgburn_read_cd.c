@@ -281,6 +281,7 @@ static bool cd_publish(const ReadConfig* config, const CdReadPlan* plan, const w
 
 bool pipeline_read_cd(const ReadConfig* config, PipelineProgressCallback callback, void* context) {
     PipelineStats stats = {0}; if (!config || !config->drive || !config->imagePath || !config->imagePath[0] || config->retryCount > 20) return cd_fail(&stats,ERROR_INVALID_PARAMETER,callback,context);
+    if (config->splitSectors) return cd_fail(&stats,ERROR_NOT_SUPPORTED,callback,context);
     if (cd_cancelled(config)) return cd_fail(&stats,ERROR_CANCELLED,callback,context);
     wchar_t destination[MAX_PATH] = L"", binary[MAX_PATH] = L"", textPath[MAX_PATH] = L"", parent[MAX_PATH]; if (!cd_target(config->imagePath,destination,config->replaceExisting)) return cd_fail(&stats,GetLastError(),callback,context);
     stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Inspecting raw CD layout..."); if (callback) callback(&stats,context);

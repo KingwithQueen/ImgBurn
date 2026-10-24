@@ -20,6 +20,7 @@ typedef struct {
     UdfRevision revision;
     bool dvdVideo, bluray, optimize, verify, seamless, oppositeTrackPath, replaceExisting, testMode, testWriteSupported, readCdText;
     uint32_t speed, discoverySectors, discoveryCapacity;
+    uint32_t readSplitSectors;
     double discoverySpeedMultiplier;
     uint32_t layerBreak;
     uint32_t comparedSectors, readableOnlySectors, miscompares;

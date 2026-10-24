@@ -80,9 +80,10 @@ static void print_usage(void) {
     printf("Burning & Verification Commands:\n");
     printf("  sector <drive> <lba|--last> [--raw|--raw-sub]\n");
     printf("                                 Inspect one sector as hexadecimal and ASCII\n");
-    printf("  read <drive> <out.iso|out.mds|out.cue> [--retries <0..20>] [--replace] [--cdtext]\n");
+    printf("  read <drive> <out.iso|out.mds|out.cue> [--retries <0..20>] [--replace] [--cdtext] [--split <MiB>]\n");
     printf("                                 Read data ISO or raw CD BIN/CUE with Q indexes\n");
-    printf("                                 MDS destination saves DVD ISO + single/dual-layer layout\n");
+    printf("                                 MDS destination saves MODE1 CD or single/dual-layer DVD data files\n");
+    printf("                                 --split sets a per-file MiB limit for MDS output; 0 disables splitting\n");
     printf("  burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle] [--opc]\n");
     printf("                                 Burn ISO/BIN, data MDS or supported CD CUE images\n");
     printf("                                 DVD+R DL requires an OTP MDS with an aligned layer break\n");
@@ -451,17 +452,19 @@ static BOOL WINAPI cli_read_control(DWORD type) {
     AcquireSRWLockShared(&cliReadLock); BOOL handled = cliReadCancel != NULL; if (handled) SetEvent(cliReadCancel); ReleaseSRWLockShared(&cliReadLock); return handled;
 }
 static int cmd_read(int argc, char** argv) {
-    if (argc < 4) { printf("Usage: imgburn read <drive> <out.iso|out.mds|out.cue> [--retries <0..20>] [--replace] [--cdtext]\n"); return 1; }
+    if (argc < 4) { printf("Usage: imgburn read <drive> <out.iso|out.mds|out.cue> [--retries <0..20>] [--replace] [--cdtext] [--split <MiB>]\n"); return 1; }
     ReadConfig config = {0}; config.retryCount = 20;
     for (int i = 4; i < argc; i++) {
         if (!_stricmp(argv[i],"--replace")) config.replaceExisting = true;
         else if (!_stricmp(argv[i],"--cdtext")) config.readCdText = true;
+        else if (!_stricmp(argv[i],"--split") && i + 1 < argc) { char* end; const char* value = argv[++i]; unsigned long n = strtoul(value,&end,10); if (!value[0] || *end || n > UINT32_MAX / 512 || value[0] == '-') { printf("Error: Split size must be a whole MiB value from 0 to %u.\n",UINT32_MAX / 512); return 1; } config.splitSectors = (uint32_t)n * 512; }
         else if (!_stricmp(argv[i],"--retries") && i + 1 < argc) { char* end; const char* value = argv[++i]; unsigned long n = strtoul(value,&end,10); if (!value[0] || *end || n > 20 || value[0] == '-') { printf("Error: Retry count must be 0..20.\n"); return 1; } config.retryCount = (unsigned)n; }
         else { printf("Error: Unknown or incomplete read option: %s\n",argv[i]); return 1; }
     }
     wchar_t device[MAX_PATH], image[MAX_PATH]; if (!parse_drive_path(argv[2],device,MAX_PATH) || !utf8_path(argv[3],image,MAX_PATH)) return 1;
     const wchar_t* extension = wcsrchr(image,L'.'); bool rawCd = extension && !_wcsicmp(extension,L".cue");
     if (config.readCdText && !rawCd) { printf("Error: --cdtext requires a CUE destination.\n"); return 1; }
+    if (config.splitSectors && (!extension || _wcsicmp(extension,L".mds"))) { printf("Error: --split requires an MDS destination.\n"); return 1; }
     OpticalDrive drive; if (!spti_open_drive(&drive,device,false)) { printf("Error: Cannot open source drive (%lu).\n",drive.lastError); return 1; }
     if (drive.accessKnown && (drive.deviceAccess & (GENERIC_READ | GENERIC_WRITE)) != (GENERIC_READ | GENERIC_WRITE)) { printf("Error: Source device opened without read/write command access. SPTI requires both access rights; try running as administrator.\n"); spti_close_drive(&drive); return 1; }
     HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; }
@@ -470,7 +473,7 @@ static int cmd_read(int argc, char** argv) {
     config.drive = &drive; config.imagePath = image; config.cancelEvent = cancel;
     bool ok = rawCd ? pipeline_read_cd(&config,on_cli_burn_progress,NULL) : pipeline_read_disc(&config,on_cli_burn_progress,NULL); DWORD error = GetLastError();
     if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock); spti_close_drive(&drive);
-    if (ok) printf(extension && !_wcsicmp(extension,L".mds") ? "\nDVD ISO and MDS descriptor created successfully; the MDS names its companion ISO.\n" : "\nDisc image read successfully.\n");
+    if (ok) printf(extension && !_wcsicmp(extension,L".mds") ? "\nDisc image and MDS descriptor created successfully; the MDS lists its data files in order.\n" : "\nDisc image read successfully.\n");
     else printf("\nDisc read failed (error %lu).\n",error); return ok ? 0 : 1;
 }
 

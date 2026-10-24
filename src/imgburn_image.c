@@ -549,7 +549,7 @@ bool imgburn_mds_create_files(const wchar_t* mdsFilePath, const wchar_t* const* 
     return imgburn_mds_create_files_ex(mdsFilePath, dataFiles, fileCount, totalSectors, layerBreakLba, true);
 }
 
-static bool mds_create_dvd(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, bool sourceLayout) {
+static bool mds_create_data(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, bool sourceLayout, bool cd) {
     if (!mdsFilePath || !dataFiles || !fileCount || fileCount > MAX_MDS_FILES || wcslen(mdsFilePath) >= MAX_PATH || !totalSectors || totalSectors > INT32_MAX) return false;
     if (layerBreakLba && (layerBreakLba >= totalSectors || (oppositeTrackPath && layerBreakLba < (totalSectors + 1) / 2) || layerBreakLba > 0xFD0000 || totalSectors - layerBreakLba > 0xFD0000)) return false;
     if (!sourceLayout && layerBreakLba && (layerBreakLba > 2086912 || totalSectors - layerBreakLba > 2086912 || layerBreakLba % 16)) return false;
@@ -568,29 +568,33 @@ static bool mds_create_dvd(const wchar_t* mdsFilePath, const wchar_t* const* dat
     }
     if (sourceBytes != (uint64_t)totalSectors * 2048) return false;
     structures = (structures + 3) & ~3u;
-    uint32_t bytes = structures + (layerBreakLba ? 8200 : 4100);
+    uint32_t bytes = structures + (cd ? 8 : layerBreakLba ? 8200 : 4100);
     uint8_t* data = (uint8_t*)calloc(1, bytes);
     if (!data) return false;
     MdsHeader* header = (MdsHeader*)data;
-    memcpy(header->signature, "MEDIA DESCRIPTOR", 16); header->version[0] = 1; header->version[1] = 3; header->mediumType = 0x10; header->sessionCount = 1; header->sessionsOffset = 88; header->discStructuresOffset = structures;
+    memcpy(header->signature, "MEDIA DESCRIPTOR", 16); header->version[0] = 1; header->version[1] = 3; header->mediumType = cd ? 0 : 0x10; header->sessionCount = 1; header->sessionsOffset = 88; header->discStructuresOffset = cd ? 0 : structures;
     MdsSessionBlock* session = (MdsSessionBlock*)(data + 88);
-    session->sessionEndLba = (int32_t)totalSectors; session->sessionNumber = 1; session->totalTracks = 1; session->leadInTracks = 3; session->firstTrack = 1; session->lastTrack = 1; session->tracksOffset = 112;
+    session->sessionStartLba = cd ? -150 : 0; session->sessionEndLba = (int32_t)totalSectors; session->sessionNumber = 1; session->totalTracks = 1; session->leadInTracks = 3; session->firstTrack = 1; session->lastTrack = 1; session->tracksOffset = 112;
     MdsTrackBlock* track = (MdsTrackBlock*)(data + 112);
-    track->trackMode = 0x02; track->adrControl = 0x14; track->point = 1; track->time[5] = 2; track->extraOffset = totalSectors; track->sectorSize = 2048; track->fileCount = (uint32_t)fileCount; track->footerOffset = 192;
+    track->trackMode = cd ? 0xAA : 0x02; track->adrControl = 0x14; track->point = 1; track->time[5] = 2; track->extraOffset = cd ? structures : totalSectors; track->sectorSize = 2048; track->fileCount = (uint32_t)fileCount; track->footerOffset = 192;
     uint32_t nameOffset = 192 + (uint32_t)fileCount * 16;
     for (size_t i = 0; i < fileCount; i++) {
         uint32_t footer[4] = {nameOffset, 1, 0, 0}, nameBytes = (uint32_t)(wcslen(dataFiles[i]) + 1) * 2;
         memcpy(data + 192 + i * 16, footer, sizeof(footer)); memcpy(data + nameOffset, dataFiles[i], nameBytes); nameOffset += nameBytes;
     }
-    uint8_t* pfi = data + structures + 2052;
-    /* 原版DVD-ROM描述使用120mm、10.08Mbps、压制层和对应记录密度。 */
-    pfi[0] = 1; pfi[1] = 2; pfi[2] = layerBreakLba ? (oppositeTrackPath ? 0x31 : 0x21) : 1; pfi[3] = 0x10;
-    mds_set_be32(pfi + 4, 0x30000);
-    mds_set_be32(pfi + 8, layerBreakLba ? (oppositeTrackPath ? ((~(0x30000 + layerBreakLba - 1) + totalSectors - layerBreakLba - 1) & 0xFFFFFF) : 0x30000 + layerBreakLba - 1) : 0x30000 + totalSectors - 1);
-    if (layerBreakLba) {
-        if (oppositeTrackPath) mds_set_be32(pfi + 12, 0x30000 + layerBreakLba - 1);
-        memcpy(data + structures + 4100, data + structures, 4100);
-        if (!oppositeTrackPath) mds_set_be32(pfi + 4100 + 8, 0x30000 + totalSectors - layerBreakLba - 1);
+    if (cd) {
+        uint32_t extra[2] = {150,totalSectors}; memcpy(data + structures,extra,sizeof(extra));
+    } else {
+        uint8_t* pfi = data + structures + 2052;
+        /* 原版DVD-ROM描述使用120mm、10.08Mbps、压制层和对应记录密度。 */
+        pfi[0] = 1; pfi[1] = 2; pfi[2] = layerBreakLba ? (oppositeTrackPath ? 0x31 : 0x21) : 1; pfi[3] = 0x10;
+        mds_set_be32(pfi + 4, 0x30000);
+        mds_set_be32(pfi + 8, layerBreakLba ? (oppositeTrackPath ? ((~(0x30000 + layerBreakLba - 1) + totalSectors - layerBreakLba - 1) & 0xFFFFFF) : 0x30000 + layerBreakLba - 1) : 0x30000 + totalSectors - 1);
+        if (layerBreakLba) {
+            if (oppositeTrackPath) mds_set_be32(pfi + 12, 0x30000 + layerBreakLba - 1);
+            memcpy(data + structures + 4100, data + structures, 4100);
+            if (!oppositeTrackPath) mds_set_be32(pfi + 4100 + 8, 0x30000 + totalSectors - layerBreakLba - 1);
+        }
     }
     static volatile LONG sequence = 0;
     HANDLE output = INVALID_HANDLE_VALUE;
@@ -610,10 +614,16 @@ static bool mds_create_dvd(const wchar_t* mdsFilePath, const wchar_t* const* dat
 }
 
 bool imgburn_mds_create_files_ex(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath) {
-    return mds_create_dvd(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,false);
+    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,false,false);
 }
 bool imgburn_mds_create_dvd_read(const wchar_t* mdsFilePath, const wchar_t* dataFile, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath) {
-    const wchar_t* files[] = {dataFile}; return mds_create_dvd(mdsFilePath,files,1,totalSectors,layerBreakLba,oppositeTrackPath,true);
+    const wchar_t* files[] = {dataFile}; return imgburn_mds_create_dvd_read_files(mdsFilePath,files,1,totalSectors,layerBreakLba,oppositeTrackPath);
+}
+bool imgburn_mds_create_dvd_read_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath) {
+    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,true,false);
+}
+bool imgburn_mds_create_cd_read_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors) {
+    return mds_create_data(mdsFilePath,dataFiles,fileCount,totalSectors,0,false,true,true);
 }
 
 /* -------------------------------------------------------------------------

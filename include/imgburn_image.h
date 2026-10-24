@@ -191,6 +191,9 @@ bool imgburn_mds_create_files(const wchar_t* mdsPath, const wchar_t* const* data
 bool imgburn_mds_create_files_ex(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath);
 /* Read 保存已由源盘 PFI 核对的布局，保留原层位置，不套用新刻录镜像的对齐与介质容量限制。 */
 bool imgburn_mds_create_dvd_read(const wchar_t* mdsPath, const wchar_t* dataFile, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath);
+bool imgburn_mds_create_dvd_read_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath);
+/* 原版可载入的精简单会话、单轨 MODE1/2048 CD 描述，不生成原始音频或子通道布局。 */
+bool imgburn_mds_create_cd_read_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors);
 
 /* -------------------------------------------------------------------------
  * DVD-Video Layer Break Candidate Structure

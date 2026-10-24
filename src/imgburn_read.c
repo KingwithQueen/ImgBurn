@@ -54,14 +54,44 @@ static bool read_sectors(const ReadConfig* config, uint32_t lba, uint16_t count,
     return true;
 }
 
+typedef struct { wchar_t path[MAX_PATH]; HANDLE file; bool created; } ReadDataPart;
+static void read_release_parts(ReadDataPart* parts, unsigned count, bool remove) {
+    for (unsigned i = 0; parts && i < count; i++) {
+        if (parts[i].file && parts[i].file != INVALID_HANDLE_VALUE) CloseHandle(parts[i].file);
+        if (remove && parts[i].created) DeleteFileW(parts[i].path);
+        parts[i].file = INVALID_HANDLE_VALUE; parts[i].created = false;
+    }
+}
+static bool read_create_parts(const wchar_t* destination, ReadDataPart* parts, unsigned count) {
+    wchar_t base[MAX_PATH]; wcscpy(base,destination); *wcsrchr(base,L'.') = 0;
+    for (unsigned attempt = 0; attempt < 1000; attempt++) {
+        DWORD error = ERROR_SUCCESS;
+        for (unsigned i = 0; i < count; i++) {
+            int length;
+            if (count == 1) length = attempt ? swprintf(parts[i].path,MAX_PATH,L"%ls.%03u.iso",base,attempt) : swprintf(parts[i].path,MAX_PATH,L"%ls.iso",base);
+            else length = attempt ? swprintf(parts[i].path,MAX_PATH,L"%ls.%03u.i%02u",base,attempt,i) : swprintf(parts[i].path,MAX_PATH,L"%ls.i%02u",base,i);
+            if (length < 0) { error = ERROR_FILENAME_EXCED_RANGE; break; }
+            parts[i].file = CreateFileW(parts[i].path,GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
+            if (parts[i].file == INVALID_HANDLE_VALUE) { error = GetLastError(); break; } parts[i].created = true;
+        }
+        if (!error) return true;
+        /* 任一卷冲突就释放本次预留并换整组名称，绝不替换旧数据卷。 */
+        read_release_parts(parts,count,true);
+        if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) { SetLastError(error); return false; }
+    }
+    SetLastError(ERROR_FILE_EXISTS); return false;
+}
+
 bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callback, void* context) {
     PipelineStats stats = {0}; HANDLE output = INVALID_HANDLE_VALUE; uint8_t* buffer = NULL; wchar_t destination[MAX_PATH], temporary[MAX_PATH] = L"", descriptor[MAX_PATH] = L"";
+    ReadDataPart* parts = NULL; unsigned partCount = 0;
     DWORD error = ERROR_SUCCESS; bool success = false, temporaryCreated = false, descriptorCreated = false;
     if (!config || !config->drive || !config->imagePath || !config->imagePath[0] || config->retryCount > 20) return read_failure(&stats,ERROR_INVALID_PARAMETER,"Invalid read configuration",callback,context);
     if (config->readCdText) return read_failure(&stats,ERROR_NOT_SUPPORTED,"CD-TEXT requires raw CD CUE output",callback,context);
     if (read_cancelled(config)) return read_failure(&stats,ERROR_CANCELLED,"Read cancelled",callback,context);
     if (!read_target(config->imagePath,destination,config->replaceExisting)) return read_failure(&stats,GetLastError(),"Invalid image destination",callback,context);
     bool mdsOutput = !_wcsicmp(wcsrchr(destination,L'.'),L".mds");
+    if (config->splitSectors && !mdsOutput) return read_failure(&stats,ERROR_NOT_SUPPORTED,"Split data output requires an MDS destination",callback,context);
     stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Inspecting source disc..."); if (callback) callback(&stats,context);
     OpticalDrive* drive = config->drive;
     if (!mmc_test_unit_ready(drive)) return read_failure(&stats,read_device_error(drive),"Source disc is not ready",callback,context);
@@ -71,9 +101,10 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     if (!mmc_read_capacity(drive,&last,&bytes)) return read_failure(&stats,read_device_error(drive),"Cannot read disc capacity",callback,context);
     if (last == UINT32_MAX || bytes != 2048) return read_failure(&stats,ERROR_NOT_SUPPORTED,"Require bounded 2048-byte data sectors",callback,context);
     stats.totalSectors = last + 1;
-    if (mdsOutput && (profile < MMC_PROFILE_DVD_ROM || profile > MMC_PROFILE_DVD_PLUS_R_DL)) return read_failure(&stats,ERROR_NOT_SUPPORTED,"MDS Read requires supported DVD media",callback,context);
+    bool cdMds = mdsOutput && profile <= MMC_PROFILE_CD_RW;
+    if (mdsOutput && !cdMds && (profile < MMC_PROFILE_DVD_ROM || profile > MMC_PROFILE_DVD_PLUS_R_DL)) return read_failure(&stats,ERROR_NOT_SUPPORTED,"MDS Read requires supported DVD or MODE1 CD media",callback,context);
     MmcDvdLayout dvdLayout = {0};
-    if (mdsOutput) {
+    if (mdsOutput && !cdMds) {
         if (!mmc_read_dvd_layout(drive,stats.totalSectors,&dvdLayout)) return read_failure(&stats,read_device_error(drive),"Cannot read matching DVD physical layout",callback,context);
         if (dvdLayout.layerCount == 2) {
             MmcDiscInfo disc; if (!mmc_read_disc_information(drive,&disc)) return read_failure(&stats,read_device_error(drive),"Cannot inspect dual-layer DVD session",callback,context);
@@ -81,21 +112,29 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
         }
     }
     if (profile <= MMC_PROFILE_CD_RW && !mmc_check_iso_cd(drive,stats.totalSectors)) return read_failure(&stats,read_device_error(drive),"CD layout requires a raw track image",callback,context);
+    if (mdsOutput) {
+        uint64_t count = config->splitSectors ? ((uint64_t)stats.totalSectors + config->splitSectors - 1) / config->splitSectors : 1;
+        if (count > MAX_MDS_FILES) return read_failure(&stats,ERROR_NOT_SUPPORTED,"Split image exceeds the supported MDS file count",callback,context); partCount = (unsigned)count;
+    }
     wchar_t parent[MAX_PATH]; wcscpy(parent,destination); wchar_t* slash = wcsrchr(parent,L'\\'); if (!slash) return read_failure(&stats,ERROR_INVALID_NAME,"Invalid image directory",callback,context); slash[1] = 0;
     ULARGE_INTEGER available;
     if (!GetDiskFreeSpaceExW(parent,&available,NULL,NULL)) return read_failure(&stats,GetLastError(),"Cannot query destination space",callback,context);
     if (available.QuadPart < (uint64_t)stats.totalSectors * 2048) return read_failure(&stats,ERROR_DISK_FULL,"Not enough destination space",callback,context);
     buffer = (uint8_t*)malloc(32 * 2048); if (!buffer) return read_failure(&stats,ERROR_NOT_ENOUGH_MEMORY,"Cannot allocate read buffer",callback,context);
     static volatile LONG serial;
-    wchar_t dataBase[MAX_PATH]; wcscpy(dataBase,destination); *wcsrchr(dataBase,L'.') = 0;
-    for (unsigned attempt = 0; attempt < (mdsOutput ? 1000u : 64u); attempt++) {
-        int chars = mdsOutput ? (attempt ? swprintf(temporary,MAX_PATH,L"%ls.%03u.iso",dataBase,attempt) : swprintf(temporary,MAX_PATH,L"%ls.iso",dataBase)) : swprintf(temporary,MAX_PATH,L"%ls.partial.%lu.%lu",destination,GetCurrentProcessId(),(unsigned long)InterlockedIncrement(&serial));
-        if (chars < 0) { error = ERROR_FILENAME_EXCED_RANGE; goto done; }
-        output = CreateFileW(temporary,GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
-        if (output != INVALID_HANDLE_VALUE) { temporaryCreated = true; break; }
-        error = GetLastError(); if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) goto done;
+    if (mdsOutput) {
+        parts = calloc(partCount,sizeof(*parts)); if (!parts) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
+        if (!read_create_parts(destination,parts,partCount)) { error = GetLastError(); goto done; }
+    } else {
+        for (unsigned attempt = 0; attempt < 64; attempt++) {
+            int chars = swprintf(temporary,MAX_PATH,L"%ls.partial.%lu.%lu",destination,GetCurrentProcessId(),(unsigned long)InterlockedIncrement(&serial));
+            if (chars < 0) { error = ERROR_FILENAME_EXCED_RANGE; goto done; }
+            output = CreateFileW(temporary,GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
+            if (output != INVALID_HANDLE_VALUE) { temporaryCreated = true; break; }
+            error = GetLastError(); if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) goto done;
+        }
+        if (!temporaryCreated) goto done;
     }
-    if (!temporaryCreated) goto done;
     ULONGLONG started = GetTickCount64(), previousTime = started; uint32_t previousLba = 0;
     stats.state = PIPELINE_STATE_READING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Reading disc to image..."); if (callback) callback(&stats,context);
     for (uint32_t lba = 0; lba < stats.totalSectors;) {
@@ -103,9 +142,12 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
         if (read_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
         uint16_t count = (uint16_t)(stats.totalSectors - lba < 32 ? stats.totalSectors - lba : 32);
         if (dvdLayout.layerCount == 2 && lba < dvdLayout.layerBreakLba && count > dvdLayout.layerBreakLba - lba) count = (uint16_t)(dvdLayout.layerBreakLba - lba);
+        unsigned part = partCount > 1 ? lba / config->splitSectors : 0;
+        if (partCount > 1 && count > config->splitSectors - lba % config->splitSectors) count = (uint16_t)(config->splitSectors - lba % config->splitSectors);
         if (!read_sectors(config,lba,count,buffer,&stats)) { error = read_cancelled(config) ? ERROR_CANCELLED : read_device_error(drive); goto done; }
         DWORD wanted = (DWORD)count * 2048, offset = 0;
-        while (offset < wanted) { DWORD written = 0; if (!WriteFile(output,buffer + offset,wanted - offset,&written,NULL)) { error = GetLastError(); if (!error) error = ERROR_WRITE_FAULT; goto done; } if (!written || written > wanted - offset) { error = ERROR_WRITE_FAULT; goto done; } offset += written; }
+        HANDLE target = mdsOutput ? parts[part].file : output;
+        while (offset < wanted) { DWORD written = 0; if (!WriteFile(target,buffer + offset,wanted - offset,&written,NULL)) { error = GetLastError(); if (!error) error = ERROR_WRITE_FAULT; goto done; } if (!written || written > wanted - offset) { error = ERROR_WRITE_FAULT; goto done; } offset += written; }
         lba += count; stats.currentLba = lba; stats.progressPercent = (int)((uint64_t)lba * 99 / stats.totalSectors);
         ULONGLONG now = GetTickCount64(), elapsed = now - previousTime;
         if (elapsed) { stats.currentSpeedKBps = (double)(lba - previousLba) * 2000.0 / elapsed; previousTime = now; previousLba = lba; }
@@ -116,13 +158,22 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     if (read_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
     if (!mmc_test_unit_ready(drive) || !mmc_read_capacity(drive,&last,&bytes)) { error = read_device_error(drive); goto done; }
     if (last != stats.totalSectors - 1 || bytes != 2048 || mmc_get_current_profile(drive) != profile) { error = ERROR_MEDIA_CHANGED; goto done; }
-    if (mdsOutput) {
+    if (mdsOutput && !cdMds) {
         MmcDvdLayout finalLayout;
         if (!mmc_read_dvd_layout(drive,stats.totalSectors,&finalLayout)) { error = read_device_error(drive); goto done; }
         if (finalLayout.layerCount != dvdLayout.layerCount || finalLayout.oppositeTrackPath != dvdLayout.oppositeTrackPath || finalLayout.layerBreakLba != dvdLayout.layerBreakLba) { error = ERROR_MEDIA_CHANGED; goto done; }
     }
-    if (!FlushFileBuffers(output)) { error = GetLastError(); goto done; }
-    if (!CloseHandle(output)) { error = GetLastError(); output = INVALID_HANDLE_VALUE; goto done; } output = INVALID_HANDLE_VALUE;
+    if (cdMds && !mmc_check_iso_cd(drive,stats.totalSectors)) { error = read_device_error(drive); goto done; }
+    if (mdsOutput) {
+        for (unsigned i = 0; i < partCount; i++) {
+            if (read_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
+            if (!FlushFileBuffers(parts[i].file)) { error = GetLastError(); goto done; }
+            if (!CloseHandle(parts[i].file)) { error = GetLastError(); parts[i].file = INVALID_HANDLE_VALUE; goto done; } parts[i].file = INVALID_HANDLE_VALUE;
+        }
+    } else {
+        if (!FlushFileBuffers(output)) { error = GetLastError(); goto done; }
+        if (!CloseHandle(output)) { error = GetLastError(); output = INVALID_HANDLE_VALUE; goto done; } output = INVALID_HANDLE_VALUE;
+    }
     if (read_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
     if (mdsOutput) {
         /* 旧 MDS 继续引用旧数据；新 ISO 完整落盘后才发布新的描述文件。 */
@@ -133,17 +184,18 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
             error = GetLastError(); if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) goto done;
         }
         if (!descriptorCreated) goto done;
-        const wchar_t* fileName = wcsrchr(temporary,L'\\') + 1;
-        if (!imgburn_mds_create_dvd_read(descriptor,fileName,stats.totalSectors,dvdLayout.layerBreakLba,dvdLayout.oppositeTrackPath)) { error = GetLastError(); goto done; }
+        const wchar_t* names[MAX_MDS_FILES]; for (unsigned i = 0; i < partCount; i++) names[i] = wcsrchr(parts[i].path,L'\\') + 1;
+        bool created = cdMds ? imgburn_mds_create_cd_read_files(descriptor,names,partCount,stats.totalSectors) : imgburn_mds_create_dvd_read_files(descriptor,names,partCount,stats.totalSectors,dvdLayout.layerBreakLba,dvdLayout.oppositeTrackPath);
+        if (!created) { error = GetLastError(); goto done; }
         if (read_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
     }
     if (!read_target(destination,parent,config->replaceExisting)) { error = GetLastError(); goto done; }
     if (!MoveFileExW(mdsOutput ? descriptor : temporary,destination,MOVEFILE_WRITE_THROUGH | (config->replaceExisting ? MOVEFILE_REPLACE_EXISTING : 0))) { error = GetLastError(); goto done; }
     success = true;
 done:
-    if (output != INVALID_HANDLE_VALUE) CloseHandle(output); if (temporaryCreated && !success) DeleteFileW(temporary); if (descriptorCreated && !success) DeleteFileW(descriptor); free(buffer);
+    if (output != INVALID_HANDLE_VALUE) CloseHandle(output); if (temporaryCreated && !success) DeleteFileW(temporary); if (descriptorCreated && !success) DeleteFileW(descriptor); read_release_parts(parts,partCount,!success); free(parts); free(buffer);
     if (!success) return read_failure(&stats,error,"Disc read did not complete",callback,context);
-    stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),mdsOutput ? "DVD read successfully to MDS and ISO." : "Disc image read successfully."); if (callback) callback(&stats,context); return true;
+    stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),mdsOutput ? "Disc read successfully to MDS and data files." : "Disc image read successfully."); if (callback) callback(&stats,context); return true;
 }
 
 bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallback callback, void* context) {
