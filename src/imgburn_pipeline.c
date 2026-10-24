@@ -394,11 +394,11 @@ static bool burn_cd_write_text(const BurnConfig* config, const BurnCdImage* imag
     }
     return true;
 }
-/* 空白 CD-R 使用 ATIP，DVD-R/+R、BD-R SRM 使用可写轨道，不查询 READ CAPACITY。 */
+/* 空白 CD-R 使用 ATIP，DVD-R/+R（含 +R DL）、BD-R SRM 使用可写轨道，不查询 READ CAPACITY。 */
 static bool burn_media_capacity(OpticalDrive* drive, uint32_t* capacity, MmcProfile* profile) {
     MmcDiscInfo disc; MmcTrackInfo track;
     if (!mmc_test_unit_ready(drive) || !mmc_read_disc_information(drive,&disc)) return false;
-    if (disc.currentProfile != MMC_PROFILE_DVD_PLUS_R && disc.currentProfile != MMC_PROFILE_DVD_R_SEQ && disc.currentProfile != MMC_PROFILE_BD_R_SRM && disc.currentProfile != MMC_PROFILE_CD_R) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+    if (disc.currentProfile != MMC_PROFILE_DVD_PLUS_R && disc.currentProfile != MMC_PROFILE_DVD_PLUS_R_DL && disc.currentProfile != MMC_PROFILE_DVD_R_SEQ && disc.currentProfile != MMC_PROFILE_BD_R_SRM && disc.currentProfile != MMC_PROFILE_CD_R) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
     if (*profile != MMC_PROFILE_NONE && *profile != disc.currentProfile) { SetLastError(ERROR_MEDIA_CHANGED); return false; } *profile = disc.currentProfile;
     if (disc.discStatus != DISC_STATUS_EMPTY || disc.lastSessionStatus != 0 || disc.numSessions != 1 || disc.firstTrack != 1 || disc.lastTrack != 1 || disc.isErasable) { SetLastError(ERROR_INVALID_DATA); return false; }
     if (disc.currentProfile == MMC_PROFILE_CD_R) {
@@ -410,7 +410,8 @@ static bool burn_media_capacity(OpticalDrive* drive, uint32_t* capacity, MmcProf
 }
 bool pipeline_discovery_capacity(OpticalDrive* drive, uint32_t* sectors) {
     if (!drive || !sectors) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
-    *sectors = 0; MmcProfile profile = MMC_PROFILE_NONE; return burn_media_capacity(drive,sectors,&profile);
+    *sectors = 0; MmcProfile profile = MMC_PROFILE_NONE; if (!burn_media_capacity(drive,sectors,&profile)) return false;
+    if (profile == MMC_PROFILE_DVD_PLUS_R_DL) { *sectors = 0; SetLastError(ERROR_NOT_SUPPORTED); return false; } return true;
 }
 static bool burn_check_media(OpticalDrive* drive, uint32_t sectors, MmcProfile* profile, bool reserveBd) {
     uint32_t capacity; if (!burn_media_capacity(drive,&capacity,profile)) return false;
@@ -460,6 +461,12 @@ static bool burn_restore_parameters(OpticalDrive* drive, const MmcWriteParameter
     if (!mmc_set_write_parameters(drive,&restore) || !mmc_get_write_parameters(drive,&actual)) return false;
     if (actual.size != restore.size || (actual.page[0] & 0x7F) != (restore.page[0] & 0x7F) || memcmp(actual.page + 1,restore.page + 1,restore.size - 1)) { SetLastError(ERROR_INVALID_DATA); return false; } return true;
 }
+static bool burn_check_dvd_layers(OpticalDrive* drive, uint32_t sectors, uint32_t layerBreak, MmcDvdLayerCapacity* capacity) {
+    if (!mmc_read_dvd_layer_capacity(drive,capacity)) return false;
+    uint64_t occupied = ((uint64_t)sectors + 15) / 16 * 16;
+    if (layerBreak > capacity->sectors || occupied > (uint64_t)layerBreak * 2) { SetLastError(ERROR_DISK_FULL); return false; }
+    if (!capacity->changeable && layerBreak != capacity->sectors) { SetLastError(ERROR_INVALID_DATA); return false; } return true;
+}
 static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32_t sectors, PipelineProgressCallback callback, void* userData) {
     PipelineStats stats = {0};
     if (!config || !config->drive || (!discovery && !config->imagePath)) return burn_failure(&stats,ERROR_INVALID_PARAMETER,"Invalid burn configuration.",callback,userData);
@@ -478,7 +485,7 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
         if (source == INVALID_HANDLE_VALUE) return pipeline_failure(&stats,"Cannot open the CUE descriptor.",callback,userData);
     } else if (!discovery) {
         if (!imgburn_data_source_open(&dataSource,config->imagePath)) return pipeline_failure(&stats,"Cannot open the supported data image and all its parts.",callback,userData);
-        if (dataSource.layerBreakLba || dataSource.layerCount > 1) { imgburn_data_source_close(&dataSource); return burn_failure(&stats,ERROR_NOT_SUPPORTED,"Dual-layer MDS recording is not yet supported.",callback,userData); }
+        if ((dataSource.layerBreakLba || dataSource.layerCount > 1) && (dataSource.layerCount != 2 || !dataSource.oppositeTrackPath || !dataSource.layerBreakLba || dataSource.layerBreakLba % 16)) { imgburn_data_source_close(&dataSource); return burn_failure(&stats,ERROR_NOT_SUPPORTED,"DVD+R DL recording requires an OTP MDS with a 16-sector aligned layer break.",callback,userData); }
         stats.totalSectors = dataSource.sectors;
     }
     if (cueInput) {
@@ -500,9 +507,12 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
     MmcProfile profile = MMC_PROFILE_NONE; MmcDvdWriteFeatures features = {0}; MmcWriteParameters original = {0}; bool bdVerifyNotRequired = false;
     MmcCdTextLeadIn textLeadIn = {0}; uint8_t* textBuffer = NULL; bool textRequested = cdImage && cdImage->cdText.bytes != 0;
     RingBuffer rb = {0}; HANDLE producer = NULL; uint8_t* buffers = NULL; ProducerContext context = {0}; context.hSourceFile = source; context.rb = &rb; context.expectedBytes = (uint64_t)stats.totalSectors * sectorBytes; context.cd = cdImage; context.chunkBytes = chunkBytes; context.zeroSource = discovery; context.data = discovery || cueInput ? NULL : &dataSource;
-    stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),discovery ? "Preparing Discovery in-memory zero data and checking writable media..." : "Checking blank CD-R, DVD-R/+R or BD-R SRM and source image..."); if (callback) callback(&stats,userData);
+    stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),discovery ? "Preparing Discovery in-memory zero data and checking writable media..." : "Checking blank CD-R, DVD-R/+R, DVD+R DL or BD-R SRM and source image..."); if (callback) callback(&stats,userData);
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
-    if (!burn_check_media(config->drive,stats.totalSectors,&profile,!discovery)) { pipeline_failure(&stats,"Require blank CD-R, DVD-R/+R or BD-R SRM with enough writable sectors.",callback,userData); goto cleanup; }
+    if (!burn_check_media(config->drive,stats.totalSectors,&profile,!discovery)) { pipeline_failure(&stats,"Require supported blank CD-R, DVD-R/+R, DVD+R DL or BD-R SRM with enough writable sectors.",callback,userData); goto cleanup; }
+    if ((dataSource.layerBreakLba && profile != MMC_PROFILE_DVD_PLUS_R_DL) || (profile == MMC_PROFILE_DVD_PLUS_R_DL && (discovery || !dataSource.layerBreakLba))) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"DVD+R DL writing requires a dual-layer OTP MDS and matching blank DVD+R DL media.",callback,userData); goto cleanup; }
+    MmcDvdLayerCapacity layerCapacity = {0};
+    if (profile == MMC_PROFILE_DVD_PLUS_R_DL && (!mmc_get_dvd_plus_r_dl_write_feature(config->drive) || !burn_check_dvd_layers(config->drive,stats.totalSectors,dataSource.layerBreakLba,&layerCapacity))) { pipeline_failure(&stats,"Cannot use the MDS layer break with this DVD+R DL drive and medium.",callback,userData); goto cleanup; }
     if (cdImage && profile != MMC_PROFILE_CD_R) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"CD CUE writing requires blank CD-R media.",callback,userData); goto cleanup; }
     if (profile != MMC_PROFILE_BD_R_SRM && config->writeSpeedKbps > 0xFFFF && config->writeSpeedKbps != UINT32_MAX) { burn_failure(&stats,ERROR_INVALID_PARAMETER,"CD/DVD write speed exceeds the command range.",callback,userData); goto cleanup; }
     if (config->testMode && profile != MMC_PROFILE_DVD_R_SEQ && profile != MMC_PROFILE_CD_R) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"Device test writing requires supported CD-R or DVD-R media.",callback,userData); goto cleanup; }
@@ -529,12 +539,14 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
     if (!ringbuffer_init(&rb,config->ringBufferBytes ? config->ringBufferBytes : 32 * 1024 * 1024,true)) { pipeline_failure(&stats,"Cannot initialize source buffer.",callback,userData); goto cleanup; }
     producer = CreateThread(NULL,0,producer_thread,&context,0,NULL); if (!producer) { pipeline_failure(&stats,"Cannot create source reader thread.",callback,userData); goto cleanup; }
     uint16_t count = (uint16_t)(stats.totalSectors < chunkSectors ? stats.totalSectors : chunkSectors);
+    if (profile == MMC_PROFILE_DVD_PLUS_R_DL && count > dataSource.layerBreakLba) count = (uint16_t)dataSource.layerBreakLba;
     if (cdImage) { count = burn_cd_chunk_count(cdImage,0,count); if (!count) { burn_failure(&stats,ERROR_INVALID_DATA,"CD source plan has an empty initial range.",callback,userData); goto cleanup; } }
     if (!burn_buffer_read(config,&context,buffers,(size_t)count * sectorBytes,&stats,callback,userData)) goto cleanup;
     if (!config->drive->isLocked) { if (!spti_lock_drive(config->drive,true)) { pipeline_failure(&stats,"Cannot lock the target volume.",callback,userData); goto cleanup; } ownedLock = true; }
     if (!mmc_prevent_removal(config->drive,true)) { pipeline_failure(&stats,"Cannot prevent medium removal.",callback,userData); goto cleanup; } prevented = true;
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
     if (!burn_check_media(config->drive,stats.totalSectors,&profile,!discovery)) { pipeline_failure(&stats,"Target media changed before writing.",callback,userData); goto cleanup; }
+    if (profile == MMC_PROFILE_DVD_PLUS_R_DL && !burn_check_dvd_layers(config->drive,stats.totalSectors,dataSource.layerBreakLba,&layerCapacity)) { pipeline_failure(&stats,"DVD+R DL layer capacity changed before writing.",callback,userData); goto cleanup; }
     if (textRequested) {
         MmcCdTextLeadIn lockedLeadIn; if (!mmc_read_cd_text_leadin(config->drive,&lockedLeadIn)) { pipeline_failure(&stats,"Cannot recheck the CD-TEXT lead-in address.",callback,userData); goto cleanup; }
         if (lockedLeadIn.startLba != textLeadIn.startLba || lockedLeadIn.sectorCount != textLeadIn.sectorCount) { burn_failure(&stats,ERROR_MEDIA_CHANGED,"The CD-TEXT lead-in changed before writing.",callback,userData); goto cleanup; }
@@ -548,6 +560,13 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
     }
     if (!mmc_set_burn_speed(config->drive,profile,config->writeSpeedKbps)) { pipeline_failure(&stats,"Cannot set write speed.",callback,userData); goto cleanup; }
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
+    if (profile == MMC_PROFILE_DVD_PLUS_R_DL) {
+        snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Setting DVD+R DL L0 capacity to %u sectors...",dataSource.layerBreakLba); if (callback) callback(&stats,userData);
+        if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
+        if (layerCapacity.changeable && !mmc_set_dvd_layer_capacity(config->drive,dataSource.layerBreakLba)) { pipeline_failure(&stats,"Cannot set DVD+R DL layer capacity.",callback,userData); goto cleanup; }
+        if (!mmc_read_dvd_layer_capacity(config->drive,&layerCapacity)) { pipeline_failure(&stats,"Cannot read back DVD+R DL layer capacity.",callback,userData); goto cleanup; }
+        if (layerCapacity.sectors != dataSource.layerBreakLba) { burn_failure(&stats,ERROR_INVALID_DATA,"The drive did not accept the MDS layer break.",callback,userData); goto cleanup; }
+    }
     if (config->performOpc) { snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Performing optimum power calibration..."); if (callback) callback(&stats,userData); if (burn_cancelled(config,&stats,callback,userData)) goto cleanup; if (!mmc_perform_opc(config->drive)) { pipeline_failure(&stats,"Optimum power calibration failed.",callback,userData); goto cleanup; } }
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
     if (profile == MMC_PROFILE_CD_R) { if (!(cdImage ? mmc_send_cd_cue(config->drive,cdImage->cue,cdImage->cueBytes) : mmc_send_cd_mode1_cue(config->drive,stats.totalSectors))) { pipeline_failure(&stats,"Cannot send the CD-R cue sheet.",callback,userData); goto cleanup; } }
@@ -560,11 +579,15 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
         if (!mmc_write_cd_leadin_gap(config->drive)) { pipeline_failure(&stats,"Cannot write the generated CD lead-in pregap.",callback,userData); goto cleanup; }
     }
     for (uint32_t lba = 0; lba < stats.totalSectors;) {
+        if (profile == MMC_PROFILE_DVD_PLUS_R_DL) {
+            snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Writing DVD+R DL layer %u (L0 capacity %u sectors)...",lba < dataSource.layerBreakLba ? 0 : 1,dataSource.layerBreakLba);
+        }
         if (burn_cancelled(config,&stats,callback,userData)) goto cleanup; writeAttempted = true;
         bool wrote = profile == MMC_PROFILE_BD_R_SRM ? mmc_write_bd_blocks(config->drive,lba,count,buffers,bdVerifyNotRequired) : cdImage ? mmc_write_cd_audio_blocks(config->drive,lba,count,buffers) : profile == MMC_PROFILE_CD_R ? mmc_write_cd_mode1_blocks(config->drive,lba,count,buffers) : mmc_write_blocks(config->drive,lba,count,buffers);
         if (!wrote) { pipeline_failure(&stats,"Device write failed or returned a short transfer.",callback,userData); goto cleanup; }
         lba += count; update_progress(&stats,lba,start,&previousTime,&previousLba,sectorBytes); stats.hostBufferPercent = (uint32_t)ringbuffer_get_level_percent(&rb); stats.speedMultiplier = cdImage ? stats.currentSpeedKBps / 172.265625 : calculate_multiplier(stats.currentSpeedKBps,profile); if (callback) callback(&stats,userData);
         if (lba == stats.totalSectors) break; count = (uint16_t)(stats.totalSectors - lba < chunkSectors ? stats.totalSectors - lba : chunkSectors);
+        if (profile == MMC_PROFILE_DVD_PLUS_R_DL && lba < dataSource.layerBreakLba && count > dataSource.layerBreakLba - lba) count = (uint16_t)(dataSource.layerBreakLba - lba);
         if (cdImage) { count = burn_cd_chunk_count(cdImage,lba,count); if (!count) { burn_failure(&stats,ERROR_INVALID_DATA,"CD source plan has an empty recording range.",callback,userData); goto cleanup; } }
         if (!burn_buffer_read(config,&context,buffers,(size_t)count * sectorBytes,&stats,callback,userData)) goto cleanup;
     }
@@ -574,19 +597,23 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup; syncAttempted = true;
     if (!(profile == MMC_PROFILE_CD_R ? mmc_finish_cd_sao(config->drive) : mmc_synchronize_cache(config->drive))) { pipeline_failure(&stats,"Drive cache synchronization failed.",callback,userData); goto cleanup; }
     /* CD SAO 按 CUE 结束会话，DVD-R DAO 也在同步时结束；不发送 DVD+R 的关闭功能。 */
-    if (profile == MMC_PROFILE_DVD_PLUS_R || profile == MMC_PROFILE_BD_R_SRM) {
+    if (profile == MMC_PROFILE_DVD_PLUS_R || profile == MMC_PROFILE_DVD_PLUS_R_DL || profile == MMC_PROFILE_BD_R_SRM) {
         stats.state = PIPELINE_STATE_CLOSING_SESSION; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Closing recorded track..."); if (callback) callback(&stats,userData);
         if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
         if (!mmc_close_track_session(config->drive,1,1)) { pipeline_failure(&stats,"Closing recorded track failed.",callback,userData); goto cleanup; }
         snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Finalizing recorded disc..."); if (callback) callback(&stats,userData);
         if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
-        if (!mmc_close_track_session(config->drive,6,0)) { pipeline_failure(&stats,"Finalizing recorded disc failed.",callback,userData); goto cleanup; }
+        if (!(profile == MMC_PROFILE_DVD_PLUS_R_DL ? mmc_finalize_dvd_plus_r_dl(config->drive) : mmc_close_track_session(config->drive,6,0))) { pipeline_failure(&stats,"Finalizing recorded disc failed.",callback,userData); goto cleanup; }
     }
     if (config->testMode) { if (!burn_restore_parameters(config->drive,&original)) { pipeline_failure(&stats,"Cannot leave the device test-write mode.",callback,userData); goto cleanup; } parametersChanged = false; }
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
     MmcDiscInfo finalDisc;
     if (!mmc_read_disc_information(config->drive,&finalDisc)) { pipeline_failure(&stats,"Cannot check finalized disc status.",callback,userData); goto cleanup; }
     if (finalDisc.currentProfile != profile || finalDisc.discStatus != (config->testMode ? DISC_STATUS_EMPTY : DISC_STATUS_COMPLETE) || finalDisc.lastSessionStatus != (config->testMode ? 0 : 3) || finalDisc.numSessions != 1 || finalDisc.firstTrack != 1 || finalDisc.lastTrack != (config->testMode || !cdImage ? 1 : cdImage->sheet.trackCount)) { burn_failure(&stats,ERROR_INVALID_DATA,"Disc did not report the expected final layout.",callback,userData); goto cleanup; }
+    if (profile == MMC_PROFILE_DVD_PLUS_R_DL) {
+        if (!mmc_read_dvd_layer_capacity(config->drive,&layerCapacity)) { pipeline_failure(&stats,"Cannot inspect the recorded DVD+R DL layer capacity.",callback,userData); goto cleanup; }
+        if (layerCapacity.sectors != dataSource.layerBreakLba) { burn_failure(&stats,ERROR_INVALID_DATA,"Recorded DVD+R DL layer break does not match the MDS.",callback,userData); goto cleanup; }
+    }
     if (profile == MMC_PROFILE_CD_R && !config->testMode && !burn_check_cd_layout(config->drive,stats.totalSectors,cdImage)) { pipeline_failure(&stats,"Recorded CD layout does not match the source.",callback,userData); goto cleanup; }
     if (config->verifyAfterWrite && !config->testMode) {
         if (config->cycleTrayBeforeVerify) {
@@ -597,6 +624,10 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
             MmcDiscInfo loaded;
             if (!mmc_read_disc_information(config->drive,&loaded)) { pipeline_failure(&stats,"Cannot inspect reloaded media.",callback,userData); goto cleanup; }
             if (loaded.currentProfile != finalDisc.currentProfile || loaded.discStatus != finalDisc.discStatus || loaded.lastSessionStatus != finalDisc.lastSessionStatus || loaded.numSessions != finalDisc.numSessions || loaded.firstTrack != finalDisc.firstTrack || loaded.lastTrack != finalDisc.lastTrack) { burn_failure(&stats,ERROR_MEDIA_CHANGED,"Reloaded disc layout does not match the recorded disc.",callback,userData); goto cleanup; }
+            if (profile == MMC_PROFILE_DVD_PLUS_R_DL) {
+                if (!mmc_read_dvd_layer_capacity(config->drive,&layerCapacity)) { pipeline_failure(&stats,"Cannot inspect the reloaded DVD+R DL layer capacity.",callback,userData); goto cleanup; }
+                if (layerCapacity.sectors != dataSource.layerBreakLba) { burn_failure(&stats,ERROR_MEDIA_CHANGED,"Reloaded DVD+R DL layer break does not match the recorded disc.",callback,userData); goto cleanup; }
+            }
         }
         VerifyConfig verify = {0}; verify.drive = config->drive; verify.imagePath = config->imagePath; verify.cancelEvent = config->cancelEvent; verify.saoData = cdImage != NULL; verify.zeroSectors = discovery ? stats.totalSectors : 0;
         BurnVerifyProgress progress = {&stats,callback,userData}; if (!pipeline_verify_disc_ex(&verify,burn_verify_progress,&progress)) goto cleanup;

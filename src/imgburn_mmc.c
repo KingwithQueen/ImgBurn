@@ -270,6 +270,32 @@ bool mmc_reserve_track(OpticalDrive* drive, uint32_t reservationSizeLba) {
 bool mmc_prevent_removal(OpticalDrive* drive, bool prevent) { uint8_t cdb[6] = {0x1E}; cdb[4] = prevent ? 1 : 0; return spti_send_cdb(drive,cdb,6,NULL,0,true,10); }
 
 static bool mmc_write_parameter_error(OpticalDrive* drive, DWORD error) { if (drive) drive->lastError = error; SetLastError(error); return false; }
+bool mmc_get_dvd_plus_r_dl_write_feature(OpticalDrive* drive) {
+    uint8_t cdb[10] = {0x46,2,0,0x3B}, data[16] = {0}; cdb[8] = sizeof(data);
+    if (!spti_send_cdb(drive,cdb,10,data,sizeof(data),true,10)) return false;
+    if (drive->lastTransferBytes == 8 && read_be32(data) == 4) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    if (drive->lastTransferBytes != sizeof(data) || read_be32(data) < 12) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
+    if (read_be16(data + 6) != MMC_PROFILE_DVD_PLUS_R_DL || read_be16(data + 8) != 0x3B || !(data[10] & 1) || data[11] != 4 || !(data[12] & 1)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    return true;
+}
+bool mmc_read_dvd_layer_capacity(OpticalDrive* drive, MmcDvdLayerCapacity* capacity) {
+    if (!capacity) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER); memset(capacity,0,sizeof(*capacity));
+    uint8_t cdb[12] = {0xAD}, data[12] = {0}; cdb[7] = 0x20; cdb[9] = sizeof(data);
+    if (!spti_send_cdb(drive,cdb,12,data,sizeof(data),true,10)) return false;
+    if (drive->lastTransferBytes != sizeof(data) || read_be16(data) != 10) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
+    capacity->sectors = read_be32(data + 8); capacity->changeable = !(data[4] & 0x80);
+    if (!capacity->sectors || capacity->sectors % 16) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA); return true;
+}
+bool mmc_set_dvd_layer_capacity(OpticalDrive* drive, uint32_t sectors) {
+    if (!sectors || sectors % 16) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    uint8_t cdb[12] = {0xBF}, data[12] = {0}; cdb[7] = 0x20; cdb[9] = sizeof(data); write_be16(data,10); write_be32(data + 8,sectors);
+    if (!spti_send_cdb(drive,cdb,12,data,sizeof(data),false,180)) return false;
+    if (drive->lastTransferBytes != sizeof(data)) return mmc_write_parameter_error(drive,ERROR_WRITE_FAULT); return true;
+}
+bool mmc_finalize_dvd_plus_r_dl(OpticalDrive* drive) {
+    /* MMC-5 6.3.3.5.5：功能5兼容最小半径；双层填充可能需要较长时间。 */
+    uint8_t cdb[10] = {0x5B,0,5}; return spti_send_cdb(drive,cdb,10,NULL,0,true,900);
+}
 bool mmc_get_dvd_write_features(OpticalDrive* drive, MmcDvdWriteFeatures* features) {
     if (!features) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER); memset(features,0,sizeof(*features));
     uint8_t cdb[10] = {0x46,2,0,0x2F}, data[16] = {0}; cdb[8] = sizeof(data);
@@ -383,7 +409,7 @@ bool mmc_get_bd_write_features(OpticalDrive* drive, bool* verifyNotRequired) {
     if (!writable) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED); *verifyNotRequired = (data[12] & 1) != 0; return true;
 }
 bool mmc_set_burn_speed(OpticalDrive* drive, MmcProfile profile, uint32_t writeSpeedKbps) {
-    if (profile != MMC_PROFILE_BD_R_SRM && profile != MMC_PROFILE_DVD_R_SEQ && profile != MMC_PROFILE_DVD_PLUS_R && profile != MMC_PROFILE_CD_R) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    if (profile != MMC_PROFILE_BD_R_SRM && profile != MMC_PROFILE_DVD_R_SEQ && profile != MMC_PROFILE_DVD_PLUS_R && profile != MMC_PROFILE_DVD_PLUS_R_DL && profile != MMC_PROFILE_CD_R) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
     uint32_t speed = !writeSpeedKbps || writeSpeedKbps == 0xFFFF ? UINT32_MAX : writeSpeedKbps;
     if (profile != MMC_PROFILE_BD_R_SRM) {
         if (speed != UINT32_MAX && speed >= 0xFFFF) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);

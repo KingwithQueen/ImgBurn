@@ -173,7 +173,7 @@ static bool job_drive(GuiJob* job) {
         ok = pipeline_burn_image(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
         if (ok && job->testMode) job_text(job,L"设备测试写入完成；未执行记录数据的回读校验。\r\n");
         else if (ok) job_text(job,L"光盘镜像写入完成%ls。\r\n",job->verify ? L"并通过回读校验" : L"");
-        else if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前支持空白 CD-R SAO、单层 DVD-R/+R 与 BD-R SRM；CD-TEXT 还要求光驱支持 R-W 写入。\r\n");
+        else if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前支持空白 CD-R SAO、单层 DVD-R/+R、带 OTP 双层 MDS 的 DVD+R DL 与 BD-R SRM；CD-TEXT 还要求光驱支持 R-W 写入。\r\n");
         else if (job->error == ERROR_DISK_FULL) job_text(job,L"光盘的可写扇区不足。\r\n");
     }
     if (!ok && !job->error) job->error = drive.lastError ? drive.lastError : GetLastError();

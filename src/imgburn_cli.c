@@ -85,6 +85,7 @@ static void print_usage(void) {
     printf("                                 MDS destination creates a single-layer DVD ISO + descriptor\n");
     printf("  burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle] [--opc]\n");
     printf("                                 Burn ISO/BIN, data MDS or supported CD CUE images\n");
+    printf("                                 DVD+R DL requires an OTP MDS with an aligned layer break\n");
     printf("  erase <drive> [--quick|--full]   Erase CD-RW/DVD-RW; cancellation waits for the device\n");
     printf("  discovery <drive> [--sectors <n>] [--speed <Nx|MAX>] [--test]\n");
     printf("        [--verify|--no-verify] [--no-cycle] [--opc]\n");
