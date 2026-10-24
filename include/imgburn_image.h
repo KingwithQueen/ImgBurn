@@ -241,6 +241,8 @@ bool imgburn_dvd_read_navigation(const ImageBuilder* builder, DvdNavigation* nav
 void imgburn_dvd_free_navigation(DvdNavigation* navigation);
 bool imgburn_dvd_layer_break_candidates(const ImageBuilder* builder, const DvdMediaProfile* profile, DvdLayerBreakCandidate* candidates, size_t capacity, size_t* count);
 bool imgburn_dvd_layer_break_candidates_ex(const ImageBuilder* builder, const DvdMediaProfile* profile, unsigned options, DvdLayerBreakCandidate* candidates, size_t capacity, size_t* count);
+/* 成品ISO+UDF1.02 DVD-Video只读分析：保留实际extent/LBA，不重排或补padding；支持数据MDS逻辑来源。 */
+bool imgburn_dvd_image_layer_break_candidates(const wchar_t* imagePath, const DvdMediaProfile* profile, DvdLayerBreakCandidate* candidates, size_t capacity, size_t* count, uint32_t* imageSectors);
 /* 选择后需重新计算布局；无效、过期的选择会在重新计算时失败。 */
 bool imgburn_dvd_select_layer_break(ImageBuilder* builder, const DvdMediaProfile* profile, const DvdLayerBreakCandidate* candidate, bool seamless);
 

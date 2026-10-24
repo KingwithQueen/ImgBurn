@@ -74,7 +74,7 @@ static void print_usage(void) {
     printf("  cdtext-build <file.cue> <out.cdt> [--replace]\n");
     printf("                                 Export CDTEXTFILE or encode supported CUE text\n");
     printf("  mds <file.mds>                 Parse and display MDS metadata & Layer Break\n\n");
-    printf("  dvd-layers <folder> [--show-interleaved] [--l0-min <n>] [--l0-max <n>] [--capacity <n>]\n");
+    printf("  dvd-layers <folder|image.iso|image.bin|image.mds> [--show-interleaved] [--l0-min <n>] [--l0-max <n>] [--capacity <n>]\n");
     printf("                                 Inspect DVD navigation and layer break cells\n\n");
     printf("  dvd-preview <folder> --title <VTS:PGC:Cell> | --menu <VTS:LU:PGC:Cell> [--ffmpeg <path>]\n");
     printf("Burning & Verification Commands:\n");
@@ -291,6 +291,28 @@ static int cmd_dvd_layers(int argc, char** argv) {
         if (!_stricmp(argv[i], "--show-interleaved")) options |= DVD_LAYER_SHOW_INTERLEAVED;
         else if (i + 1 == argc || !dvd_profile_option(argv[i], argv[i + 1], &profile)) { printf("Error: Invalid DVD media profile.\n"); return 1; }
         else i++;
+    }
+    DWORD attributes = GetFileAttributesW(folder);
+    if (attributes == INVALID_FILE_ATTRIBUTES) { printf("Error: Cannot open DVD source (error %lu).\n",GetLastError()); return 1; }
+    if (!(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        if (options) { printf("Error: --show-interleaved is only available for folder Build analysis; complex image cells are unsupported.\n"); return 1; }
+        size_t count = 0; uint32_t sectors = 0;
+        bool ok = imgburn_dvd_image_layer_break_candidates(folder,&profile,NULL,0,&count,&sectors);
+        if (!ok && GetLastError() != ERROR_INSUFFICIENT_BUFFER) { printf("Error: Cannot analyze this DVD image (error %lu).\n",GetLastError()); return 1; }
+        DvdLayerBreakCandidate* candidates = count ? calloc(count,sizeof(*candidates)) : NULL;
+        if (count && !candidates) return 1;
+        if (count) ok = imgburn_dvd_image_layer_break_candidates(folder,&profile,candidates,count,&count,&sectors);
+        if (ok) {
+            printf("Read-only DVD image sectors: %u; candidates: %zu\n",sectors,count);
+            printf("VTS:PGC:Cell or M<VTS:LU:PGC:Cell>  VOB:Cell  VOB-sector  Actual-LBA  Padding  Total  Chapter  SPLIP  Language  ILVU  Angle\n");
+            for (size_t i = 0; i < count; i++) {
+                const DvdLayerBreakCandidate* c = &candidates[i];
+                if (c->domain == DVD_DOMAIN_TITLE) printf("%u:%u:%u",c->titleSet,c->pgc,c->cell); else printf("M%u:%u:%u:%u",c->titleSet,c->languageUnit,c->pgc,c->cell);
+                printf("  %u:%u  %u  %u  %u  %u  %u:%u  %s  %04X  %s  %s\n",c->vobId,c->cellId,c->vobSector,c->lba,c->paddingSectors,c->imageSectors,c->title,c->chapter,c->isSeamless ? "Yes" : "No",c->languageCode,c->isInterleaved ? "Yes" : "No",c->isAngleBlock ? "Yes" : "No");
+            }
+            if (!count) printf("No existing aligned cell fits this media profile; source layout is unchanged.\n");
+        } else printf("Error: Cannot analyze this DVD image (error %lu).\n",GetLastError());
+        free(candidates); return ok ? 0 : 1;
     }
     ImageBuilder b; if (!image_builder_init(&b, "DVD_NAVIGATION")) return 1;
     b.config.dvdVideoCompliance = true; b.config.fsTypes = FS_TYPE_ISO_UDF;

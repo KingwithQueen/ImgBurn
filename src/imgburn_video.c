@@ -229,7 +229,7 @@ void fs_video_patch(const FsFileNode* file, uint64_t offset, uint8_t* data, uint
 }
 
 /* IFO内的偏移全部限制在所属表和PGC内，不以主机文件尾代替子表边界。 */
-typedef struct { FILE* file; uint64_t bytes; } DvdReader;
+typedef struct { FILE* file; uint64_t bytes; const FsFileNode* node; FsDvdReadCallback read; void* context; } DvdReader;
 static uint16_t dvd_be16(const uint8_t* p) { return (uint16_t)((uint16_t)p[0] << 8 | p[1]); }
 static unsigned dvd_bcd(uint8_t value) { return (value >> 4) * 10 + (value & 15); }
 static uint32_t dvd_time_ms(const uint8_t* p) {
@@ -237,7 +237,9 @@ static uint32_t dvd_time_ms(const uint8_t* p) {
     return ((dvd_bcd(p[0]) * 60 + dvd_bcd(p[1])) * 60 + dvd_bcd(p[2])) * 1000 + dvd_bcd(p[3] & 63) * (rate == 1 ? 40 : 1001) / (rate == 1 ? 1 : 30);
 }
 static bool dvd_read(DvdReader* r, uint64_t offset, void* data, size_t bytes) {
-    return offset <= r->bytes && bytes <= r->bytes - offset && !_fseeki64(r->file, (int64_t)offset, SEEK_SET) && fread(data, 1, bytes, r->file) == bytes;
+    if (offset > r->bytes || bytes > r->bytes - offset) return false;
+    if (r->read) return r->read(r->node,offset,data,bytes,r->context);
+    return !_fseeki64(r->file, (int64_t)offset, SEEK_SET) && fread(data, 1, bytes, r->file) == bytes;
 }
 static bool dvd_table(DvdReader* r, uint32_t sector, unsigned headerBytes, uint64_t* begin, uint64_t* end, uint16_t* count) {
     uint8_t header[8]; *begin = (uint64_t)sector * VIDEO_BLOCK;
@@ -254,12 +256,13 @@ static bool dvd_map_contains(DvdReader* r, uint64_t begin, uint64_t end, uint32_
     while (lo < hi) { uint64_t mid = lo + (hi - lo) / 2; if (!dvd_read(r, begin + 4 + mid * 4, data, 4)) return false; if (video_be32(data) < sector) lo = mid + 1; else hi = mid; }
     return begin + 4 + lo * 4 < end && dvd_read(r, begin + 4 + lo * 4, data, 4) && video_be32(data) == sector;
 }
-static bool dvd_nav_packet(FsFileNode* const* parts, uint32_t sector, const DvdNavigationCell* cell) {
+static bool dvd_nav_packet(FsFileNode* const* parts, uint32_t sector, const DvdNavigationCell* cell, const DvdReader* ifo) {
     uint32_t relative = sector; unsigned part = 0;
     while (part < 9 && parts[part] && relative >= parts[part]->sectorCount) { relative -= parts[part]->sectorCount; part++; }
     if (part == 9 || !parts[part]) return false;
-    DvdReader r = {_wfopen(parts[part]->sourceDiskPath, L"rb"),parts[part]->fileSize}; if (!r.file) return false;
-    uint8_t data[VIDEO_BLOCK]; bool ok = dvd_read(&r, (uint64_t)relative * VIDEO_BLOCK, data, sizeof(data)); fclose(r.file);
+    DvdReader r = {0}; r.bytes = parts[part]->fileSize; r.node = parts[part]; r.read = ifo->read; r.context = ifo->context;
+    if (!r.read) { r.file = _wfopen(parts[part]->sourceDiskPath, L"rb"); if (!r.file) return false; }
+    uint8_t data[VIDEO_BLOCK]; bool ok = dvd_read(&r, (uint64_t)relative * VIDEO_BLOCK, data, sizeof(data)); if (r.file) fclose(r.file);
     if (!ok || memcmp(data, "\0\0\1\xBA", 4) || memcmp(data + 1024, "\0\0\1\xBF", 4) || data[1030] != 1) return false;
     /* DSI的包地址、VOB/Cell标识及VOBU末尾须与IFO指向的同一物理单元一致。 */
     const uint8_t* dsi = data + 1031;
@@ -335,7 +338,7 @@ static bool dvd_pgci_navigation(DvdReader* r, FsFileNode* const* parts, uint32_t
                 uint8_t entry[12]; if (!dvd_read(r, pos, entry, 12)) return false;
                 if (dvd_be16(entry) == cell.vobId && entry[2] == cell.cellId && video_be32(entry + 4) == cell.firstSector && video_be32(entry + 8) == cell.lastSector) { found = true; break; }
             }
-            if (!found || !dvd_map_contains(r, map, mapEnd, cell.firstSector) || !dvd_map_contains(r, map, mapEnd, cell.lastVobuSector) || !dvd_nav_packet(parts, cell.firstSector, &cell) || !dvd_nav_packet(parts, cell.lastVobuSector, &cell) || !dvd_cell_append(nav, capacity, &cell)) return false;
+            if (!found || !dvd_map_contains(r, map, mapEnd, cell.firstSector) || !dvd_map_contains(r, map, mapEnd, cell.lastVobuSector) || !dvd_nav_packet(parts, cell.firstSector, &cell,r) || !dvd_nav_packet(parts, cell.lastVobuSector, &cell,r) || !dvd_cell_append(nav, capacity, &cell)) return false;
         }
         if (angleCells) return false;
     }
@@ -364,8 +367,9 @@ static bool dvd_title_chapters(DvdReader* r, const uint8_t* header, DvdNavigatio
     return true;
 }
 
-static bool dvd_domain_navigation(FsDirectoryNode* dir, FsFileNode* ifo, unsigned titleSet, DvdNavigationDomain domain, DvdNavigation* nav, size_t* capacity) {
-    DvdReader r = {_wfopen(ifo->sourceDiskPath, L"rb"),ifo->fileSize}; if (!r.file) return false;
+static bool dvd_domain_navigation(FsDirectoryNode* dir, FsFileNode* ifo, unsigned titleSet, DvdNavigationDomain domain, DvdNavigation* nav, size_t* capacity, FsDvdReadCallback read, void* context) {
+    DvdReader r = {0}; r.bytes = ifo->fileSize; r.node = ifo; r.read = read; r.context = context;
+    if (!read) { r.file = _wfopen(ifo->sourceDiskPath, L"rb"); if (!r.file) return false; }
     bool ok = false; uint8_t header[2048]; FsFileNode* parts[9] = {0}; uint64_t vobSectors = 0;
     uint64_t pgci, pgciEnd, adt = 0, adtEnd = 0, map = 0, mapEnd = 0; uint16_t count;
     bool menu = domain != DVD_DOMAIN_TITLE; size_t firstCell = nav->cellCount;
@@ -410,19 +414,24 @@ static bool dvd_domain_navigation(FsDirectoryNode* dir, FsFileNode* ifo, unsigne
     }
     ok = true;
 done:
-    fclose(r.file); return ok;
+    if (r.file) fclose(r.file); return ok;
 }
 
 void imgburn_dvd_free_navigation(DvdNavigation* navigation) { if (navigation) { free(navigation->cells); memset(navigation, 0, sizeof(*navigation)); } }
 
 bool imgburn_dvd_read_navigation(const ImageBuilder* b, DvdNavigation* navigation) {
+    return fs_dvd_read_navigation_ex(b,navigation,NULL,NULL);
+}
+
+bool fs_dvd_read_navigation_ex(const ImageBuilder* b, DvdNavigation* navigation, FsDvdReadCallback read, void* context) {
     if (!navigation) { SetLastError(ERROR_INVALID_PARAMETER); return false; } memset(navigation, 0, sizeof(*navigation));
     if (!b || !b->rootDir || !b->config.dvdVideoCompliance || !b->config.totalImageSectors) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
     FsDirectoryNode* dir = video_dir(b->rootDir, L"VIDEO_TS"); size_t capacity = 0;
     if (!dir) { SetLastError(ERROR_INVALID_DATA); return false; }
+    SetLastError(ERROR_SUCCESS);
     for (FsFileNode* file = dir->firstFile; file; file = file->next) if (!file->excluded) {
         unsigned group, order;
-        if (dvd_name(file->nameW, &group, &order) && !order && ((!dvd_domain_navigation(dir, file, group, group ? DVD_DOMAIN_VTS_MENU : DVD_DOMAIN_VMG_MENU, navigation, &capacity)) || (group && !dvd_domain_navigation(dir, file, group, DVD_DOMAIN_TITLE, navigation, &capacity)))) { imgburn_dvd_free_navigation(navigation); SetLastError(ERROR_INVALID_DATA); return false; }
+        if (dvd_name(file->nameW, &group, &order) && !order && ((!dvd_domain_navigation(dir, file, group, group ? DVD_DOMAIN_VTS_MENU : DVD_DOMAIN_VMG_MENU, navigation, &capacity,read,context)) || (group && !dvd_domain_navigation(dir, file, group, DVD_DOMAIN_TITLE, navigation, &capacity,read,context)))) { DWORD error = read ? GetLastError() : ERROR_INVALID_DATA; imgburn_dvd_free_navigation(navigation); SetLastError(error ? error : ERROR_INVALID_DATA); return false; }
     }
     if (!navigation->cellCount) { SetLastError(ERROR_INVALID_DATA); return false; }
     return true;
@@ -433,10 +442,12 @@ bool imgburn_dvd_layer_break_candidates(const ImageBuilder* b, const DvdMediaPro
     return imgburn_dvd_layer_break_candidates_ex(b, profile, 0, candidates, capacity, count);
 }
 
-bool imgburn_dvd_layer_break_candidates_ex(const ImageBuilder* b, const DvdMediaProfile* profile, unsigned options, DvdLayerBreakCandidate* candidates, size_t capacity, size_t* count) {
+static bool dvd_layer_break_candidates(const ImageBuilder* b, const DvdMediaProfile* profile, unsigned options, DvdLayerBreakCandidate* candidates, size_t capacity, size_t* count, bool fixedLayout, FsDvdReadCallback read, void* context) {
     if (count) *count = 0;
     if (!count || (!candidates && capacity) || !dvd_profile_valid(profile) || !b || b->config.dvdBreakPgc || (options & ~DVD_LAYER_SHOW_INTERLEAVED)) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
-    DvdNavigation nav; if (!imgburn_dvd_read_navigation(b, &nav)) return false;
+    DvdNavigation nav; if (!fs_dvd_read_navigation_ex(b,&nav,read,context)) return false;
+    /* 成品镜像本轮不分析角度或交错布局；不能按文件夹Build规则补齐这些单元。 */
+    if (fixedLayout) for (size_t i = 0; i < nav.cellCount; i++) if ((nav.cells[i].category >> 24) & 0xF4) { imgburn_dvd_free_navigation(&nav); SetLastError(ERROR_NOT_SUPPORTED); return false; }
     size_t found = 0;
     for (size_t i = 0; i < nav.cellCount; i++) {
         const DvdNavigationCell* cell = &nav.cells[i];
@@ -445,7 +456,11 @@ bool imgburn_dvd_layer_break_candidates_ex(const ImageBuilder* b, const DvdMedia
         /* 同一角度块只列首角度；其余角度的交错起点不是独立切换候选。 */
         if ((cell->category & 0x30000000) && (cell->category >> 30) != 1) continue;
         uint32_t l1 = b->config.totalImageSectors - cell->lba;
-        uint64_t l0 = cell->lba; if (l0 < l1) l0 = l1; if (l0 < profile->minimumL0) l0 = profile->minimumL0; l0 = (l0 + 15) & ~15ull;
+        uint64_t l0 = cell->lba;
+        if (fixedLayout) {
+            /* 已生成的镜像只能使用实际单元LBA，不能移动文件、补padding或四舍五入。 */
+            if (l0 % 16 || l0 < l1 || l0 < profile->minimumL0) continue;
+        } else { if (l0 < l1) l0 = l1; if (l0 < profile->minimumL0) l0 = profile->minimumL0; l0 = (l0 + 15) & ~15ull; }
         uint64_t total = l0 + l1;
         if (l0 > profile->maximumL0 || total > profile->mediaCapacity) continue;
         if (found < capacity) {
@@ -460,6 +475,15 @@ bool imgburn_dvd_layer_break_candidates_ex(const ImageBuilder* b, const DvdMedia
     }
     imgburn_dvd_free_navigation(&nav); *count = found;
     if (found > capacity) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return false; } return true;
+}
+
+bool imgburn_dvd_layer_break_candidates_ex(const ImageBuilder* b, const DvdMediaProfile* profile, unsigned options, DvdLayerBreakCandidate* candidates, size_t capacity, size_t* count) {
+    return dvd_layer_break_candidates(b,profile,options,candidates,capacity,count,false,NULL,NULL);
+}
+
+bool fs_dvd_layer_break_candidates_fixed(const ImageBuilder* b, const DvdMediaProfile* profile, DvdLayerBreakCandidate* candidates, size_t capacity, size_t* count, FsDvdReadCallback read, void* context) {
+    if (!read) { if (count) *count = 0; SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    return dvd_layer_break_candidates(b,profile,0,candidates,capacity,count,true,read,context);
 }
 
 bool imgburn_dvd_select_layer_break(ImageBuilder* b, const DvdMediaProfile* profile, const DvdLayerBreakCandidate* candidate, bool seamless) {

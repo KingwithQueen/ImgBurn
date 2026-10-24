@@ -46,7 +46,7 @@ msbuild ImgBurn.sln /m /p:Configuration=Release /p:Platform=x64
 | --- | --- |
 | Read | GUI/命令行支持 DVD/Blu-ray 的 2048 字节数据 ISO，以及经检查的单会话、单轨 MODE1 CD ISO。新增单会话音频、混合轨道、MODE1/MODE2 CD 的 2352 字节 CUE/BIN 读取，使用 Q 子通道核对轨道、索引与地址，支持符合已检查边界的扩展预间隙和 SCMS 周期识别。自动提取 Q 的盘级 MCN 与逐音轨 ISRC；可显式读取 CD-TEXT，保留原始 CDT 并在 CUE 中引用。支持有界重试、取消、完整传输检查及目标保护。受检查的单轨 MODE1 CD、单层及已结束的单会话双层 DVD 可读取为单文件或分卷 MDS 数据配套，保留 DVD 的 OTP/PTP 和物理层位置；精简 MODE1/MODE2 的 2352 字节 MDS（含分卷）和按 Full TOC 分会话导出 CUE/BIN 已接通，新增目标文件系统 Auto 分卷、完整容量预设/自定义、数据/音频速度、可调重试和成功后弹盘；文件系统有效长度选择等其余设置仍待实现，更多原版子通道兼容边界待对照；负 LBA 主通道音频和任意 P–W 保留不在已实现范围，实体介质验收尚未完成 |
 | Build | 已实现 ISO/Joliet 双字节序路径表、目录扇区填充、名称冲突处理、多 extent 大文件及 UDF 1.02/2.50 文件树。UDF 使用 64 位文件长度和 AED 分配表续接，2.50 使用 EFE、元数据分区与副本。支持纯 ISO、ISO/Joliet、纯 UDF 或桥接镜像；保留输入一致性和目标文件保护 |
-| DVD-Video / Blu-ray 布局 | DVD 使用 ISO+UDF 1.02，补建 AUDIO_TS、过滤 VIDEO_TS、按视频文件顺序排列，并保证 IFO 末尾与 BUP 开头至少间隔 32 KiB。在输出中修正 IFO/BUP 与标题集地址；标题导航交叉检查 PGC、PTT、Cell 地址、VOBU 表和 NAV 包，支持从实际布局选取 OTP 层切换单元、加入填充、更新 SPLIP 并生成 MDS。Blu-ray 使用纯 UDF 2.50、EFE、元数据副本、64 KiB 文件对齐、分离的主备描述区及 BDMV/BDAV 目录补齐。输入需要已经制作好的视频目录；单元预览与原版的逐项对照及介质验收仍待完成 |
+| DVD-Video / Blu-ray 布局 | DVD 使用 ISO+UDF 1.02，补建 AUDIO_TS、过滤 VIDEO_TS、按视频文件顺序排列，并保证 IFO 末尾与 BUP 开头至少间隔 32 KiB。在输出中修正 IFO/BUP 与标题集地址；标题导航交叉检查 PGC、PTT、Cell 地址、VOBU 表和 NAV 包，支持从实际布局选取 OTP 层切换单元、加入填充、更新 SPLIP 并生成 MDS。Blu-ray 使用纯 UDF 2.50、EFE、元数据副本、64 KiB 文件对齐、分离的主备描述区及 BDMV/BDAV 目录补齐。输入需要已经制作好的视频目录；成品 DVD-Video ISO/BIN/数据 MDS 的只读换层候选分析已接通 `dvd-layers`，保留镜像真实 LBA；Write 视频 ISO 自动选层、单元预览的完整原版对照及介质验收仍待完成 |
 | Write | GUI/命令行已接通空白 CD-R MODE1 SAO、DVD-R（含双层）DAO、DVD+R（含双层）和 BD-R SRM 的单会话单轨 2048 字节 ISO/BIN/数据 MDS 写入（含分卷及首卷偏移），并支持 BINARY/MOTOROLA、原生 PCM WAVE 与可解码音频、MODE1/2352、XA MODE2/2352 及混合轨 CUE 的单会话多轨 SAO 写入、索引及间隙。支持 CD-TEXT 的导入区写入，使用 CUE 文字或优先保留的原始 CDT。检查介质和容量，按介质发送布局、设置速度、预留轨道并收尾；BD-R 根据当前能力选择 VNR 或普通写入。CD-R、DVD-R 支持设备能力允许的测试写入；命令行/API 可显式请求 OPC。支持 CD-RW、单层 DVD-RW 快速/完整擦除、取消、保护恢复和写后回读比较。DVD+R DL 可由 OTP MDS、无层信息的数据来源或显式 L0 设置层容量；DVD-R DL 使用介质固定 L0，均按层分块并回读。缺失解码器的音频、非 XA MODE2、仅首层双层写入、视频 ISO 的自动单元候选、追加会话、其他介质格式化及完整设置仍待实现；实体刻录未验收 |
 | Verify | GUI/命令行支持 2048 字节数据光盘可读性检查和 ISO/BIN/单轨数据 MDS 比较，新增单会话音频、混合轨道、MODE1/MODE2 CD 可读性检查及受支持的原始 CUE/BIN 比较。音频按原版默认仅检查可读性，可显式开启样本比较。无参考镜像时可按 Full TOC 检查完整多会话的轨道数据区，跳过会话间隙。支持重试、取消、完整传输检查、失配计数及结束布局复查；支持多会话 CUE 在各会话轨道数据区比较及精简 MODE1/MODE2 的 2352 字节 MDS 完整主通道比较；完整选项及真实介质流程尚未验收，其他音频格式取决于可用解码器 |
 | Discovery | GUI/命令行已接通内存全零数据的写入与回读比较，可选择全部空余扇区或自定义扇区数，支持速度、取消及设备测试写入。当前介质范围为空白 CD-R、单层 DVD-R/+R 和 BD-R SRM；BD 的全容量测试不预留固定长度轨道。可擦写介质、双层、超刻、AWS、图表及完整选项仍待补齐，实体刻录未验收 |
@@ -75,7 +75,7 @@ DVD+R DL 要求空白、单会话、单轨介质和有效双层写入能力，�
 
 DVD-R DL Sequential（0015h）新增固定层 DAO，要求有效的 002Fh/RDL 能力；用 READ DISC STRUCTURE 格式 20h 取得介质固定 L0，按固定位置分块，预留整轨并由 DAO 同步结束，不向它发送 DVD+R DL 的设置层容量或功能 5/6 收尾。支持能力允许的测试写入、速度、取消、保护恢复及写后比较，校验前仍复查介质和固定层位置。来源 MDS 的 L0 与本次固定目标位置分开处理，显式用户值必须与固定位置相同；[原版作者也区分 +R DL 可选范围与 -R DL 固定位置](https://forum.imgburn.com/topic/6895-creating-double-layer-isos-with-imgburn/)。Layer Jump（0016h）没有随 DAO 开放。
 
-本轮双层路径要求两层实际都有数据、L0 非零且 16 对齐，并满足介质容量和 L0 不短于 L1。仅写首层、PTP/未对齐的双层 MDS、追加会话和更多格式化仍不支持；手动值不绕过来源格式边界。普通数据平衡并非 DVD-Video 单元候选算法，视频可继续使用 Build 生成的受支持 OTP MDS/已知单元位置；直接从视频 ISO 自动定位单元与插入填充仍待接通，不静默重排源镜像。上述结果为文件及协议验证，未执行实体双层刻录。
+本轮双层路径要求两层实际都有数据、L0 非零且 16 对齐，并满足介质容量和 L0 不短于 L1。仅写首层、PTP/未对齐的双层 MDS、追加会话和更多格式化仍不支持；手动值不绕过来源格式边界。普通数据平衡并非 DVD-Video 单元候选算法，视频可继续使用 Build 生成的受支持 OTP MDS/已知单元位置；成品视频 ISO 的只读单元候选已由 `dvd-layers` 提供，Write 自动选择仍待接通；成品镜像分析不插入填充或重排源镜像。上述结果为文件及协议验证，未执行实体双层刻录。
 
 ```bat
 ImgBurn.exe burn R: data.iso --verify
@@ -259,7 +259,19 @@ ImgBurn.exe build bluray.iso authored-bluray --bluray
 
 `--dvd-break` 的三个数字为候选列表中的标题集、PGC 和 Cell，必须使用当前目录实际列出的候选。菜单使用 `--dvd-menu-break VTS:LU:PGC:Cell`，其中 VTS 为 0 时表示 VMGM，LU 为从 1 开始的菜单语言单元。默认按 DVD+R DL 的 OTP 容量约束计算；可用 `--l0-min`、`--l0-max`、`--capacity` 在支持的容量范围内指定边界。`--seamless` 保留该单元的无缝标志；受影响单元的前一单元含执行命令时会拒绝此选择。镜像补丁不修改源 IFO/BUP。DVD 构建同时生成 MDS，超过单层容量时需要明确选择可用单元。
 
-`dvd-layers` 与 `build` 可用 `--show-interleaved` 显示和选择交错单元，对应原版的 Show Interleaved Cells 选项。角度块只列首角度的单元；选择后同步更新块内全部角度及同一物理单元的其他 PGC 引用。菜单选择也同步处理其他语言单元中的相同物理引用。程序核对菜单 LU/PGC 表边界、角度块首末关系以及首个 ILVU 的 IFO/NAV 地址。
+文件夹输入的 `dvd-layers` 与 `build` 可用 `--show-interleaved` 显示和选择交错单元，对应原版的 Show Interleaved Cells 选项。角度块只列首角度的单元；选择后同步更新块内全部角度及同一物理单元的其他 PGC 引用。菜单选择也同步处理其他语言单元中的相同物理引用。程序核对菜单 LU/PGC 表边界、角度块首末关系以及首个 ILVU 的 IFO/NAV 地址。
+
+`dvd-layers` 也可只读分析本项目当前生成的 ISO9660 + UDF 1.02 DVD-Video 成品 ISO/BIN，以及 `DataImageSource` 已支持的对应 2048 字节数据 MDS，包含首卷非零字节偏移、分卷及有效轨道长度。新入口直接从 ISO 目录取得 VIDEO_TS 文件的单 extent 和真实 LBA，检查 UDF 1.02 基本桥描述符、IFO/BUP 相等及镜像内已修正的 VOB/标题集地址，再复用既有 PGC/PTT/Cell 地址表和 VOB NAV 交叉核对。
+
+```bat
+ImgBurn.exe dvd-layers movie.iso
+ImgBurn.exe dvd-layers movie.bin --l0-min 0 --l0-max 2086912 --capacity 4173824
+ImgBurn.exe dvd-layers movie.mds
+```
+
+成品镜像只列实际已经 16 扇区对齐、L0/L1 均非空、L0 不短于 L1，并满足给定 `DvdMediaProfile` 最小/最大 L0 及总容量的单元；`Actual-LBA` 是该单元在原镜像中的位置，`Padding` 恒为 0，`Total` 保持源的逻辑扇区数。不会调用 Build 重排、取整或补 padding，也不根据 MDS 自带的层位置伪造候选。有效导航但没有符合条件的单元时返回成功并明确显示零候选；无效或未支持格式另报错误。程序打开期间来源及全部配套文件保持只读共享，不发送任何设备命令。
+
+本轮成品入口限于当前项目的 ISO+UDF1.02、单 extent DVD 文件及现有 DataImageSource 数据格式。UDF-only、UDF2.50、复杂角度/交错导航不支持，成品输入不能使用 `--show-interleaved`；已有文件夹显示和 Build 选择保持。UDF 检查只确认基本桥元数据，尚未将 UDF 文件树与 ISO 命名空间做全量一致性核对，不宣称任意第三方 DVD 镜像兼容。现阶段仅提供分析 API/CLI，尚未接设备写入、Write 自动选择、GUI 候选窗口或成品镜像补丁。
 
 DVD 视频预览命令示例：
 
@@ -342,3 +354,5 @@ CUE 按原版拒绝 CDG 轨道，REM PREGAP 仍作为注释处理；完整特殊
 第三十六阶段补齐 Read 常用流程的 Auto/完整预设/自定义分卷、可调软件重试、数据与音频读取速度及成功后弹盘，接通 CLI、GUI 页面和后台。独立文件/协议模型核对文件系统上限、实际数据内容与读取范围、速度命令、混合会话00速度归属、发布与弹盘顺序，沿用既有 MDS/特殊会话回归；这不代表已在真实 FAT、网络卷、实体测速或弹盘验收。文件系统有效长度、完整布局文件策略、任意 P-W、负 LBA 及完整设置持久化仍按现有边界另行推进。
 
 第三十七阶段推进剩余写入：无 MDS 的 DVD+R DL 数据镜像可自动平衡 ECC 层容量，GUI/CLI 可显式选择 L0 并覆盖来源元数据；新增 DVD-R DL Sequential 固定层 DAO 与测试写入、分层进度及写后比较。独立协议模型核对完整非零写出、源偏移/分卷、跨层边界、两类介质各自的能力与收尾、取消和结束/重载层位置变化，既有 Read/MDS/特殊会话继续回归。普通数据平衡、视频单元候选、仅首层、Layer Jump、追加多会话及可擦写格式化分别保留边界，实体介质验收仍待用户安排。
+
+第三十八阶段新增已生成 DVD-Video 镜像的只读单元候选分析。真实 extent 与 DataImageSource 跨卷/首偏移读取共用既有导航核对，候选仅使用成品实际对齐 LBA。独立已知导航夹具逐字段核对单元、VOB、章节、镜像地址和容量过滤，记录完整来源 SHA 不变和新入口零设备命令；原文件夹导航/Build 换层及相关 Read/MDS/双层 Write 继续回归。原版确认实际小镜像的 ISO9660/UDF1.02 载入，但其提示小镜像无需双层，未列候选；候选字段采用既有原版导航基准与本轮独立结构核对，不冒充原版大容量或实体介质验收。
