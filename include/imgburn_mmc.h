@@ -110,6 +110,9 @@ bool mmc_read_capacity(OpticalDrive* drive, uint32_t* outLastLba, uint32_t* outB
 
 /* 只读 DVD 物理格式信息，返回介质实际层数。 */
 bool mmc_read_dvd_layer_count(OpticalDrive* drive, unsigned* outLayers);
+/* 将 PFI 的物理地址换算为逻辑层布局，并与已读取的数据容量核对。 */
+typedef struct { unsigned layerCount; bool oppositeTrackPath; uint32_t layerBreakLba; } MmcDvdLayout;
+bool mmc_read_dvd_layout(OpticalDrive* drive, uint32_t totalSectors, MmcDvdLayout* layout);
 /* DVD+R DL 的写入能力、L0 容量与最小半径收尾；容量单位为 2048 字节扇区。 */
 typedef struct { uint32_t sectors; bool changeable; } MmcDvdLayerCapacity;
 bool mmc_get_dvd_plus_r_dl_write_feature(OpticalDrive* drive);

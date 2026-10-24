@@ -82,7 +82,7 @@ static void print_usage(void) {
     printf("                                 Inspect one sector as hexadecimal and ASCII\n");
     printf("  read <drive> <out.iso|out.mds|out.cue> [--retries <0..20>] [--replace] [--cdtext]\n");
     printf("                                 Read data ISO or raw CD BIN/CUE with Q indexes\n");
-    printf("                                 MDS destination creates a single-layer DVD ISO + descriptor\n");
+    printf("                                 MDS destination saves DVD ISO + single/dual-layer layout\n");
     printf("  burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle] [--opc]\n");
     printf("                                 Burn ISO/BIN, data MDS or supported CD CUE images\n");
     printf("                                 DVD+R DL requires an OTP MDS with an aligned layer break\n");

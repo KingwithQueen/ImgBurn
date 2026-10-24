@@ -71,11 +71,14 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     if (!mmc_read_capacity(drive,&last,&bytes)) return read_failure(&stats,read_device_error(drive),"Cannot read disc capacity",callback,context);
     if (last == UINT32_MAX || bytes != 2048) return read_failure(&stats,ERROR_NOT_SUPPORTED,"Require bounded 2048-byte data sectors",callback,context);
     stats.totalSectors = last + 1;
-    if (mdsOutput && (profile < MMC_PROFILE_DVD_ROM || profile > MMC_PROFILE_DVD_PLUS_R_DL || profile == MMC_PROFILE_DVD_R_DL_SEQ || profile == MMC_PROFILE_DVD_R_DL_JUMP || profile == MMC_PROFILE_DVD_RW_DL || profile == MMC_PROFILE_DVD_PLUS_RW_DL || profile == MMC_PROFILE_DVD_PLUS_R_DL || stats.totalSectors > 2295104)) return read_failure(&stats,ERROR_NOT_SUPPORTED,"MDS Read currently requires a single-layer DVD",callback,context);
+    if (mdsOutput && (profile < MMC_PROFILE_DVD_ROM || profile > MMC_PROFILE_DVD_PLUS_R_DL)) return read_failure(&stats,ERROR_NOT_SUPPORTED,"MDS Read requires supported DVD media",callback,context);
+    MmcDvdLayout dvdLayout = {0};
     if (mdsOutput) {
-        unsigned layers = 0;
-        if (!mmc_read_dvd_layer_count(drive,&layers)) return read_failure(&stats,read_device_error(drive),"Cannot read DVD physical format",callback,context);
-        if (layers != 1) return read_failure(&stats,ERROR_NOT_SUPPORTED,"MDS Read currently requires a single-layer DVD",callback,context);
+        if (!mmc_read_dvd_layout(drive,stats.totalSectors,&dvdLayout)) return read_failure(&stats,read_device_error(drive),"Cannot read matching DVD physical layout",callback,context);
+        if (dvdLayout.layerCount == 2) {
+            MmcDiscInfo disc; if (!mmc_read_disc_information(drive,&disc)) return read_failure(&stats,read_device_error(drive),"Cannot inspect dual-layer DVD session",callback,context);
+            if (disc.numSessions != 1 || disc.discStatus != DISC_STATUS_COMPLETE || disc.lastSessionStatus != 3) return read_failure(&stats,ERROR_NOT_SUPPORTED,"Dual-layer MDS Read requires a finalized single-session DVD",callback,context);
+        }
     }
     if (profile <= MMC_PROFILE_CD_RW && !mmc_check_iso_cd(drive,stats.totalSectors)) return read_failure(&stats,read_device_error(drive),"CD layout requires a raw track image",callback,context);
     wchar_t parent[MAX_PATH]; wcscpy(parent,destination); wchar_t* slash = wcsrchr(parent,L'\\'); if (!slash) return read_failure(&stats,ERROR_INVALID_NAME,"Invalid image directory",callback,context); slash[1] = 0;
@@ -96,8 +99,10 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     ULONGLONG started = GetTickCount64(), previousTime = started; uint32_t previousLba = 0;
     stats.state = PIPELINE_STATE_READING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Reading disc to image..."); if (callback) callback(&stats,context);
     for (uint32_t lba = 0; lba < stats.totalSectors;) {
+        if (dvdLayout.layerCount == 2) snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Reading DVD layer %u to image (L0 %u sectors)...",lba < dvdLayout.layerBreakLba ? 0 : 1,dvdLayout.layerBreakLba);
         if (read_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
         uint16_t count = (uint16_t)(stats.totalSectors - lba < 32 ? stats.totalSectors - lba : 32);
+        if (dvdLayout.layerCount == 2 && lba < dvdLayout.layerBreakLba && count > dvdLayout.layerBreakLba - lba) count = (uint16_t)(dvdLayout.layerBreakLba - lba);
         if (!read_sectors(config,lba,count,buffer,&stats)) { error = read_cancelled(config) ? ERROR_CANCELLED : read_device_error(drive); goto done; }
         DWORD wanted = (DWORD)count * 2048, offset = 0;
         while (offset < wanted) { DWORD written = 0; if (!WriteFile(output,buffer + offset,wanted - offset,&written,NULL)) { error = GetLastError(); if (!error) error = ERROR_WRITE_FAULT; goto done; } if (!written || written > wanted - offset) { error = ERROR_WRITE_FAULT; goto done; } offset += written; }
@@ -111,6 +116,11 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     if (read_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
     if (!mmc_test_unit_ready(drive) || !mmc_read_capacity(drive,&last,&bytes)) { error = read_device_error(drive); goto done; }
     if (last != stats.totalSectors - 1 || bytes != 2048 || mmc_get_current_profile(drive) != profile) { error = ERROR_MEDIA_CHANGED; goto done; }
+    if (mdsOutput) {
+        MmcDvdLayout finalLayout;
+        if (!mmc_read_dvd_layout(drive,stats.totalSectors,&finalLayout)) { error = read_device_error(drive); goto done; }
+        if (finalLayout.layerCount != dvdLayout.layerCount || finalLayout.oppositeTrackPath != dvdLayout.oppositeTrackPath || finalLayout.layerBreakLba != dvdLayout.layerBreakLba) { error = ERROR_MEDIA_CHANGED; goto done; }
+    }
     if (!FlushFileBuffers(output)) { error = GetLastError(); goto done; }
     if (!CloseHandle(output)) { error = GetLastError(); output = INVALID_HANDLE_VALUE; goto done; } output = INVALID_HANDLE_VALUE;
     if (read_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
@@ -124,7 +134,7 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
         }
         if (!descriptorCreated) goto done;
         const wchar_t* fileName = wcsrchr(temporary,L'\\') + 1;
-        if (!imgburn_mds_create(descriptor,fileName,stats.totalSectors,0)) { error = GetLastError(); goto done; }
+        if (!imgburn_mds_create_dvd_read(descriptor,fileName,stats.totalSectors,dvdLayout.layerBreakLba,dvdLayout.oppositeTrackPath)) { error = GetLastError(); goto done; }
         if (read_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
     }
     if (!read_target(destination,parent,config->replaceExisting)) { error = GetLastError(); goto done; }

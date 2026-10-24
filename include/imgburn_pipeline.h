@@ -116,7 +116,7 @@ bool pipeline_verify_disc(OpticalDrive* drive,
                           PipelineProgressCallback callback,
                           void* userData);
 
-/* Read 主体：2048 字节 ISO，或单层 DVD 的 MDS/ISO 配套；失败或取消时保护既有目标。 */
+/* Read 主体：2048 字节 ISO，或单层/双层 DVD 的 MDS/ISO 配套；失败或取消时保护既有目标。 */
 typedef struct {
     OpticalDrive* drive;
     const wchar_t* imagePath;

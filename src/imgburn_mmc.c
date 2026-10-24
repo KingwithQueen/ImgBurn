@@ -270,6 +270,35 @@ bool mmc_reserve_track(OpticalDrive* drive, uint32_t reservationSizeLba) {
 bool mmc_prevent_removal(OpticalDrive* drive, bool prevent) { uint8_t cdb[6] = {0x1E}; cdb[4] = prevent ? 1 : 0; return spti_send_cdb(drive,cdb,6,NULL,0,true,10); }
 
 static bool mmc_write_parameter_error(OpticalDrive* drive, DWORD error) { if (drive) drive->lastError = error; SetLastError(error); return false; }
+static bool mmc_read_dvd_pfi(OpticalDrive* drive, uint8_t layer, uint8_t data[20]) {
+    uint8_t cdb[12] = {0xAD}; cdb[6] = layer; cdb[9] = 20; memset(data,0,20);
+    if (!spti_send_cdb(drive,cdb,12,data,20,true,10)) return false;
+    if (drive->lastTransferBytes != 20 || read_be16(data) < 18) return mmc_write_parameter_error(drive,ERROR_READ_FAULT); return true;
+}
+bool mmc_read_dvd_layout(OpticalDrive* drive, uint32_t totalSectors, MmcDvdLayout* layout) {
+    if (!layout || !totalSectors) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER); memset(layout,0,sizeof(*layout));
+    if (!mmc_read_dvd_layer_count(drive,&layout->layerCount)) return false;
+    if (layout->layerCount == 1) {
+        if (totalSectors > 2295104) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED); return true;
+    }
+    uint8_t first[20], second[20]; if (!mmc_read_dvd_pfi(drive,0,first)) return false;
+    if (((first[6] >> 5) & 3) != 1) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+    uint32_t start = read_be32(first + 8) & 0xFFFFFF, end = read_be32(first + 12) & 0xFFFFFF, endL0 = read_be32(first + 16) & 0xFFFFFF;
+    layout->oppositeTrackPath = (first[6] & 0x10) != 0;
+    if (start != 0x30000) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    uint32_t layerEnd = layout->oppositeTrackPath ? endL0 : end;
+    if (layerEnd < start) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+    layout->layerBreakLba = layerEnd - start + 1; uint32_t secondStart;
+    if (layout->oppositeTrackPath) secondStart = ~endL0 & 0xFFFFFF;
+    else {
+        if (!mmc_read_dvd_pfi(drive,1,second)) return false;
+        if ((second[6] & 0x70) != 0x20) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+        secondStart = read_be32(second + 8) & 0xFFFFFF; end = read_be32(second + 12) & 0xFFFFFF;
+        if (secondStart != 0x30000) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    }
+    if (end < secondStart || (uint64_t)layout->layerBreakLba + end - secondStart + 1 != totalSectors || (layout->oppositeTrackPath && totalSectors - layout->layerBreakLba > layout->layerBreakLba)) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+    return true;
+}
 bool mmc_get_dvd_plus_r_dl_write_feature(OpticalDrive* drive) {
     uint8_t cdb[10] = {0x46,2,0,0x3B}, data[16] = {0}; cdb[8] = sizeof(data);
     if (!spti_send_cdb(drive,cdb,10,data,sizeof(data),true,10)) return false;

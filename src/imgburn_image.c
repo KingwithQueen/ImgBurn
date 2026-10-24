@@ -549,9 +549,10 @@ bool imgburn_mds_create_files(const wchar_t* mdsFilePath, const wchar_t* const* 
     return imgburn_mds_create_files_ex(mdsFilePath, dataFiles, fileCount, totalSectors, layerBreakLba, true);
 }
 
-bool imgburn_mds_create_files_ex(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath) {
+static bool mds_create_dvd(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, bool sourceLayout) {
     if (!mdsFilePath || !dataFiles || !fileCount || fileCount > MAX_MDS_FILES || wcslen(mdsFilePath) >= MAX_PATH || !totalSectors || totalSectors > INT32_MAX) return false;
-    if (layerBreakLba && (layerBreakLba >= totalSectors || (oppositeTrackPath && layerBreakLba < (totalSectors + 1) / 2) || layerBreakLba > 2086912 || totalSectors - layerBreakLba > 2086912 || layerBreakLba % 16)) return false;
+    if (layerBreakLba && (layerBreakLba >= totalSectors || (oppositeTrackPath && layerBreakLba < (totalSectors + 1) / 2) || layerBreakLba > 0xFD0000 || totalSectors - layerBreakLba > 0xFD0000)) return false;
+    if (!sourceLayout && layerBreakLba && (layerBreakLba > 2086912 || totalSectors - layerBreakLba > 2086912 || layerBreakLba % 16)) return false;
     if (!layerBreakLba && totalSectors > 2295104) return false;
     wchar_t source[MAX_PATH], destination[MAX_PATH], temporary[MAX_PATH];
     DWORD length = GetFullPathNameW(mdsFilePath, MAX_PATH, destination, NULL);
@@ -606,6 +607,13 @@ bool imgburn_mds_create_files_ex(const wchar_t* mdsFilePath, const wchar_t* cons
     if (ok) ok = MoveFileExW(temporary, destination, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
     if (!ok && output != INVALID_HANDLE_VALUE) DeleteFileW(temporary);
     free(data); return ok;
+}
+
+bool imgburn_mds_create_files_ex(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath) {
+    return mds_create_dvd(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,false);
+}
+bool imgburn_mds_create_dvd_read(const wchar_t* mdsFilePath, const wchar_t* dataFile, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath) {
+    const wchar_t* files[] = {dataFile}; return mds_create_dvd(mdsFilePath,files,1,totalSectors,layerBreakLba,oppositeTrackPath,true);
 }
 
 /* -------------------------------------------------------------------------

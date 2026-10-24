@@ -144,7 +144,7 @@ static bool job_drive(GuiJob* job) {
         const wchar_t* extension = wcsrchr(job->destination,L'.'); ok = extension && !_wcsicmp(extension,L".cue") ? pipeline_read_cd(&config,job_pipeline_progress,job) : pipeline_read_disc(&config,job_pipeline_progress,job);
         bool mds = extension && !_wcsicmp(extension,L".mds");
         if (ok) job_text(job,mds ? L"DVD 镜像和 MDS 描述已读取：%ls\r\n配套 ISO 路径记录在 MDS 中。\r\n" : L"光盘镜像已读取：%ls\r\n",job->destination);
-        else { job->error = GetLastError(); if (job->error == ERROR_NOT_SUPPORTED) job_text(job,mds ? L"MDS 配套读取当前支持单层 DVD；原始 CD 请选择 CUE 输出。\r\n" : L"当前光盘布局或光驱能力不支持所选镜像格式。\r\n"); else if (job->error == ERROR_DISK_FULL) job_text(job,L"目标位置的可用空间不足。\r\n"); }
+        else { job->error = GetLastError(); if (job->error == ERROR_NOT_SUPPORTED) job_text(job,mds ? L"MDS 配套读取支持单层 DVD 和已结束的单会话双层 DVD；原始 CD 请选择 CUE 输出。\r\n" : L"当前光盘布局或光驱能力不支持所选镜像格式。\r\n"); else if (job->error == ERROR_DISK_FULL) job_text(job,L"目标位置的可用空间不足。\r\n"); }
     }
     else if (job->operation == GUI_VERIFY_DISC) {
         VerifyConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.cancelEvent = job->cancel;
