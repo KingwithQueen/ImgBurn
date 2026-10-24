@@ -87,7 +87,8 @@ static void print_usage(void) {
     printf("                                 --split sets a per-file MiB limit for MDS; auto follows the target volume file limit\n");
     printf("  burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle] [--opc]\n");
     printf("                                 Burn ISO/BIN, data MDS or supported CD CUE images\n");
-    printf("                                 DVD+R DL requires an OTP MDS with an aligned layer break\n");
+    printf("                                 DVD+R DL uses MDS/automatic L0; --layer-break <sectors> overrides it\n"
+           "                                 DVD-R DL DAO uses the fixed medium layer boundary\n");
     printf("  erase <drive> [--quick|--full]   Erase CD-RW/DVD-RW; cancellation waits for the device\n");
     printf("  discovery <drive> [--sectors <n>] [--speed <Nx|MAX>] [--test]\n");
     printf("        [--verify|--no-verify] [--no-cycle] [--opc]\n");
@@ -520,7 +521,7 @@ static int cmd_burn(int argc, char **argv) {
     const char *imageArg = argv[3];
     bool testMode = false;
     bool verifyAfter = false;
-    double speed = 0; bool reserve = false, cycle = true, opc = false;
+    double speed = 0; bool reserve = false, cycle = true, opc = false; uint32_t layerBreak = 0;
 
     for (int i = 4; i < argc; i++) {
         if (_stricmp(argv[i], "--test") == 0) testMode = true;
@@ -528,6 +529,7 @@ static int cmd_burn(int argc, char **argv) {
         else if (_stricmp(argv[i], "--reserve") == 0) reserve = true;
         else if (_stricmp(argv[i], "--no-cycle") == 0) cycle = false;
         else if (_stricmp(argv[i], "--opc") == 0) opc = true;
+        else if (!_stricmp(argv[i],"--layer-break") && i + 1 < argc) { const char* value = argv[++i]; char* end; uint64_t amount = _strtoui64(value,&end,10); if (!value[0] || *end || value[0] == '-' || !amount || amount > UINT32_MAX || amount % 16) { printf("Error: Layer capacity must be a nonzero multiple of 16 sectors.\n"); return 1; } layerBreak = (uint32_t)amount; }
         else if (_stricmp(argv[i], "--speed") == 0 && i + 1 < argc) {
             const char* value = argv[++i]; if (!_stricmp(value,"MAX")) speed = 0;
             else { char* end; speed = strtod(value,&end); if ((*end == 'x' || *end == 'X') && !end[1]) end++; if (!value[0] || *end || !isfinite(speed) || speed < 1 || speed * 4495.5 + 0.5 >= UINT32_MAX) { printf("Error: Invalid write speed.\n"); return 1; } }
@@ -558,7 +560,7 @@ static int cmd_burn(int argc, char **argv) {
     if (speed > 0 && speedProfile == MMC_PROFILE_UNKNOWN) { printf("Error: Cannot identify media for write speed.\n"); spti_close_drive(&drive); return 1; }
     config.writeSpeedKbps = speed > 0 ? (uint32_t)(speed * (speedProfile == MMC_PROFILE_BD_R_SRM ? 4495.5 : speedProfile == MMC_PROFILE_CD_R ? 176.4 : 1385.0) + 0.5) : UINT32_MAX;
     config.ringBufferBytes = 32 * 1024 * 1024;
-    config.reserveTrack = reserve; config.cycleTrayBeforeVerify = cycle; config.performOpc = opc;
+    config.reserveTrack = reserve; config.cycleTrayBeforeVerify = cycle; config.performOpc = opc; config.layerBreakLba = layerBreak;
     HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; } config.cancelEvent = cancel;
     AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock); bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
 

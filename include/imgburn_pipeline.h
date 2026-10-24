@@ -67,7 +67,7 @@ typedef struct {
     OpticalDrive* drive;
     const wchar_t* imagePath;       /* 2048 字节 ISO/BIN/单轨数据 MDS，或受支持的 CD CUE。 */
     uint32_t writeSpeedKbps;        /* 0、0xFFFF 或 0xFFFFFFFF 为最高速度；蓝光支持 32 位速率。 */
-    bool testMode;                  /* 支持具备 Test Write 能力的 CD-R SAO、DVD-R DAO。 */
+    bool testMode;                  /* 支持具备 Test Write 能力的 CD-R SAO、DVD-R（含DL）DAO。 */
     bool verifyAfterWrite;
     bool ejectWhenDone;
     size_t ringBufferBytes;         /* e.g. 32 MB or 64 MB */
@@ -75,6 +75,7 @@ typedef struct {
     bool reserveTrack;              /* DVD+R（含双层）可选；当前 DVD-R DAO/BD-R SRM 路径总是预留。 */
     bool cycleTrayBeforeVerify;     /* 写后校验前按原版默认流程重新装载介质。 */
     bool performOpc;                /* 显式请求写入前功率校准，默认关闭。 */
+    uint32_t layerBreakLba;          /* DVD+R DL用户指定L0容量，覆盖MDS；0采用MDS或按ECC块平衡。 */
 } BurnConfig;
 
 /**

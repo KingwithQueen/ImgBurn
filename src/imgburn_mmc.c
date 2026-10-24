@@ -331,7 +331,8 @@ bool mmc_get_dvd_write_features(OpticalDrive* drive, MmcDvdWriteFeatures* featur
     if (!spti_send_cdb(drive,cdb,10,data,sizeof(data),true,10)) return false;
     if (drive->lastTransferBytes == 8 && read_be32(data) == 4) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
     if (drive->lastTransferBytes != sizeof(data) || read_be32(data) < 12) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
-    if (read_be16(data + 6) != MMC_PROFILE_DVD_R_SEQ || read_be16(data + 8) != 0x2F || !(data[10] & 1) || data[11] != 4) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    uint16_t profile = read_be16(data + 6);
+    if ((profile != MMC_PROFILE_DVD_R_SEQ && profile != MMC_PROFILE_DVD_R_DL_SEQ) || read_be16(data + 8) != 0x2F || !(data[10] & 1) || data[11] != 4 || (profile == MMC_PROFILE_DVD_R_DL_SEQ && !(data[12] & 8))) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
     features->testWrite = (data[12] & 4) != 0; features->bufferUnderrunFree = (data[12] & 0x40) != 0; return true;
 }
 bool mmc_get_cd_write_features(OpticalDrive* drive, MmcCdWriteFeatures* features) {
@@ -438,7 +439,7 @@ bool mmc_get_bd_write_features(OpticalDrive* drive, bool* verifyNotRequired) {
     if (!writable) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED); *verifyNotRequired = (data[12] & 1) != 0; return true;
 }
 bool mmc_set_burn_speed(OpticalDrive* drive, MmcProfile profile, uint32_t writeSpeedKbps) {
-    if (profile != MMC_PROFILE_BD_R_SRM && profile != MMC_PROFILE_DVD_R_SEQ && profile != MMC_PROFILE_DVD_PLUS_R && profile != MMC_PROFILE_DVD_PLUS_R_DL && profile != MMC_PROFILE_CD_R) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    if (profile != MMC_PROFILE_BD_R_SRM && profile != MMC_PROFILE_DVD_R_SEQ && profile != MMC_PROFILE_DVD_R_DL_SEQ && profile != MMC_PROFILE_DVD_PLUS_R && profile != MMC_PROFILE_DVD_PLUS_R_DL && profile != MMC_PROFILE_CD_R) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
     uint32_t speed = !writeSpeedKbps || writeSpeedKbps == 0xFFFF ? UINT32_MAX : writeSpeedKbps;
     if (profile != MMC_PROFILE_BD_R_SRM) {
         if (speed != UINT32_MAX && speed >= 0xFFFF) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);

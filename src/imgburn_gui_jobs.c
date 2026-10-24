@@ -134,7 +134,7 @@ static bool job_drive(GuiJob* job) {
         uint8_t inquiry[36] = {0}; ok = mmc_inquiry(&drive, inquiry, sizeof(inquiry));
         if (ok) { char text[29]; memcpy(text, inquiry + 8, 28); text[28] = 0; wchar_t wide[29]; MultiByteToWideChar(CP_ACP, 0, text, -1, wide, 29); job_text(job, L"%ls\r\n%ls\r\n", wide, ready ? L"介质已就绪" : L"介质未就绪或未插入光盘"); }
         if (ready && mmc_read_capacity(&drive, &last, &bytes)) job_text(job, L"容量：%llu 扇区，每扇区 %u 字节\r\n", (uint64_t)last + 1, bytes);
-        if (ready && mmc_get_current_profile(&drive) == MMC_PROFILE_DVD_R_SEQ) { MmcDvdWriteFeatures features; if (mmc_get_dvd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
+        if (ready && (mmc_get_current_profile(&drive) == MMC_PROFILE_DVD_R_SEQ || mmc_get_current_profile(&drive) == MMC_PROFILE_DVD_R_DL_SEQ)) { MmcDvdWriteFeatures features; if (mmc_get_dvd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
         if (ready && mmc_get_current_profile(&drive) == MMC_PROFILE_CD_R) { MmcCdWriteFeatures features; if (mmc_get_cd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
         if (ready) { MmcDiscInfo disc; if (mmc_read_disc_information(&drive,&disc)) {
             job->eraseSupported = disc.isErasable && (disc.currentProfile == MMC_PROFILE_CD_RW || disc.currentProfile == MMC_PROFILE_DVD_RW_SEQ || disc.currentProfile == MMC_PROFILE_DVD_RW_RO);
@@ -182,11 +182,11 @@ static bool job_drive(GuiJob* job) {
         else if (job->error == ERROR_DISK_FULL) job_text(job,L"所选扇区数超过光盘可写容量。\r\n");
     }
     else if (job->operation == GUI_WRITE_DISC) {
-        BurnConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.writeSpeedKbps = job->speed; config.verifyAfterWrite = job->verify; config.ringBufferBytes = 32 * 1024 * 1024; config.cancelEvent = job->cancel; config.cycleTrayBeforeVerify = true; config.testMode = job->testMode;
+        BurnConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.writeSpeedKbps = job->speed; config.verifyAfterWrite = job->verify; config.ringBufferBytes = 32 * 1024 * 1024; config.cancelEvent = job->cancel; config.cycleTrayBeforeVerify = true; config.testMode = job->testMode; config.layerBreakLba = job->writeLayerBreak;
         ok = pipeline_burn_image(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
         if (ok && job->testMode) job_text(job,L"设备测试写入完成；未执行记录数据的回读校验。\r\n");
         else if (ok) job_text(job,L"光盘镜像写入完成%ls。\r\n",job->verify ? L"并通过回读校验" : L"");
-        else if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前支持空白 CD-R SAO、单层 DVD-R/+R、带 OTP 双层 MDS 的 DVD+R DL 与 BD-R SRM；CD-TEXT 还要求光驱支持 R-W 写入。\r\n");
+        else if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前支持空白 CD-R SAO、DVD-R（含固定层 DL）DAO、DVD+R（含自动或指定层 DL）与 BD-R SRM；CD-TEXT 还要求光驱支持 R-W 写入。\r\n");
         else if (job->error == ERROR_DISK_FULL) job_text(job,L"光盘的可写扇区不足。\r\n");
     }
     if (!ok && !job->error) job->error = drive.lastError ? drive.lastError : GetLastError();

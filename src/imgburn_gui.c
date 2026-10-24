@@ -31,7 +31,7 @@ enum {
     UI_SOURCE_EDIT = 1000, UI_SOURCE_LIST, UI_DEST_EDIT, UI_DRIVE, UI_GO, UI_CANCEL, UI_FS, UI_UDF, UI_LABEL,
     UI_DVD, UI_BD, UI_OPTIMIZE, UI_TAB, UI_TEST, UI_VERIFY_CHECK, UI_TOOL_ADD, UI_TOOL_REMOVE, UI_TOOL_UP, UI_TOOL_DOWN,
     UI_TOOL_LAYER, UI_TOOL_LBA, UI_TOOL_OTP, UI_TOOL_PTP, UI_TOOL_OK, UI_TOOL_CLOSE, UI_IMAGE_INFO, UI_REMOVE_SOURCE, UI_VERIFY_COMPARE, UI_READ_CDTEXT,
-    UI_DISCOVERY_ALL, UI_DISCOVERY_CUSTOM, UI_DISCOVERY_SECTORS, UI_DISCOVERY_CAPACITY, UI_DISCOVERY_SPEED, UI_DISCOVERY_SIZE, UI_READ_SPLIT, UI_READ_RAW_MDS, UI_SESSION_PREGAPS, UI_READ_SPEED, UI_READ_AUDIO_SPEED, UI_READ_RETRIES, UI_READ_EJECT,
+    UI_DISCOVERY_ALL, UI_DISCOVERY_CUSTOM, UI_DISCOVERY_SECTORS, UI_DISCOVERY_CAPACITY, UI_DISCOVERY_SPEED, UI_DISCOVERY_SIZE, UI_READ_SPLIT, UI_READ_RAW_MDS, UI_SESSION_PREGAPS, UI_READ_SPEED, UI_READ_AUDIO_SPEED, UI_READ_RETRIES, UI_READ_EJECT, UI_WRITE_LAYER,
     UI_EZ_FIRST = 1100
 };
 
@@ -47,7 +47,7 @@ typedef struct {
 struct GuiWindow {
     HINSTANCE instance;
     HWND window, status, logWindow, logList, sources, sourceEdit, destination, drives, info, progress, go, cancel, tabs;
-    HWND fs, udf, label, dvd, bd, optimize, verify, compare, readText, readSplit, readRawMds, sessionPregaps, discoverySectors, discoverySpeed, readSpeed, readAudioSpeed, readRetries, readEject;
+    HWND fs, udf, label, dvd, bd, optimize, verify, compare, readText, readSplit, readRawMds, sessionPregaps, discoverySectors, discoverySpeed, readSpeed, readAudioSpeed, readRetries, readEject, writeLayer;
     HFONT font, bold;
     GuiMode mode;
     unsigned dpi;
@@ -62,7 +62,7 @@ struct GuiWindow {
     bool readEjectWhenDone;
     wchar_t readSplitText[40], readRate[24], readAudioRate[24], readRetryText[8];
     uint32_t discoveryCapacity;
-    wchar_t discoveryCount[32], discoveryRate[24];
+    wchar_t discoveryCount[32], discoveryRate[24], writeLayerValue[16];
     OpticalDriveInfo devices[MAX_OPTICAL_DRIVES];
     int driveCount, selectedDrive;
     GuiJob* job;
@@ -160,6 +160,7 @@ static void gui_read_controls(GuiWindow* ui) {
     if (ui->readRetries) GetWindowTextW(ui->readRetries,ui->readRetryText,8);
     if (ui->readEject) ui->readEjectWhenDone = SendMessageW(ui->readEject,BM_GETCHECK,0,0) == BST_CHECKED;
     if (ui->mode == GUI_DISCOVERY && ui->discoverySectors) { ui->discoveryAll = SendMessageW(GetDlgItem(ui->window,UI_DISCOVERY_ALL),BM_GETCHECK,0,0) == BST_CHECKED; GetWindowTextW(ui->discoverySectors,ui->discoveryCount,32); GetWindowTextW(ui->discoverySpeed,ui->discoveryRate,24); }
+    if (ui->writeLayer) GetWindowTextW(ui->writeLayer,ui->writeLayerValue,16);
     if (ui->drives) ui->selectedDrive = (int)SendMessageW(ui->drives, CB_GETCURSEL, 0, 0);
 }
 
@@ -187,6 +188,7 @@ static void gui_menu(GuiWindow* ui) {
         EnableWindow(GetDlgItem(ui->window,UI_DISCOVERY_ALL),idle); EnableWindow(GetDlgItem(ui->window,UI_DISCOVERY_CUSTOM),idle); EnableWindow(ui->discoverySectors,idle && !ui->discoveryAll); EnableWindow(ui->discoverySpeed,idle); EnableWindow(GetDlgItem(ui->window,UI_DISCOVERY_CAPACITY),idle && ui->discoveryCapacity != 0);
         wchar_t size[80]; uint64_t sectors = ui->discoveryAll ? ui->discoveryCapacity : _wcstoui64(ui->discoveryCount,NULL,10); swprintf(size,80,L"数据大小：%.2f MiB",(double)sectors / 512.0); SetWindowTextW(GetDlgItem(ui->window,UI_DISCOVERY_SIZE),size);
     }
+    if (ui->writeLayer) EnableWindow(ui->writeLayer,idle);
     if (ui->go) EnableWindow(ui->go, build ? idle && source && !ui->outputDevice : read ? readAction : discovery ? discoveryAction : (write || verify) && discAction);
     HMENU bar = CreateMenu(), file = CreatePopupMenu(), view = CreatePopupMenu(), mode = CreatePopupMenu(), tools = CreatePopupMenu(), help = CreatePopupMenu();
     if (build || write || verify) item(file, UI_SOURCE_FILE, build ? L"浏览文件(&M)..." : L"浏览来源文件(&M)...\tCtrl+O", idle && (!verify || ui->verifyAgainstImage));
@@ -221,7 +223,7 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
     gui_read_controls(ui); HWND child = GetWindow(ui->window, GW_CHILD);
     while (child) { HWND next = GetWindow(child, GW_HWNDNEXT); if (child != ui->status) DestroyWindow(child); child = next; }
     ui->sources = ui->sourceEdit = ui->destination = ui->drives = ui->info = ui->progress = ui->go = ui->cancel = ui->tabs = NULL;
-    ui->fs = ui->udf = ui->label = ui->dvd = ui->bd = ui->optimize = ui->verify = ui->compare = ui->readText = ui->readSplit = ui->readRawMds = ui->sessionPregaps = ui->discoverySectors = ui->discoverySpeed = ui->readSpeed = ui->readAudioSpeed = ui->readRetries = ui->readEject = NULL; ui->mode = mode;
+    ui->fs = ui->udf = ui->label = ui->dvd = ui->bd = ui->optimize = ui->verify = ui->compare = ui->readText = ui->readSplit = ui->readRawMds = ui->sessionPregaps = ui->discoverySectors = ui->discoverySpeed = ui->readSpeed = ui->readAudioSpeed = ui->readRetries = ui->readEject = ui->writeLayer = NULL; ui->mode = mode;
     if (mode == GUI_EZ) {
         ctl(ui, ui->window, L"BUTTON", L"您打算做什么？", BS_GROUPBOX, 0, 8, 8, 644, 364);
         const wchar_t* texts[] = {L"刻录镜像至光盘",L"刻录文件/文件夹至光盘",L"将光盘抓取成镜像文件",L"从文件/文件夹制作镜像",L"验证光盘",L"品质测试"};
@@ -256,6 +258,7 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
         ctl(ui, ui->window, L"BUTTON", L"…", WS_TABSTOP, UI_SOURCE_FILE, 297, 28, 23, 24);
         ctl(ui, ui->window, L"BUTTON", L"镜像信息", WS_TABSTOP, UI_IMAGE_INFO, 16, 68, 90, 26);
     }
+    if (mode == GUI_WRITE) { ctl(ui,ui->window,L"STATIC",L"双层 L0 扇区（留空自动）：",0,0,18,104,190,22); ui->writeLayer = ctl(ui,ui->window,L"EDIT",ui->writeLayerValue,WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,UI_WRITE_LAYER,210,101,106,24); SendMessageW(ui->writeLayer,EM_SETLIMITTEXT,10,0); }
     int targetY = build ? 205 : mode == GUI_READ ? 195 : 170; ctl(ui, ui->window, L"BUTTON", imageDestination || mode == GUI_READ ? L"目标" : mode == GUI_VERIFY ? L"镜像文件" : L"目标驱动器", BS_GROUPBOX, 0, 8, targetY, 320, 67);
     if (imageDestination || mode == GUI_READ || mode == GUI_VERIFY) {
         ui->destination = ctl(ui, ui->window, L"EDIT", mode == GUI_VERIFY ? ui->sourceImage : mode == GUI_READ ? ui->readImage : ui->destinationImage, WS_TABSTOP | ES_AUTOHSCROLL, UI_DEST_EDIT, 16, targetY + 24, 276, 24);
@@ -358,7 +361,8 @@ static bool gui_launch(GuiWindow* ui, GuiJob* job) {
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
     if (ui->job) return; gui_read_controls(ui);
     bool erase = operation == GUI_ERASE_QUICK || operation == GUI_ERASE_FULL, discovery = operation == GUI_DISCOVERY_DISC;
-    uint32_t discoverySectors = 0; double discoverySpeed = 0;
+    uint32_t discoverySectors = 0, writeLayer = 0; double discoverySpeed = 0;
+    if (operation == GUI_WRITE_DISC && ui->writeLayerValue[0]) { wchar_t* end; uint64_t amount = _wcstoui64(ui->writeLayerValue,&end,10); if (*end || ui->writeLayerValue[0] == L'-' || !amount || amount > UINT32_MAX || amount % 16) { MessageBoxW(ui->window,L"L0容量应为非零的16扇区倍数；留空自动选择。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; } writeLayer = (uint32_t)amount; }
     if (discovery) {
         wchar_t* end;
         if (!ui->discoveryAll) { uint64_t count = _wcstoui64(ui->discoveryCount,&end,10); if (!ui->discoveryCount[0] || *end || !count || count > UINT32_MAX || ui->discoveryCount[0] == L'-') { MessageBoxW(ui->window,L"请输入有效的自定义扇区数。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; } discoverySectors = (uint32_t)count; }
@@ -388,7 +392,7 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
         if (!ui->readRetryText[0] || *end || retries > 20 || ui->readRetryText[0] == L'-') { MessageBoxW(ui->window,L"软件重试次数应为 0 至 20。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
         if (!gui_read_rate(ui->readRate,&rate) || !gui_read_rate(ui->readAudioRate,&rate)) { MessageBoxW(ui->window,L"请输入有效读取速度，例如 4x 或 MAX。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
     }
-    GuiJob* job = gui_job(ui,operation,sources,count); if (job) { job->replaceExisting = replace; job->discoverySectors = discoverySectors; job->discoverySpeedMultiplier = discoverySpeed; }
+    GuiJob* job = gui_job(ui,operation,sources,count); if (job) { job->writeLayerBreak = writeLayer; job->replaceExisting = replace; job->discoverySectors = discoverySectors; job->discoverySpeedMultiplier = discoverySpeed; }
     if (!gui_launch(ui,job)) MessageBoxW(ui->window, L"无法启动操作。", L"ImgBurn", MB_OK | MB_ICONERROR);
 }
 

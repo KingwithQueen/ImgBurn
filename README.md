@@ -47,7 +47,7 @@ msbuild ImgBurn.sln /m /p:Configuration=Release /p:Platform=x64
 | Read | GUI/命令行支持 DVD/Blu-ray 的 2048 字节数据 ISO，以及经检查的单会话、单轨 MODE1 CD ISO。新增单会话音频、混合轨道、MODE1/MODE2 CD 的 2352 字节 CUE/BIN 读取，使用 Q 子通道核对轨道、索引与地址，支持符合已检查边界的扩展预间隙和 SCMS 周期识别。自动提取 Q 的盘级 MCN 与逐音轨 ISRC；可显式读取 CD-TEXT，保留原始 CDT 并在 CUE 中引用。支持有界重试、取消、完整传输检查及目标保护。受检查的单轨 MODE1 CD、单层及已结束的单会话双层 DVD 可读取为单文件或分卷 MDS 数据配套，保留 DVD 的 OTP/PTP 和物理层位置；精简 MODE1/MODE2 的 2352 字节 MDS（含分卷）和按 Full TOC 分会话导出 CUE/BIN 已接通，新增目标文件系统 Auto 分卷、完整容量预设/自定义、数据/音频速度、可调重试和成功后弹盘；文件系统有效长度选择等其余设置仍待实现，更多原版子通道兼容边界待对照；负 LBA 主通道音频和任意 P–W 保留不在已实现范围，实体介质验收尚未完成 |
 | Build | 已实现 ISO/Joliet 双字节序路径表、目录扇区填充、名称冲突处理、多 extent 大文件及 UDF 1.02/2.50 文件树。UDF 使用 64 位文件长度和 AED 分配表续接，2.50 使用 EFE、元数据分区与副本。支持纯 ISO、ISO/Joliet、纯 UDF 或桥接镜像；保留输入一致性和目标文件保护 |
 | DVD-Video / Blu-ray 布局 | DVD 使用 ISO+UDF 1.02，补建 AUDIO_TS、过滤 VIDEO_TS、按视频文件顺序排列，并保证 IFO 末尾与 BUP 开头至少间隔 32 KiB。在输出中修正 IFO/BUP 与标题集地址；标题导航交叉检查 PGC、PTT、Cell 地址、VOBU 表和 NAV 包，支持从实际布局选取 OTP 层切换单元、加入填充、更新 SPLIP 并生成 MDS。Blu-ray 使用纯 UDF 2.50、EFE、元数据副本、64 KiB 文件对齐、分离的主备描述区及 BDMV/BDAV 目录补齐。输入需要已经制作好的视频目录；单元预览与原版的逐项对照及介质验收仍待完成 |
-| Write | GUI/命令行已接通空白 CD-R MODE1 SAO、单层 DVD-R DAO、DVD+R 和 BD-R SRM 的单会话单轨 2048 字节 ISO/BIN/数据 MDS 写入（含分卷及首卷偏移），并支持 BINARY/MOTOROLA、原生 PCM WAVE 与可解码音频、MODE1/2352、XA MODE2/2352 及混合轨 CUE 的单会话多轨 SAO 写入、索引及间隙。支持 CD-TEXT 的导入区写入，使用 CUE 文字或优先保留的原始 CDT。检查介质和容量，按介质发送布局、设置速度、预留轨道并收尾；BD-R 根据当前能力选择 VNR 或普通写入。CD-R、DVD-R 支持设备能力允许的测试写入；命令行/API 可显式请求 OPC。支持 CD-RW、单层 DVD-RW 快速/完整擦除、取消、保护恢复和写后回读比较。另支持带 OTP 层信息的数据 MDS 在空白 DVD+R DL 上设置层容量、写入与回读。缺失解码器的音频、非 XA MODE2、DVD-R DL、无层信息的 DVD+R DL 来源、其他介质格式化及完整设置仍待实现；实体刻录未验收 |
+| Write | GUI/命令行已接通空白 CD-R MODE1 SAO、DVD-R（含双层）DAO、DVD+R（含双层）和 BD-R SRM 的单会话单轨 2048 字节 ISO/BIN/数据 MDS 写入（含分卷及首卷偏移），并支持 BINARY/MOTOROLA、原生 PCM WAVE 与可解码音频、MODE1/2352、XA MODE2/2352 及混合轨 CUE 的单会话多轨 SAO 写入、索引及间隙。支持 CD-TEXT 的导入区写入，使用 CUE 文字或优先保留的原始 CDT。检查介质和容量，按介质发送布局、设置速度、预留轨道并收尾；BD-R 根据当前能力选择 VNR 或普通写入。CD-R、DVD-R 支持设备能力允许的测试写入；命令行/API 可显式请求 OPC。支持 CD-RW、单层 DVD-RW 快速/完整擦除、取消、保护恢复和写后回读比较。DVD+R DL 可由 OTP MDS、无层信息的数据来源或显式 L0 设置层容量；DVD-R DL 使用介质固定 L0，均按层分块并回读。缺失解码器的音频、非 XA MODE2、仅首层双层写入、视频 ISO 的自动单元候选、追加会话、其他介质格式化及完整设置仍待实现；实体刻录未验收 |
 | Verify | GUI/命令行支持 2048 字节数据光盘可读性检查和 ISO/BIN/单轨数据 MDS 比较，新增单会话音频、混合轨道、MODE1/MODE2 CD 可读性检查及受支持的原始 CUE/BIN 比较。音频按原版默认仅检查可读性，可显式开启样本比较。无参考镜像时可按 Full TOC 检查完整多会话的轨道数据区，跳过会话间隙。支持重试、取消、完整传输检查、失配计数及结束布局复查；支持多会话 CUE 在各会话轨道数据区比较及精简 MODE1/MODE2 的 2352 字节 MDS 完整主通道比较；完整选项及真实介质流程尚未验收，其他音频格式取决于可用解码器 |
 | Discovery | GUI/命令行已接通内存全零数据的写入与回读比较，可选择全部空余扇区或自定义扇区数，支持速度、取消及设备测试写入。当前介质范围为空白 CD-R、单层 DVD-R/+R 和 BD-R SRM；BD 的全容量测试不预留固定长度轨道。可擦写介质、双层、超刻、AWS、图表及完整选项仍待补齐，实体刻录未验收 |
 | 桌面界面、设置、任务队列 | 已有快速向导、六种页面、文件/查看/模式/工具/帮助菜单及 Build 的输入/输出菜单。已接通来源选择、镜像计算和构建、日志、CUE/MDS 生成窗口、镜像信息和只读扇区查看器；可选加载原版主图标、向导及部分按钮图像。完整工具窗口、方案保存载入、设置、队列、图表和高级布局编辑仍待补齐 |
@@ -69,7 +69,19 @@ ImgBurn.exe burn R: disc.mds --verify
 
 Write/Verify 共用逻辑数据读取接口，支持单会话、单轨、LBA 0 起始、标准数据控制标志的 2048 字节 DVD 或 MODE1 CD MDS。按描述中的首卷偏移和有效轨道长度跨卷读取，不将文件前缀、末尾多余字节或 MDS 描述本身当作光盘数据；全部引用文件在操作期间保持只读打开。可使用已解析的相对路径和 `*.mdf` 等引用。原始音频、交错子通道、多轨和多会话 MDS 不进入数据 MDS 应用流程；多轨、多会话 CD 使用 CUE，原版 MDS 应用同样限定单会话单轨。独立 Verify 可比较双层 MDS 的逻辑数据，不检查实体层位置；Write 支持下述 DVD+R DL 路径。
 
-DVD+R DL 写入从 MDS 取得两层 OTP 布局和 16 扇区对齐的 L0 容量，要求空白、单会话、单轨介质及当前有效的双层写入能力。先查询可用 L0 容量，在锁定后复查，再用 SEND DISC STRUCTURE 格式 20h 设置并回读确认；已固定且位置相同的介质不重复设置。数据按连续 LBA 写入，传输块在层切换处分开，状态显示当前层；同步缓存、关闭轨道后按 [MMC-5](https://www.13thmonkey.org/documentation/SCSI/mmc5r04.pdf) 的功能 5 完成最小半径收尾，对应[原版默认设置](https://forum.imgburn.com/topic/6232-the-imgburn-settings/)。结束和校验前重新装载后均复查层容量，写后校验比较完整源数据。GUI 选择 MDS、CLI 使用现有 `burn` 命令即可进入此流程，`--reserve` 仍为可选，`--test` 不适用于 DVD+R DL。没有层信息的 ISO/BIN、PTP、未对齐的层位置、自动寻找 DVD-Video 单元、仅写首层及 DVD-R DL 写入仍待接通；本阶段未执行实体刻录。
+DVD+R DL 支持单轨 2048 字节 ISO/BIN、单层数据 MDS 和受支持的 OTP 双层 MDS，含首偏移与分卷。默认优先保留 MDS 的层位置；普通数据来源没有层信息时，按 `ceil(总扇区数 / 32) × 16` 选择完整 ECC 块平衡两层；已固定介质没有源层位置时沿用实际 L0。CLI `--layer-break <sectors>` 或 GUI Write 页“双层 L0 扇区（留空自动）”可显式指定非零、16 扇区对齐的 L0，并覆盖 MDS 层值，优先级依据[原版作者说明](https://forum.imgburn.com/topic/2566-where-is-my-layer-break-sector/)。
+
+DVD+R DL 要求空白、单会话、单轨介质和有效双层写入能力，查询最大/已固定 L0，在锁定后复查，再用 SEND DISC STRUCTURE 格式 20h 设置并回读确认；已固定且相同的位置不重复设置。按层边界拆分传输块，同步缓存、关闭轨道后按 [MMC-5](https://www.13thmonkey.org/documentation/SCSI/mmc5r04.pdf) 的功能 5 完成最小半径收尾，结束和校验前重新装载后均复查层容量，比较完整源数据。
+
+DVD-R DL Sequential（0015h）新增固定层 DAO，要求有效的 002Fh/RDL 能力；用 READ DISC STRUCTURE 格式 20h 取得介质固定 L0，按固定位置分块，预留整轨并由 DAO 同步结束，不向它发送 DVD+R DL 的设置层容量或功能 5/6 收尾。支持能力允许的测试写入、速度、取消、保护恢复及写后比较，校验前仍复查介质和固定层位置。来源 MDS 的 L0 与本次固定目标位置分开处理，显式用户值必须与固定位置相同；[原版作者也区分 +R DL 可选范围与 -R DL 固定位置](https://forum.imgburn.com/topic/6895-creating-double-layer-isos-with-imgburn/)。Layer Jump（0016h）没有随 DAO 开放。
+
+本轮双层路径要求两层实际都有数据、L0 非零且 16 对齐，并满足介质容量和 L0 不短于 L1。仅写首层、PTP/未对齐的双层 MDS、追加会话和更多格式化仍不支持；手动值不绕过来源格式边界。普通数据平衡并非 DVD-Video 单元候选算法，视频可继续使用 Build 生成的受支持 OTP MDS/已知单元位置；直接从视频 ISO 自动定位单元与插入填充仍待接通，不静默重排源镜像。上述结果为文件及协议验证，未执行实体双层刻录。
+
+```bat
+ImgBurn.exe burn R: data.iso --verify
+ImgBurn.exe burn R: data.iso --layer-break 1913760 --verify
+ImgBurn.exe burn R: video.mds --verify
+```
 
 Read 选择 `.mds` 目标时，支持受检查的单会话单轨 MODE1/2048 CD、经物理格式查询确认的单层 DVD，以及已结束的单会话双层 DVD。CD 使用原版可载入的精简描述，记录标准 150 扇区预间隙元数据，数据文件仍从 LBA 0 起，不把负地址间隙保存为主通道数据。双层从 READ DISC STRUCTURE 格式 00h 的 PFI 取得 OTP/PTP 和实际层位置：OTP 换算反向编号的第二层地址，PTP 分别查询两层，核对它们的总长与 READ CAPACITY。读取结束前再次核对布局，再发布保留该层位置的 MDS；PTP 可保留 L1 长于 L0 的来源，未对齐的原层位置也按原值保存。该 Read 入口不套用制作新刻录镜像的对齐和容量限制，但输出并不因此获得当前 Write 尚未支持的布局能力。现有 Write 可接续符合其边界的 OTP MDS；独立 Verify 比较完整逻辑数据。
 
@@ -177,7 +189,7 @@ ImgBurn.exe sector R: 0 --raw-sub
 
 当前扇区查看器的 CD 路径仍限于受支持的单会话 TOC，音频轨不能按 2048 字节用户数据读取。原始子通道仅按设备返回的字节显示，不解码 CD-TEXT、ISRC 或保护信息，也不代表 Read 模式已经支持完整子通道镜像。托盘按钮、更多寻址方式及完整窗口布局仍待对照补齐，实体光驱的 RAW 和子通道返回尚未验收。
 
-Write 当前支持空白 CD-R MODE1 SAO、单层 DVD-R DAO、DVD+R 和 BD-R SRM，ISO/BIN 必须非空且按 2048 字节分扇区。DVD/BD 使用轨道信息检查有效 NWA、起点和可写空间，不以空白盘的 READ CAPACITY 结果作为写入前提。容量检查包含末尾占用：DVD 使用 16 扇区 ECC 块，BD 使用 32 扇区簇。DVD+R 的补齐行为与[原版作者说明](https://forum.imgburn.com/topic/14049-size-of-dvd-contents-smaller-than-actual-iso-size/)一致。程序不修改源镜像，写后校验比较源镜像声明的扇区范围。DVD-R DAO 设置并回读写入参数页，在同步缓存时结束光盘；DVD+R 和 BD-R 则另外关闭轨道并结束光盘，核对光盘和最后会话均已完成。
+Write 当前支持空白 CD-R MODE1 SAO、DVD-R（含双层）DAO、DVD+R（含双层）和 BD-R SRM，ISO/BIN 必须非空且按 2048 字节分扇区。DVD/BD 使用轨道信息检查有效 NWA、起点和可写空间，不以空白盘的 READ CAPACITY 结果作为写入前提。容量检查包含末尾占用：DVD 使用 16 扇区 ECC 块，BD 使用 32 扇区簇。DVD+R 的补齐行为与[原版作者说明](https://forum.imgburn.com/topic/14049-size-of-dvd-contents-smaller-than-actual-iso-size/)一致。程序不修改源镜像，写后校验比较源镜像声明的扇区范围。DVD-R DAO 设置并回读写入参数页，在同步缓存时结束光盘；DVD+R 和 BD-R 则另外关闭轨道并结束光盘，核对光盘和最后会话均已完成。
 
 CD Full TOC 与多会话可读性检查：
 
@@ -215,7 +227,7 @@ ImgBurn.exe burn R: bluray.iso --speed 4x --verify
 
 默认最高速度，DVD+R（含双层）默认不预留轨道，`--reserve` 显式启用；当前 DVD-R DAO 和 BD-R SRM 路径总是预留，CD-R SAO 不发送预留命令。BD-R 预留后需保留至少一个空余簇，当前不支持占满全部可写空间的无预留流程。设备速度请求以 CD 176.4 KB/s、DVD 1385 KB/s、BD 4495.5 KB/s 计算 1x；CD/DVD 使用 SET CD SPEED，BD 使用 SET STREAMING 的 32 位速率请求，GUI 当前仍使用最高速度。`--opc` 在写入前请求功率校准，按[原版设置](https://forum.imgburn.com/topic/6232-the-imgburn-settings/)默认关闭，目前尚未接通设置窗口。`--verify` 在实际写入和结束光盘成功后执行回读比较，GUI 默认开启；校验前默认弹出并重新装载介质，可用 `--no-cycle` 关闭。取消在命令之间生效，正在执行的设备命令需要返回后才能处理。已写入扇区不能撤销，失败或取消时尽力同步缓存并恢复锁定状态，不报告成功；SAO/DAO 的错误冲刷也可能留下无法继续写入的部分光盘。完整的原版失败恢复选项仍待实现。
 
-`--test` 仅用于当前支持且报告 Test Write 能力的 CD-R、DVD-R；DVD+R（含双层）和 BD-R 会拒绝测试写入。测试模式先回读参数确认测试位已生效，结束时退出并检查介质仍为空白。按[原版功能说明](https://forum.imgburn.com/topic/6392-the-imgburn-functions/)，GUI 勾选测试模式后取消并禁用校验，退出后恢复先前选择；底层接口和命令行也跳过测试后的回读校验。显式合用 `--opc` 仍请求实际功率校准，可能写入介质校准区。BD-R 仅接通空白单会话、单轨、NWA=0 的顺序写入，不配置备区或 POW；按[原版默认设置](https://forum.imgburn.com/topic/6232-the-imgburn-settings/)在设备支持时使用 WRITE (12) 的 VNR 位，否则使用 WRITE (10)，软件回读校验独立执行。BD-R RRM、非空盘追加、多会话、其他数据 CUE、原始 CD MDS 和 DVD-R DL 写入尚未接通，多层 BD 的逐层报告与实测也未完成。厂商参数、完整缓冲策略、写入重试及真实设备兼容仍待补齐。
+`--test` 仅用于当前支持且报告 Test Write 能力的 CD-R、DVD-R（含 Sequential DL）；DVD+R（含双层）和 BD-R 会拒绝测试写入。测试模式先回读参数确认测试位已生效，结束时退出并检查介质仍为空白。按[原版功能说明](https://forum.imgburn.com/topic/6392-the-imgburn-functions/)，GUI 勾选测试模式后取消并禁用校验，退出后恢复先前选择；底层接口和命令行也跳过测试后的回读校验。显式合用 `--opc` 仍请求实际功率校准，可能写入介质校准区。BD-R 仅接通空白单会话、单轨、NWA=0 的顺序写入，不配置备区或 POW；按[原版默认设置](https://forum.imgburn.com/topic/6232-the-imgburn-settings/)在设备支持时使用 WRITE (12) 的 VNR 位，否则使用 WRITE (10)，软件回读校验独立执行。BD-R RRM、非空盘追加、多会话、其他数据 CUE、原始 CD MDS 和 DVD-R DL Layer Jump 尚未接通，多层 BD 的逐层报告与实测也未完成。厂商参数、完整缓冲策略、写入重试及真实设备兼容仍待补齐。
 
 可通过“工具 → 驱动器 → 擦除光盘 → 快速/完整”擦除 CD-RW 和单层 DVD-RW，或使用以下命令。省略选项时执行快速擦除；`--quick` 与 `--full` 不能同时指定。
 
@@ -328,3 +340,5 @@ CUE 按原版拒绝 CDG 轨道，REM PREGAP 仍作为注释处理；完整特殊
 第三十五阶段收敛原始 CD 的数据 MDS 与 CUE 分工，接通 MODE2/2352 精简 MDS Read/Verify 和 MODE1/MODE2 主通道分卷。有效 XA Form1/Form2、实际 MODE1 分卷、实际 MODE2 Read 输出与既有特殊会话 CUE 按原版文件载入分别对照，完整主通道、分卷边界、回读比较及既有会话00回归由独立文件/协议模型核对。原版音频 MDS 拒绝和很小首卷 EOF 单独保留为反例；原版应用单会话单轨边界不等同 parser 可解析的元数据范围，真实介质验收仍待用户安排。
 
 第三十六阶段补齐 Read 常用流程的 Auto/完整预设/自定义分卷、可调软件重试、数据与音频读取速度及成功后弹盘，接通 CLI、GUI 页面和后台。独立文件/协议模型核对文件系统上限、实际数据内容与读取范围、速度命令、混合会话00速度归属、发布与弹盘顺序，沿用既有 MDS/特殊会话回归；这不代表已在真实 FAT、网络卷、实体测速或弹盘验收。文件系统有效长度、完整布局文件策略、任意 P-W、负 LBA 及完整设置持久化仍按现有边界另行推进。
+
+第三十七阶段推进剩余写入：无 MDS 的 DVD+R DL 数据镜像可自动平衡 ECC 层容量，GUI/CLI 可显式选择 L0 并覆盖来源元数据；新增 DVD-R DL Sequential 固定层 DAO 与测试写入、分层进度及写后比较。独立协议模型核对完整非零写出、源偏移/分卷、跨层边界、两类介质各自的能力与收尾、取消和结束/重载层位置变化，既有 Read/MDS/特殊会话继续回归。普通数据平衡、视频单元候选、仅首层、Layer Jump、追加多会话及可擦写格式化分别保留边界，实体介质验收仍待用户安排。

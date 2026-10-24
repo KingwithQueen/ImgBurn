@@ -113,7 +113,7 @@ bool mmc_read_dvd_layer_count(OpticalDrive* drive, unsigned* outLayers);
 /* 将 PFI 的物理地址换算为逻辑层布局，并与已读取的数据容量核对。 */
 typedef struct { unsigned layerCount; bool oppositeTrackPath; uint32_t layerBreakLba; } MmcDvdLayout;
 bool mmc_read_dvd_layout(OpticalDrive* drive, uint32_t totalSectors, MmcDvdLayout* layout);
-/* DVD+R DL 的写入能力、L0 容量与最小半径收尾；容量单位为 2048 字节扇区。 */
+/* DVD+R DL写入能力和最小半径收尾；DVD±R DL共用L0容量查询，-R DL的容量固定。 */
 typedef struct { uint32_t sectors; bool changeable; } MmcDvdLayerCapacity;
 bool mmc_get_dvd_plus_r_dl_write_feature(OpticalDrive* drive);
 bool mmc_read_dvd_layer_capacity(OpticalDrive* drive, MmcDvdLayerCapacity* capacity);
@@ -177,7 +177,7 @@ bool mmc_load_eject(OpticalDrive* drive, bool eject);
 bool mmc_reserve_track(OpticalDrive* drive, uint32_t reservationSizeLba);
 /* 刻录期间禁止手动弹出托盘，结束后恢复。 */
 bool mmc_prevent_removal(OpticalDrive* drive, bool prevent);
-/* DVD-R DAO 的能力和可恢复写入参数页；数据不包含 MODE SELECT 头。 */
+/* DVD-R（含DL）DAO能力和可恢复写入参数页；数据不包含MODE SELECT头，DL要求RDL位。 */
 typedef struct { bool testWrite, bufferUnderrunFree; } MmcDvdWriteFeatures;
 typedef struct { uint16_t size; uint8_t page[56]; } MmcWriteParameters;
 bool mmc_get_dvd_write_features(OpticalDrive* drive, MmcDvdWriteFeatures* features);

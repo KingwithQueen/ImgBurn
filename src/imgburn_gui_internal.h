@@ -25,7 +25,7 @@ typedef struct {
     bool readAutoSplit, readEject, setReadSpeeds;
     double readSpeedMultiplier, audioReadSpeedMultiplier;
     double discoverySpeedMultiplier;
-    uint32_t layerBreak;
+    uint32_t layerBreak, writeLayerBreak;
     uint32_t comparedSectors, readableOnlySectors, miscompares;
     bool succeeded, builderReady, mediaReady, eraseSupported;
     DWORD error;
