@@ -6,6 +6,7 @@
 #include "imgburn_audio_source.h"
 #include "imgburn_cd_sector.h"
 #include "imgburn_cdtext.h"
+#include "imgburn_data_source.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -252,6 +253,7 @@ typedef struct {
     BurnCdImage* cd;
     DWORD chunkBytes;
     bool zeroSource;
+    DataImageSource* data;
 } ProducerContext;
 
 static bool pipeline_failure(PipelineStats* stats, const char* message, PipelineProgressCallback callback, void* userData) {
@@ -285,6 +287,7 @@ static DWORD WINAPI producer_thread(LPVOID param) {
         DWORD actual = 0;
         BOOL ok;
         if (ctx->zeroSource) { memset(buffer,0,requested); actual = requested; ok = TRUE; }
+        else if (ctx->data) { ok = imgburn_data_source_read(ctx->data,(uint32_t)((ctx->expectedBytes - remaining) / 2048),(uint16_t)(requested / 2048),buffer); if (ok) actual = requested; }
         else ok = ctx->cd ? burn_cd_read(ctx->cd,buffer,requested,&actual) : ReadFile(ctx->hSourceFile,buffer,requested,&actual,NULL);
         if (!ok || actual == 0 || actual > requested) {
             DWORD error = !ok ? GetLastError() : actual == 0 ? ERROR_HANDLE_EOF : ERROR_INVALID_DATA;
@@ -468,9 +471,16 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
     }
     const wchar_t* extension = discovery ? NULL : wcsrchr(config->imagePath,L'.');
     bool cueInput = extension && !_wcsicmp(extension,L".cue"); BurnCdImage* cdImage = NULL;
-    if (!discovery && (!extension || (!cueInput && _wcsicmp(extension,L".iso") && _wcsicmp(extension,L".bin")))) return burn_failure(&stats,ERROR_NOT_SUPPORTED,"Write accepts 2048-byte ISO/BIN or supported CD CUE images.",callback,userData);
-    HANDLE source = discovery ? INVALID_HANDLE_VALUE : cueInput ? CreateFileW(config->imagePath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL) : open_image(config->imagePath,&stats.totalSectors);
-    if (!discovery && source == INVALID_HANDLE_VALUE) return pipeline_failure(&stats,"Cannot open the source image or CUE descriptor.",callback,userData);
+    if (!discovery && (!extension || (!cueInput && _wcsicmp(extension,L".iso") && _wcsicmp(extension,L".bin") && _wcsicmp(extension,L".mds")))) return burn_failure(&stats,ERROR_NOT_SUPPORTED,"Write accepts 2048-byte ISO/BIN/data MDS or supported CD CUE images.",callback,userData);
+    HANDLE source = INVALID_HANDLE_VALUE; DataImageSource dataSource = {0};
+    if (cueInput) {
+        source = CreateFileW(config->imagePath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL);
+        if (source == INVALID_HANDLE_VALUE) return pipeline_failure(&stats,"Cannot open the CUE descriptor.",callback,userData);
+    } else if (!discovery) {
+        if (!imgburn_data_source_open(&dataSource,config->imagePath)) return pipeline_failure(&stats,"Cannot open the supported data image and all its parts.",callback,userData);
+        if (dataSource.layerBreakLba || dataSource.layerCount > 1) { imgburn_data_source_close(&dataSource); return burn_failure(&stats,ERROR_NOT_SUPPORTED,"Dual-layer MDS recording is not yet supported.",callback,userData); }
+        stats.totalSectors = dataSource.sectors;
+    }
     if (cueInput) {
         cdImage = calloc(1,sizeof(*cdImage));
         if (!cdImage) { CloseHandle(source); return burn_failure(&stats,ERROR_NOT_ENOUGH_MEMORY,"Cannot allocate the CD source plan.",callback,userData); }
@@ -489,7 +499,7 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
     bool success = false, ownedLock = false, prevented = false, writeAttempted = false, syncAttempted = false, parametersChanged = false; DWORD error = ERROR_SUCCESS;
     MmcProfile profile = MMC_PROFILE_NONE; MmcDvdWriteFeatures features = {0}; MmcWriteParameters original = {0}; bool bdVerifyNotRequired = false;
     MmcCdTextLeadIn textLeadIn = {0}; uint8_t* textBuffer = NULL; bool textRequested = cdImage && cdImage->cdText.bytes != 0;
-    RingBuffer rb = {0}; HANDLE producer = NULL; uint8_t* buffers = NULL; ProducerContext context = {0}; context.hSourceFile = source; context.rb = &rb; context.expectedBytes = (uint64_t)stats.totalSectors * sectorBytes; context.cd = cdImage; context.chunkBytes = chunkBytes; context.zeroSource = discovery;
+    RingBuffer rb = {0}; HANDLE producer = NULL; uint8_t* buffers = NULL; ProducerContext context = {0}; context.hSourceFile = source; context.rb = &rb; context.expectedBytes = (uint64_t)stats.totalSectors * sectorBytes; context.cd = cdImage; context.chunkBytes = chunkBytes; context.zeroSource = discovery; context.data = discovery || cueInput ? NULL : &dataSource;
     stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),discovery ? "Preparing Discovery in-memory zero data and checking writable media..." : "Checking blank CD-R, DVD-R/+R or BD-R SRM and source image..."); if (callback) callback(&stats,userData);
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
     if (!burn_check_media(config->drive,stats.totalSectors,&profile,!discovery)) { pipeline_failure(&stats,"Require blank CD-R, DVD-R/+R or BD-R SRM with enough writable sectors.",callback,userData); goto cleanup; }
@@ -600,7 +610,7 @@ cleanup:
     if (parametersChanged && (config->testMode || !writeAttempted) && !burn_restore_parameters(config->drive,&original) && success) { error = GetLastError(); success = burn_failure(&stats,error,"Cannot restore device write parameters.",callback,userData); }
     if (prevented && !mmc_prevent_removal(config->drive,false) && success) { error = GetLastError(); success = burn_failure(&stats,error,"Cannot restore medium removal.",callback,userData); }
     if (ownedLock && !spti_lock_drive(config->drive,false) && success) { error = GetLastError(); success = burn_failure(&stats,error,"Cannot unlock target volume.",callback,userData); }
-    ringbuffer_destroy(&rb); free(buffers); free(textBuffer); burn_cd_free(cdImage); if (source != INVALID_HANDLE_VALUE) CloseHandle(source);
+    ringbuffer_destroy(&rb); free(buffers); free(textBuffer); burn_cd_free(cdImage); imgburn_data_source_close(&dataSource); if (source != INVALID_HANDLE_VALUE) CloseHandle(source);
     if (success && config->ejectWhenDone && !mmc_load_eject(config->drive,true)) { error = GetLastError(); success = burn_failure(&stats,error,"Eject failed.",callback,userData); }
     if (success) { stats.state = PIPELINE_STATE_COMPLETED; stats.currentLba = stats.totalSectors; stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),config->testMode ? "Device test write completed; no recorded-data verification performed." : discovery ? "Discovery completed successfully." : "Burn process completed successfully."); if (callback) callback(&stats,userData); }
     SetLastError(success ? ERROR_SUCCESS : error); return success;
@@ -670,6 +680,8 @@ cleanup:
 bool pipeline_verify_disc(OpticalDrive* drive, const wchar_t* sourceImagePath, PipelineProgressCallback callback, void* userData) {
     PipelineStats stats = {0};
     if (!drive || !sourceImagePath) return pipeline_failure(&stats, "Invalid verify configuration.", callback, userData);
+    const wchar_t* extension = wcsrchr(sourceImagePath,L'.');
+    if (extension && !_wcsicmp(extension,L".mds")) { VerifyConfig config = {0}; config.drive = drive; config.imagePath = sourceImagePath; return pipeline_verify_disc_ex(&config,callback,userData); }
     HANDLE source = open_image(sourceImagePath, &stats.totalSectors);
     if (source == INVALID_HANDLE_VALUE) return pipeline_failure(&stats, "Cannot open image: require nonempty, aligned 2048-byte sectors within the supported size.", callback, userData);
     bool success = verify_image_handle(drive, source, &stats, callback, userData);

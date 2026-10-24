@@ -107,10 +107,10 @@ static bool gui_folder(HWND owner, wchar_t* result) {
     PIDLIST_ABSOLUTE id = SHBrowseForFolderW(&browse); if (!id) return false;
     bool ok = SHGetPathFromIDListW(id, result) != FALSE; CoTaskMemFree(id); return ok;
 }
-static const wchar_t readFilter[] = L"数据镜像 (*.iso)\0*.iso\0原始 CD 镜像 (*.cue)\0*.cue\0\0";
+static const wchar_t readFilter[] = L"数据镜像 (*.iso)\0*.iso\0原始 CD 镜像 (*.cue)\0*.cue\0DVD 镜像及 MDS 描述 (*.mds)\0*.mds\0\0";
 static UINT_PTR CALLBACK gui_read_file_hook(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     (void)wp;
-    if (message == WM_NOTIFY) { const OFNOTIFYW* notice = (const OFNOTIFYW*)lp; if (notice->hdr.code == CDN_TYPECHANGE || notice->hdr.code == CDN_INITDONE) SendMessageW(GetParent(window),CDM_SETDEFEXT,0,(LPARAM)(notice->lpOFN->nFilterIndex == 2 ? L"cue" : L"iso")); }
+    if (message == WM_NOTIFY) { const OFNOTIFYW* notice = (const OFNOTIFYW*)lp; if (notice->hdr.code == CDN_TYPECHANGE || notice->hdr.code == CDN_INITDONE) SendMessageW(GetParent(window),CDM_SETDEFEXT,0,(LPARAM)(notice->lpOFN->nFilterIndex == 3 ? L"mds" : notice->lpOFN->nFilterIndex == 2 ? L"cue" : L"iso")); }
     return 0;
 }
 static bool gui_file(HWND owner, wchar_t* result, bool save, const wchar_t* filter, const wchar_t* extension) {

@@ -44,11 +44,11 @@ msbuild ImgBurn.sln /m /p:Configuration=Release /p:Platform=x64
 
 | 功能范围 | 当前实现和缺口 |
 | --- | --- |
-| Read | GUI/命令行支持 DVD/Blu-ray 的 2048 字节数据 ISO，以及经检查的单会话、单轨 MODE1 CD ISO。新增单会话音频、混合轨道、MODE1/MODE2 CD 的 2352 字节 CUE/BIN 读取，使用 Q 子通道核对轨道、索引与地址，支持符合已检查边界的扩展预间隙和 SCMS 周期识别。自动提取 Q 的盘级 MCN 与逐音轨 ISRC；可显式读取 CD-TEXT，保留原始 CDT 并在 CUE 中引用。支持有界重试、取消、完整传输检查及目标保护。多会话、MDS 配套输出及完整选项仍待实现，更多原版子通道兼容边界待对照；负 LBA 主通道音频和任意 P–W 保留不在已实现范围，实体介质验收尚未完成 |
+| Read | GUI/命令行支持 DVD/Blu-ray 的 2048 字节数据 ISO，以及经检查的单会话、单轨 MODE1 CD ISO。新增单会话音频、混合轨道、MODE1/MODE2 CD 的 2352 字节 CUE/BIN 读取，使用 Q 子通道核对轨道、索引与地址，支持符合已检查边界的扩展预间隙和 SCMS 周期识别。自动提取 Q 的盘级 MCN 与逐音轨 ISRC；可显式读取 CD-TEXT，保留原始 CDT 并在 CUE 中引用。支持有界重试、取消、完整传输检查及目标保护。单层 DVD 可读取为 MDS/ISO 配套；多会话、其他 MDS 输出布局及完整选项仍待实现，更多原版子通道兼容边界待对照；负 LBA 主通道音频和任意 P–W 保留不在已实现范围，实体介质验收尚未完成 |
 | Build | 已实现 ISO/Joliet 双字节序路径表、目录扇区填充、名称冲突处理、多 extent 大文件及 UDF 1.02/2.50 文件树。UDF 使用 64 位文件长度和 AED 分配表续接，2.50 使用 EFE、元数据分区与副本。支持纯 ISO、ISO/Joliet、纯 UDF 或桥接镜像；保留输入一致性和目标文件保护 |
 | DVD-Video / Blu-ray 布局 | DVD 使用 ISO+UDF 1.02，补建 AUDIO_TS、过滤 VIDEO_TS、按视频文件顺序排列，并保证 IFO 末尾与 BUP 开头至少间隔 32 KiB。在输出中修正 IFO/BUP 与标题集地址；标题导航交叉检查 PGC、PTT、Cell 地址、VOBU 表和 NAV 包，支持从实际布局选取 OTP 层切换单元、加入填充、更新 SPLIP 并生成 MDS。Blu-ray 使用纯 UDF 2.50、EFE、元数据副本、64 KiB 文件对齐、分离的主备描述区及 BDMV/BDAV 目录补齐。输入需要已经制作好的视频目录；单元预览与原版的逐项对照及介质验收仍待完成 |
-| Write | GUI/命令行已接通空白 CD-R MODE1 SAO、单层 DVD-R DAO、DVD+R 和 BD-R SRM 的单会话单轨 2048 字节 ISO/BIN 写入，并支持 BINARY/MOTOROLA、原生 PCM WAVE 与可解码音频、MODE1/2352、XA MODE2/2352 及混合轨 CUE 的单会话多轨 SAO 写入、索引及间隙。支持 CD-TEXT 的导入区写入，使用 CUE 文字或优先保留的原始 CDT。检查介质和容量，按介质发送布局、设置速度、预留轨道并收尾；BD-R 根据当前能力选择 VNR 或普通写入。CD-R、DVD-R 支持设备能力允许的测试写入；命令行/API 可显式请求 OPC。支持 CD-RW、单层 DVD-RW 快速/完整擦除、取消、保护恢复和写后回读比较。缺失解码器的音频、非 XA MODE2、DVD 双层写入、其他介质格式化及完整设置仍待实现；实体刻录未验收 |
-| Verify | GUI/命令行支持 2048 字节数据光盘可读性检查和 ISO/BIN 比较，新增单会话音频、混合轨道、MODE1/MODE2 CD 可读性检查及受支持的原始 CUE/BIN 比较。音频按原版默认仅检查可读性，可显式开启样本比较。支持重试、取消、完整传输检查、失配计数及结束布局复查；多会话、MDS、完整选项及真实介质流程尚未验收，其他音频格式取决于可用解码器 |
+| Write | GUI/命令行已接通空白 CD-R MODE1 SAO、单层 DVD-R DAO、DVD+R 和 BD-R SRM 的单会话单轨 2048 字节 ISO/BIN/数据 MDS 写入（含分卷及首卷偏移），并支持 BINARY/MOTOROLA、原生 PCM WAVE 与可解码音频、MODE1/2352、XA MODE2/2352 及混合轨 CUE 的单会话多轨 SAO 写入、索引及间隙。支持 CD-TEXT 的导入区写入，使用 CUE 文字或优先保留的原始 CDT。检查介质和容量，按介质发送布局、设置速度、预留轨道并收尾；BD-R 根据当前能力选择 VNR 或普通写入。CD-R、DVD-R 支持设备能力允许的测试写入；命令行/API 可显式请求 OPC。支持 CD-RW、单层 DVD-RW 快速/完整擦除、取消、保护恢复和写后回读比较。缺失解码器的音频、非 XA MODE2、DVD 双层写入、其他介质格式化及完整设置仍待实现；实体刻录未验收 |
+| Verify | GUI/命令行支持 2048 字节数据光盘可读性检查和 ISO/BIN/单轨数据 MDS 比较，新增单会话音频、混合轨道、MODE1/MODE2 CD 可读性检查及受支持的原始 CUE/BIN 比较。音频按原版默认仅检查可读性，可显式开启样本比较。支持重试、取消、完整传输检查、失配计数及结束布局复查；多会话、原始 CD MDS、完整选项及真实介质流程尚未验收，其他音频格式取决于可用解码器 |
 | Discovery | GUI/命令行已接通内存全零数据的写入与回读比较，可选择全部空余扇区或自定义扇区数，支持速度、取消及设备测试写入。当前介质范围为空白 CD-R、单层 DVD-R/+R 和 BD-R SRM；BD 的全容量测试不预留固定长度轨道。可擦写介质、双层、超刻、AWS、图表及完整选项仍待补齐，实体刻录未验收 |
 | 桌面界面、设置、任务队列 | 已有快速向导、六种页面、文件/查看/模式/工具/帮助菜单及 Build 的输入/输出菜单。已接通来源选择、镜像计算和构建、日志、CUE/MDS 生成窗口、镜像信息和只读扇区查看器；可选加载原版主图标、向导及部分按钮图像。完整工具窗口、方案保存载入、设置、队列、图表和高级布局编辑仍待补齐 |
 | 音频、CUE、MDS、层切换点 | CUE 支持 UTF-8、UTF-16 LE/BE、本机 ANSI、CR/LF/CRLF 换行、BINARY/MOTOROLA、混合扇区尺寸、INDEX 00–99、FLAGS、TITLE/PERFORMER/SONGWRITER/COMPOSER/ARRANGER/MESSAGE、DISCID、UPC、CDTEXTFILE 和多会话；下一会话前要求 LEAD-OUT，导出器保留该声明。WAVE、AIFF、MP3 等音频按解码后的实际 PCM 计数。MDS 支持 1.x 多会话 CD、DVD、多轨道、非零数据偏移及分卷引用，提供 OTP/PTP DVD 描述生成接口，PTP 可保留 L1 大于 L0 的布局。CD 多会话写入、完整格式兼容和刻录集成仍待完成 |
@@ -58,6 +58,18 @@ msbuild ImgBurn.sln /m /p:Configuration=Release /p:Platform=x64
 功能范围以 [ImgBurn 官方说明](https://www.imgburn.com/) 和原版随附的命令行说明为参考。当前属于具有部分桌面操作流程的核心原型，不能认定为完整复刻或可交付的刻录软件。
 
 本机审计记录、原始基线、复现脚本及结果保存在被忽略的 `.local/` 下，不属于公开发布内容。尚未执行真实光盘写入、擦除、设备设置修改或原版逐项人工对照验收。
+
+数据 MDS 工作流命令示例：
+
+```bat
+ImgBurn.exe read R: disc.mds
+ImgBurn.exe verify R: disc.mds
+ImgBurn.exe burn R: disc.mds --verify
+```
+
+Write/Verify 共用逻辑数据读取接口，支持单会话、单轨、LBA 0 起始、标准数据控制标志的 2048 字节 DVD 或 MODE1 CD MDS。按描述中的首卷偏移和有效轨道长度跨卷读取，不将文件前缀、末尾多余字节或 MDS 描述本身当作光盘数据；全部引用文件在操作期间保持只读打开。可使用已解析的相对路径和 `*.mdf` 等引用。原始音频、交错子通道、多轨和多会话 MDS 应用流程仍未接通。双层 MDS 可比较其数据内容，但不检查实体层位置；Write 暂不接受双层元数据。
+
+Read 选择 `.mds` 目标时，目前只支持经物理格式查询确认的单层 DVD。先写新的同名 ISO，若已存在则使用 `.001.iso` 等新文件名；完整读取后才发布引用它的 MDS。`--replace` 仅授权替换 MDS 描述，已有 ISO 始终保留。取消或失败时删除本次新建文件。Read 的自动布局文件选择、分卷输出及双层描述保存仍待补齐；普通 ISO 和原始 CD CUE 路径继续使用各自原有流程。
 
 Discovery 命令示例（会向所选光盘写入数据）：
 
@@ -75,6 +87,7 @@ Read 数据镜像命令示例：
 ```bat
 ImgBurn.exe read R: disc.iso
 ImgBurn.exe read R: disc.iso --retries 20 --replace
+ImgBurn.exe read R: disc.mds
 ImgBurn.exe read R: disc.cue
 ImgBurn.exe read R: disc.cue --cdtext
 ```

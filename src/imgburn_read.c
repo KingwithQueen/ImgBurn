@@ -1,6 +1,8 @@
 /* Read 数据镜像流程：有界重试、取消、完整传输检查及原子发布。 */
 #define _CRT_SECURE_NO_WARNINGS
 #include "imgburn_pipeline.h"
+#include "imgburn_image.h"
+#include "imgburn_data_source.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <wchar.h>
@@ -23,7 +25,8 @@ static bool read_profile(MmcProfile profile) {
 }
 static bool read_target(const wchar_t* input, wchar_t* full, bool replace) {
     DWORD length = GetFullPathNameW(input,MAX_PATH,full,NULL);
-    if (!length || length >= MAX_PATH || !wcsrchr(full,L'.') || _wcsicmp(wcsrchr(full,L'.'),L".iso") || !wcsncmp(full,L"\\\\.\\",4) || !wcsncmp(full,L"\\\\?\\",4)) { SetLastError(ERROR_INVALID_NAME); return false; }
+    const wchar_t* extension = length && length < MAX_PATH ? wcsrchr(full,L'.') : NULL;
+    if (!extension || (_wcsicmp(extension,L".iso") && _wcsicmp(extension,L".mds")) || !wcsncmp(full,L"\\\\.\\",4) || !wcsncmp(full,L"\\\\?\\",4)) { SetLastError(ERROR_INVALID_NAME); return false; }
     const wchar_t* name = wcsrchr(full,L'\\'); if (!name || wcschr(name,L':')) { SetLastError(ERROR_INVALID_NAME); return false; }
     DWORD attributes = GetFileAttributesW(full);
     if (attributes != INVALID_FILE_ATTRIBUTES) {
@@ -52,12 +55,13 @@ static bool read_sectors(const ReadConfig* config, uint32_t lba, uint16_t count,
 }
 
 bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callback, void* context) {
-    PipelineStats stats = {0}; HANDLE output = INVALID_HANDLE_VALUE; uint8_t* buffer = NULL; wchar_t destination[MAX_PATH], temporary[MAX_PATH] = L"";
-    DWORD error = ERROR_SUCCESS; bool success = false, temporaryCreated = false;
+    PipelineStats stats = {0}; HANDLE output = INVALID_HANDLE_VALUE; uint8_t* buffer = NULL; wchar_t destination[MAX_PATH], temporary[MAX_PATH] = L"", descriptor[MAX_PATH] = L"";
+    DWORD error = ERROR_SUCCESS; bool success = false, temporaryCreated = false, descriptorCreated = false;
     if (!config || !config->drive || !config->imagePath || !config->imagePath[0] || config->retryCount > 20) return read_failure(&stats,ERROR_INVALID_PARAMETER,"Invalid read configuration",callback,context);
     if (config->readCdText) return read_failure(&stats,ERROR_NOT_SUPPORTED,"CD-TEXT requires raw CD CUE output",callback,context);
     if (read_cancelled(config)) return read_failure(&stats,ERROR_CANCELLED,"Read cancelled",callback,context);
     if (!read_target(config->imagePath,destination,config->replaceExisting)) return read_failure(&stats,GetLastError(),"Invalid image destination",callback,context);
+    bool mdsOutput = !_wcsicmp(wcsrchr(destination,L'.'),L".mds");
     stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Inspecting source disc..."); if (callback) callback(&stats,context);
     OpticalDrive* drive = config->drive;
     if (!mmc_test_unit_ready(drive)) return read_failure(&stats,read_device_error(drive),"Source disc is not ready",callback,context);
@@ -67,6 +71,12 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     if (!mmc_read_capacity(drive,&last,&bytes)) return read_failure(&stats,read_device_error(drive),"Cannot read disc capacity",callback,context);
     if (last == UINT32_MAX || bytes != 2048) return read_failure(&stats,ERROR_NOT_SUPPORTED,"Require bounded 2048-byte data sectors",callback,context);
     stats.totalSectors = last + 1;
+    if (mdsOutput && (profile < MMC_PROFILE_DVD_ROM || profile > MMC_PROFILE_DVD_PLUS_R_DL || profile == MMC_PROFILE_DVD_R_DL_SEQ || profile == MMC_PROFILE_DVD_R_DL_JUMP || profile == MMC_PROFILE_DVD_RW_DL || profile == MMC_PROFILE_DVD_PLUS_RW_DL || profile == MMC_PROFILE_DVD_PLUS_R_DL || stats.totalSectors > 2295104)) return read_failure(&stats,ERROR_NOT_SUPPORTED,"MDS Read currently requires a single-layer DVD",callback,context);
+    if (mdsOutput) {
+        unsigned layers = 0;
+        if (!mmc_read_dvd_layer_count(drive,&layers)) return read_failure(&stats,read_device_error(drive),"Cannot read DVD physical format",callback,context);
+        if (layers != 1) return read_failure(&stats,ERROR_NOT_SUPPORTED,"MDS Read currently requires a single-layer DVD",callback,context);
+    }
     if (profile <= MMC_PROFILE_CD_RW && !mmc_check_iso_cd(drive,stats.totalSectors)) return read_failure(&stats,read_device_error(drive),"CD layout requires a raw track image",callback,context);
     wchar_t parent[MAX_PATH]; wcscpy(parent,destination); wchar_t* slash = wcsrchr(parent,L'\\'); if (!slash) return read_failure(&stats,ERROR_INVALID_NAME,"Invalid image directory",callback,context); slash[1] = 0;
     ULARGE_INTEGER available;
@@ -74,8 +84,10 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     if (available.QuadPart < (uint64_t)stats.totalSectors * 2048) return read_failure(&stats,ERROR_DISK_FULL,"Not enough destination space",callback,context);
     buffer = (uint8_t*)malloc(32 * 2048); if (!buffer) return read_failure(&stats,ERROR_NOT_ENOUGH_MEMORY,"Cannot allocate read buffer",callback,context);
     static volatile LONG serial;
-    for (unsigned attempt = 0; attempt < 64; attempt++) {
-        if (swprintf(temporary,MAX_PATH,L"%ls.partial.%lu.%lu",destination,GetCurrentProcessId(),(unsigned long)InterlockedIncrement(&serial)) < 0) { error = ERROR_FILENAME_EXCED_RANGE; goto done; }
+    wchar_t dataBase[MAX_PATH]; wcscpy(dataBase,destination); *wcsrchr(dataBase,L'.') = 0;
+    for (unsigned attempt = 0; attempt < (mdsOutput ? 1000u : 64u); attempt++) {
+        int chars = mdsOutput ? (attempt ? swprintf(temporary,MAX_PATH,L"%ls.%03u.iso",dataBase,attempt) : swprintf(temporary,MAX_PATH,L"%ls.iso",dataBase)) : swprintf(temporary,MAX_PATH,L"%ls.partial.%lu.%lu",destination,GetCurrentProcessId(),(unsigned long)InterlockedIncrement(&serial));
+        if (chars < 0) { error = ERROR_FILENAME_EXCED_RANGE; goto done; }
         output = CreateFileW(temporary,GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
         if (output != INVALID_HANDLE_VALUE) { temporaryCreated = true; break; }
         error = GetLastError(); if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) goto done;
@@ -102,17 +114,30 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     if (!FlushFileBuffers(output)) { error = GetLastError(); goto done; }
     if (!CloseHandle(output)) { error = GetLastError(); output = INVALID_HANDLE_VALUE; goto done; } output = INVALID_HANDLE_VALUE;
     if (read_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
+    if (mdsOutput) {
+        /* 旧 MDS 继续引用旧数据；新 ISO 完整落盘后才发布新的描述文件。 */
+        for (unsigned attempt = 0; attempt < 64; attempt++) {
+            if (swprintf(descriptor,MAX_PATH,L"%ls.partial.%lu.%lu",destination,GetCurrentProcessId(),(unsigned long)InterlockedIncrement(&serial)) < 0) { error = ERROR_FILENAME_EXCED_RANGE; goto done; }
+            HANDLE reservation = CreateFileW(descriptor,GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
+            if (reservation != INVALID_HANDLE_VALUE) { CloseHandle(reservation); descriptorCreated = true; break; }
+            error = GetLastError(); if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) goto done;
+        }
+        if (!descriptorCreated) goto done;
+        const wchar_t* fileName = wcsrchr(temporary,L'\\') + 1;
+        if (!imgburn_mds_create(descriptor,fileName,stats.totalSectors,0)) { error = GetLastError(); goto done; }
+        if (read_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
+    }
     if (!read_target(destination,parent,config->replaceExisting)) { error = GetLastError(); goto done; }
-    if (!MoveFileExW(temporary,destination,MOVEFILE_WRITE_THROUGH | (config->replaceExisting ? MOVEFILE_REPLACE_EXISTING : 0))) { error = GetLastError(); goto done; }
+    if (!MoveFileExW(mdsOutput ? descriptor : temporary,destination,MOVEFILE_WRITE_THROUGH | (config->replaceExisting ? MOVEFILE_REPLACE_EXISTING : 0))) { error = GetLastError(); goto done; }
     success = true;
 done:
-    if (output != INVALID_HANDLE_VALUE) CloseHandle(output); if (temporaryCreated && !success) DeleteFileW(temporary); free(buffer);
+    if (output != INVALID_HANDLE_VALUE) CloseHandle(output); if (temporaryCreated && !success) DeleteFileW(temporary); if (descriptorCreated && !success) DeleteFileW(descriptor); free(buffer);
     if (!success) return read_failure(&stats,error,"Disc read did not complete",callback,context);
-    stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Disc image read successfully."); if (callback) callback(&stats,context); return true;
+    stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),mdsOutput ? "DVD read successfully to MDS and ISO." : "Disc image read successfully."); if (callback) callback(&stats,context); return true;
 }
 
 bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallback callback, void* context) {
-    PipelineStats stats = {0}; HANDLE image = INVALID_HANDLE_VALUE; uint8_t* data = NULL; uint8_t* reference = NULL; DWORD error = ERROR_SUCCESS; bool success = false;
+    PipelineStats stats = {0}; DataImageSource image = {0}; uint8_t* data = NULL; uint8_t* reference = NULL; DWORD error = ERROR_SUCCESS; bool success = false, imageOpen = false;
     if (!config || !config->drive || config->retryCount > 20) return read_failure(&stats,ERROR_INVALID_PARAMETER,"Invalid verify configuration",callback,context);
     ReadConfig reader = {0}; reader.drive = config->drive; reader.cancelEvent = config->cancelEvent; reader.retryCount = config->retryCount;
     if (read_cancelled(&reader)) return read_failure(&stats,ERROR_CANCELLED,"Verify cancelled",callback,context);
@@ -121,10 +146,8 @@ bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallbac
     else if (compare) {
         const wchar_t* extension = wcsrchr(config->imagePath,L'.');
         if (extension && !_wcsicmp(extension,L".cue")) return pipeline_verify_cd(config,callback,context);
-        if (!extension || (_wcsicmp(extension,L".iso") && _wcsicmp(extension,L".bin"))) return read_failure(&stats,ERROR_NOT_SUPPORTED,"Require a data ISO or BIN",callback,context);
-        image = CreateFileW(config->imagePath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL); if (image == INVALID_HANDLE_VALUE) return read_failure(&stats,GetLastError(),"Cannot open comparison image",callback,context);
-        LARGE_INTEGER size; if (!GetFileSizeEx(image,&size) || size.QuadPart <= 0 || size.QuadPart % 2048 || (uint64_t)size.QuadPart / 2048 > UINT32_MAX) { error = ERROR_INVALID_DATA; goto verify_done; }
-        stats.totalSectors = (uint32_t)((uint64_t)size.QuadPart / 2048);
+        if (!imgburn_data_source_open(&image,config->imagePath)) return read_failure(&stats,GetLastError(),"Cannot open comparison image",callback,context);
+        imageOpen = true; stats.totalSectors = image.sectors;
     }
     OpticalDrive* drive = config->drive; if (!mmc_test_unit_ready(drive)) { error = read_device_error(drive); goto verify_done; }
     MmcProfile profile = mmc_get_current_profile(drive); if (!read_profile(profile)) { error = ERROR_NOT_SUPPORTED; goto verify_done; }
@@ -142,8 +165,7 @@ bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallbac
         uint16_t count = (uint16_t)(stats.totalSectors - lba < 32 ? stats.totalSectors - lba : 32);
         if (!read_sectors(&reader,lba,count,data,&stats)) { error = read_cancelled(&reader) ? ERROR_CANCELLED : read_device_error(drive); goto verify_done; }
         if (compare) {
-            DWORD wanted = (DWORD)count * 2048, offset = 0;
-            while (!zeroSource && offset < wanted) { DWORD actual = 0; if (!ReadFile(image,reference + offset,wanted - offset,&actual,NULL)) { error = GetLastError(); goto verify_done; } if (!actual || actual > wanted - offset) { error = ERROR_HANDLE_EOF; goto verify_done; } offset += actual; }
+            if (!zeroSource && !imgburn_data_source_read(&image,lba,count,reference)) { error = GetLastError(); goto verify_done; }
             for (unsigned i = 0; i < count; i++) if (memcmp(data + (size_t)i * 2048,reference + (size_t)i * 2048,2048)) stats.miscomparesCount++;
             stats.comparedSectors += count;
         } else stats.readableOnlySectors += count;
@@ -156,7 +178,7 @@ bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallbac
     if (last != capacity - 1 || bytes != 2048 || mmc_get_current_profile(drive) != profile) { error = ERROR_MEDIA_CHANGED; goto verify_done; }
     if (stats.miscomparesCount) { error = ERROR_CRC; goto verify_done; } success = true;
 verify_done:
-    if (image != INVALID_HANDLE_VALUE) CloseHandle(image); free(data); free(reference);
+    if (imageOpen) imgburn_data_source_close(&image); free(data); free(reference);
     if (!success) return read_failure(&stats,error,"Verify did not complete",callback,context);
     stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; stats.remainingTimeSec = 0; snprintf(stats.statusMessage,sizeof(stats.statusMessage),zeroSource ? "Discovery data matches the zero source." : compare ? "Disc data matches image." : "Disc data readability check passed."); if (callback) callback(&stats,context); return true;
 }

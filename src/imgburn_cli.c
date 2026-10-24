@@ -80,16 +80,17 @@ static void print_usage(void) {
     printf("Burning & Verification Commands:\n");
     printf("  sector <drive> <lba|--last> [--raw|--raw-sub]\n");
     printf("                                 Inspect one sector as hexadecimal and ASCII\n");
-    printf("  read <drive> <out.iso|out.cue> [--retries <0..20>] [--replace] [--cdtext]\n");
+    printf("  read <drive> <out.iso|out.mds|out.cue> [--retries <0..20>] [--replace] [--cdtext]\n");
     printf("                                 Read data ISO or raw CD BIN/CUE with Q indexes\n");
+    printf("                                 MDS destination creates a single-layer DVD ISO + descriptor\n");
     printf("  burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle] [--opc]\n");
-    printf("                                 Burn disc image with real-time telemetry\n");
+    printf("                                 Burn ISO/BIN, data MDS or supported CD CUE images\n");
     printf("  erase <drive> [--quick|--full]   Erase CD-RW/DVD-RW; cancellation waits for the device\n");
     printf("  discovery <drive> [--sectors <n>] [--speed <Nx|MAX>] [--test]\n");
     printf("        [--verify|--no-verify] [--no-cycle] [--opc]\n");
     printf("                                 Write zero data; all free sectors and verify by default\n");
     printf("  verify <drive> <image|--readable> [--retries <0..20>] [--compare-audio]\n");
-    printf("                                 Verify data ISO/BIN or raw CD CUE; audio defaults to readability\n\n");
+    printf("                                 Verify data ISO/BIN/MDS or raw CD CUE; audio defaults to readability\n\n");
     printf("Examples:\n");
     printf("  imgburn devices\n");
     printf("  imgburn info I:\n");
@@ -449,7 +450,7 @@ static BOOL WINAPI cli_read_control(DWORD type) {
     AcquireSRWLockShared(&cliReadLock); BOOL handled = cliReadCancel != NULL; if (handled) SetEvent(cliReadCancel); ReleaseSRWLockShared(&cliReadLock); return handled;
 }
 static int cmd_read(int argc, char** argv) {
-    if (argc < 4) { printf("Usage: imgburn read <drive> <out.iso|out.cue> [--retries <0..20>] [--replace] [--cdtext]\n"); return 1; }
+    if (argc < 4) { printf("Usage: imgburn read <drive> <out.iso|out.mds|out.cue> [--retries <0..20>] [--replace] [--cdtext]\n"); return 1; }
     ReadConfig config = {0}; config.retryCount = 20;
     for (int i = 4; i < argc; i++) {
         if (!_stricmp(argv[i],"--replace")) config.replaceExisting = true;
@@ -468,7 +469,8 @@ static int cmd_read(int argc, char** argv) {
     config.drive = &drive; config.imagePath = image; config.cancelEvent = cancel;
     bool ok = rawCd ? pipeline_read_cd(&config,on_cli_burn_progress,NULL) : pipeline_read_disc(&config,on_cli_burn_progress,NULL); DWORD error = GetLastError();
     if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock); spti_close_drive(&drive);
-    printf(ok ? "\nDisc image read successfully.\n" : "\nDisc read failed (error %lu).\n",error); return ok ? 0 : 1;
+    if (ok) printf(extension && !_wcsicmp(extension,L".mds") ? "\nDVD ISO and MDS descriptor created successfully; the MDS names its companion ISO.\n" : "\nDisc image read successfully.\n");
+    else printf("\nDisc read failed (error %lu).\n",error); return ok ? 0 : 1;
 }
 
 /* 整盘擦除使用同一后台命令流程；Ctrl+C 不打断正在进行的物理擦除。 */

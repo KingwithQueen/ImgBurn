@@ -96,6 +96,16 @@ bool mmc_read_capacity(OpticalDrive* drive, uint32_t* outLastLba, uint32_t* outB
     return true;
 }
 
+bool mmc_read_dvd_layer_count(OpticalDrive* drive, unsigned* outLayers) {
+    if (!drive || !outLayers) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    uint8_t cdb[12] = {0xAD}, buffer[8] = {0}; cdb[9] = sizeof(buffer);
+    if (!spti_send_cdb(drive,cdb,12,buffer,sizeof(buffer),true,10)) return false;
+    /* MMC-5 表399：4字节响应头之后，PFI字节2的位6:5编码层数减一。 */
+    unsigned layers = (buffer[6] >> 5) & 3;
+    if (drive->lastTransferBytes != sizeof(buffer) || read_be16(buffer) < 6 || layers > 1) { drive->lastError = ERROR_READ_FAULT; SetLastError(ERROR_READ_FAULT); return false; }
+    *outLayers = layers + 1; return true;
+}
+
 bool mmc_read_disc_information(OpticalDrive* drive, MmcDiscInfo* outInfo) {
     if (!outInfo) return false;
     memset(outInfo, 0, sizeof(*outInfo));

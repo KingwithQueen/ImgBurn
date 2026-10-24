@@ -108,6 +108,9 @@ const char* mmc_get_profile_name(MmcProfile profile);
  */
 bool mmc_read_capacity(OpticalDrive* drive, uint32_t* outLastLba, uint32_t* outBlockSize);
 
+/* 只读 DVD 物理格式信息，返回介质实际层数。 */
+bool mmc_read_dvd_layer_count(OpticalDrive* drive, unsigned* outLayers);
+
 /**
  * @brief Read Disc Information (SCSI 0x51 READ DISC INFORMATION)
  */
