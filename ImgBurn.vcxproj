@@ -53,6 +53,7 @@
     <ClCompile Include="src\imgburn_audio.c" />
     <ClCompile Include="src\imgburn_audio_source.c" />
     <ClCompile Include="src\imgburn_cd_sector.c" />
+    <ClCompile Include="src\imgburn_cd_session.c" />
     <ClCompile Include="src\imgburn_cdtext.c" />
     <ClCompile Include="src\imgburn_data_source.c" />
     <ClCompile Include="src\imgburn_dvd_image.c" />
@@ -65,6 +66,7 @@
     <ClCompile Include="src\imgburn_gui_sector.c" />
     <ClCompile Include="src\imgburn_gui_jobs.c" />
     <ClCompile Include="src\imgburn_image.c" />
+    <ClCompile Include="src\imgburn_iso_session.c" />
     <ClCompile Include="src\imgburn_mmc.c" />
     <ClCompile Include="src\imgburn_pipeline.c" />
     <ClCompile Include="src\imgburn_preview.c" />

@@ -47,17 +47,17 @@ msbuild ImgBurn.sln /m /p:Configuration=Release /p:Platform=x64
 | Read | GUI/命令行支持 DVD/Blu-ray 的 2048 字节数据 ISO，以及经检查的单会话、单轨 MODE1 CD ISO。新增单会话音频、混合轨道、MODE1/MODE2 CD 的 2352 字节 CUE/BIN 读取，使用 Q 子通道核对轨道、索引与地址，支持符合已检查边界的扩展预间隙和 SCMS 周期识别。自动提取 Q 的盘级 MCN 与逐音轨 ISRC；可显式读取 CD-TEXT，保留原始 CDT 并在 CUE 中引用。支持有界重试、取消、完整传输检查及目标保护。受检查的单轨 MODE1 CD、单层及已结束的单会话双层 DVD 可读取为单文件或分卷 MDS 数据配套，保留 DVD 的 OTP/PTP 和物理层位置；精简 MODE1/MODE2 的 2352 字节 MDS（含分卷）和按 Full TOC 分会话导出 CUE/BIN 已接通，新增目标文件系统 Auto 分卷、完整容量预设/自定义、数据/音频速度、可调重试和成功后弹盘；文件系统有效长度选择等其余设置仍待实现，更多原版子通道兼容边界待对照；负 LBA 主通道音频和任意 P–W 保留不在已实现范围，实体介质验收尚未完成 |
 | Build | 已实现 ISO/Joliet 双字节序路径表、目录扇区填充、名称冲突处理、多 extent 大文件及 UDF 1.02/2.50 文件树。UDF 使用 64 位文件长度和 AED 分配表续接，2.50 使用 EFE、元数据分区与副本。支持纯 ISO、ISO/Joliet、纯 UDF 或桥接镜像；保留输入一致性和目标文件保护 |
 | DVD-Video / Blu-ray 布局 | DVD 使用 ISO+UDF 1.02，补建 AUDIO_TS、过滤 VIDEO_TS、按视频文件顺序排列，并保证 IFO 末尾与 BUP 开头至少间隔 32 KiB。在输出中修正 IFO/BUP 与标题集地址；标题导航交叉检查 PGC、PTT、Cell 地址、VOBU 表和 NAV 包，支持从实际布局选取 OTP 层切换单元、加入填充、更新 SPLIP 并生成 MDS。Blu-ray 使用纯 UDF 2.50、EFE、元数据副本、64 KiB 文件对齐、分离的主备描述区及 BDMV/BDAV 目录补齐。输入需要已经制作好的视频目录；成品 DVD-Video ISO/BIN/数据 MDS 的只读换层候选分析已接通 `dvd-layers`，保留镜像真实 LBA；Write 视频 ISO 自动选层、单元预览的完整原版对照及介质验收仍待完成 |
-| Write | GUI/命令行已接通空白 CD-R MODE1 SAO、DVD-R（含双层）DAO、DVD+R（含双层）和 BD-R SRM 的单会话单轨 2048 字节 ISO/BIN/数据 MDS 写入（含分卷及首卷偏移），并支持 BINARY/MOTOROLA、原生 PCM WAVE 与可解码音频、MODE1/2352、XA MODE2/2352 及混合轨 CUE 的单会话多轨 SAO 写入、索引及间隙。支持 CD-TEXT 的导入区写入，使用 CUE 文字或优先保留的原始 CDT。检查介质和容量，按介质发送布局、设置速度、预留轨道并收尾；BD-R 根据当前能力选择 VNR 或普通写入。CD-R、DVD-R 支持设备能力允许的测试写入；命令行/API 可显式请求 OPC。支持 CD-RW、单层 DVD-RW 快速/完整擦除、取消、保护恢复和写后回读比较。DVD+R DL 可由 OTP MDS、无层信息的数据来源或显式 L0 设置层容量；DVD-R DL 使用介质固定 L0，均按层分块并回读。缺失解码器的音频、非 XA MODE2、仅首层双层写入、视频 ISO 的自动单元候选、追加会话、其他介质格式化及完整设置仍待实现；实体刻录未验收 |
+| Write | GUI/命令行已接通空白 CD-R MODE1 SAO、DVD-R（含双层）DAO、DVD+R（含双层）和 BD-R SRM 的单会话单轨 2048 字节 ISO/BIN/数据 MDS 写入（含分卷及首卷偏移），并支持 BINARY/MOTOROLA、原生 PCM WAVE 与可解码音频、MODE1/2352、XA MODE2/2352 及混合轨 CUE 的单会话多轨 SAO 写入、索引及间隙。支持 CD-TEXT 的导入区写入，使用 CUE 文字或优先保留的原始 CDT。检查介质和容量，按介质发送布局、设置速度、预留轨道并收尾；BD-R 根据当前能力选择 VNR 或普通写入。CD-R、DVD-R 支持设备能力允许的测试写入；命令行/API 可显式请求 OPC。支持 CD-RW、单层 DVD-RW 快速/完整擦除、取消、保护恢复和写后回读比较。Write 页可显式后台查询成品 DVD-Video 单元候选并手工选填 L0，不自动评分或选最佳单元。DVD+R DL 可由 OTP MDS、无层信息的数据来源或显式 L0 设置层容量；DVD-R DL 使用介质固定 L0，均按层分块并回读。缺失解码器的音频、非 XA MODE2、仅首层双层写入、视频 ISO 的自动单元候选、其他介质格式化及完整设置仍待实现。另有原版以外的实验 CD-R MODE1 TAO 数据会话 API，可显式建立首会话、追加、留盘开放或封盘并完整回读；增加独立纯 ISO9660 地址重定位及单独的 ISO 会话 API，不合并旧树，尚未接入 GUI/命令行 Write 或完成新 ISO 的实体写入验收；多数原有介质路径仍未实体验收 |
 | Verify | GUI/命令行支持 2048 字节数据光盘可读性检查和 ISO/BIN/单轨数据 MDS 比较，新增单会话音频、混合轨道、MODE1/MODE2 CD 可读性检查及受支持的原始 CUE/BIN 比较。音频按原版默认仅检查可读性，可显式开启样本比较。无参考镜像时可按 Full TOC 检查完整多会话的轨道数据区，跳过会话间隙。支持重试、取消、完整传输检查、失配计数及结束布局复查；支持多会话 CUE 在各会话轨道数据区比较及精简 MODE1/MODE2 的 2352 字节 MDS 完整主通道比较；完整选项及真实介质流程尚未验收，其他音频格式取决于可用解码器 |
 | Discovery | GUI/命令行已接通内存全零数据的写入与回读比较，可选择全部空余扇区或自定义扇区数，支持速度、取消及设备测试写入。当前介质范围为空白 CD-R、单层 DVD-R/+R 和 BD-R SRM；BD 的全容量测试不预留固定长度轨道。可擦写介质、双层、超刻、AWS、图表及完整选项仍待补齐，实体刻录未验收 |
 | 桌面界面、设置、任务队列 | 已有快速向导、六种页面、文件/查看/模式/工具/帮助菜单及 Build 的输入/输出菜单。已接通来源选择、镜像计算和构建、日志、CUE/MDS 生成窗口、镜像信息和只读扇区查看器；可选加载原版主图标、向导及部分按钮图像。完整工具窗口、方案保存载入、设置、队列、图表和高级布局编辑仍待补齐 |
-| 音频、CUE、MDS、层切换点 | CUE 支持 UTF-8、UTF-16 LE/BE、本机 ANSI、CR/LF/CRLF 换行、BINARY/MOTOROLA、混合扇区尺寸、INDEX 00–99、FLAGS、TITLE/PERFORMER/SONGWRITER/COMPOSER/ARRANGER/MESSAGE、DISCID、UPC、CDTEXTFILE 和多会话；下一会话前要求 LEAD-OUT，导出器保留该声明。WAVE、AIFF、MP3 等音频按解码后的实际 PCM 计数。MDS 支持 1.x 多会话 CD、DVD、多轨道、非零数据偏移及分卷引用，提供 OTP/PTP DVD 描述生成接口，PTP 可保留 L1 大于 L0 的布局。CD 多会话写入、完整格式兼容和刻录集成仍待完成 |
+| 音频、CUE、MDS、层切换点 | CUE 支持 UTF-8、UTF-16 LE/BE、本机 ANSI、CR/LF/CRLF 换行、BINARY/MOTOROLA、混合扇区尺寸、INDEX 00–99、FLAGS、TITLE/PERFORMER/SONGWRITER/COMPOSER/ARRANGER/MESSAGE、DISCID、UPC、CDTEXTFILE 和多会话；下一会话前要求 LEAD-OUT，导出器保留该声明。WAVE、AIFF、MP3 等音频按解码后的实际 PCM 计数。MDS 支持 1.x 多会话 CD、DVD、多轨道、非零数据偏移及分卷引用，提供 OTP/PTP DVD 描述生成接口，PTP 可保留 L1 大于 L0 的布局。CD 多会话 CUE 一次写完、完整格式兼容和刻录集成仍待完成 |
 | 厂商控制与换盘设备 | 有部分命令封装；参数覆盖及真实硬件行为未验收 |
 | 原版命令行接口 | 当前使用子命令，尚不兼容原版 `/MODE` 等接口 |
 
 功能范围以 [ImgBurn 官方说明](https://www.imgburn.com/) 和原版随附的命令行说明为参考。当前属于具有部分桌面操作流程的核心原型，不能认定为完整复刻或可交付的刻录软件。
 
-本机审计记录、原始基线、复现脚本及结果保存在被忽略的 `.local/` 下，不属于公开发布内容。尚未执行真实光盘写入、擦除、设备设置修改或原版逐项人工对照验收。
+本机审计记录、原始基线、复现脚本及结果保存在被忽略的 `.local/` 下，不属于公开发布内容。实验 CD-R TAO 数据会话已在一张 CD-R 上完成首会话、两次追加及封盘后的三份载荷回读验证，其范围与多数仍只经文件/协议验证的原有刻录路径分开记录；尚未完成所有介质及原版逐项人工验收。
 
 数据 MDS 工作流命令示例：
 
@@ -82,6 +82,24 @@ ImgBurn.exe burn R: data.iso --verify
 ImgBurn.exe burn R: data.iso --layer-break 1913760 --verify
 ImgBurn.exe burn R: video.mds --verify
 ```
+
+CD-R 追加会话现有 `mmc_plan_cd_mode1_append` 只读规划 API，输入已解析的盘信息、下一不可见轨、Full TOC、同一状态下的当前写参数页及 2048 字节来源扇区数。要求已有完整会话、CD-R 仍可追加且最后会话为空，盘信息/轨信息/Full TOC 的会话和真实轨号一致；只在当前 TAO 写类型、标准 MODE1/2048 参数和有效非负 NWA 能确认数据起点时，返回下一会话/轨号、原末会话 A2、实际 NWA、数据起止 LBA（终点不含）、用户数据预算及扣除来源后的余量。函数不访问设备、不发送命令、不选择写模式；没有接入 CLI/GUI Write，原空白盘检查与写入路径保持不变。追加独立 ISO 的数据范围不等于合并或导入旧文件树。
+
+地址依据为 [MMC-5 Revision 4](https://www.13thmonkey.org/documentation/SCSI/mmc5r04.pdf) 的 6.22.3.1/Tables 376–378、6.26.3.4/Table 488、6.27.3/Tables 499、502–509 及 7.5.4/Tables 663、665、667。Full TOC 只包含完整会话，空新会话须由盘和不可见轨信息确认；不从 0 地址或固定会话间隔推算 NWA，也不使用盘信息中 CD 实为 MSF 的 lead-in/lead-out 字段冒充 LBA 容量。Free Blocks 仅作为当前用户数据块预算，规划不生成导入区、预间隙或结束策略，也不承诺完整会话收尾空间。
+
+SAO 的 NWA 在 Table 509 脚注 5 中指向首轨导入区后的第一块，不能直接当作数据 INDEX 01 或固定加 150；本 API 明确拒绝 SAO，停在尚未确认的布局边界。另有独立的实验执行 API `pipeline_write_cd_mode1_session`，仅使用已经明确为 TAO 的 MODE1/2048 参数快照，不通过切换 SAO 来推算地址。音频/混合、包写入、部分录制或已预留轨、CD-RW、DVD/BD 追加和多会话文件系统合并均不在范围。独立纯 ISO9660 的地址重定位另由下述文件视图及实验 ISO API 提供；SAO 追加与导入旧文件树仍未实现，TAO 原始数据扩展的实体证据不向这些能力外推。
+
+追加写入按用户明确选择作为原版以外的扩展开发。原作者说明，原版会最终关闭写出的光盘，支持从 CUE 把多个会话一次写完，不能留盘开放后再追加；两者不能混称为同一个复刻缺口，见[原作者说明](https://forum.imgburn.com/topic/23030-burning-multiple-images-in-burner-queue/)。
+
+实验 API `pipeline_write_cd_mode1_session` 输入至少 300 个 2048 字节扇区的 BIN 原始载荷，借用已有设备句柄；`allowBlank` 显式允许建立首会话，`finalizeDisc` 明确选择本次关闭后是否允许下一会话。要求 CD-R、当前已为 TAO/MODE1、有效 NWA 及欠载保护，锁定后复查盘/轨/参数/Full TOC，用实际 NWA 写入；不解释或重定位 ISO 文件系统，不提供 CUE/音频/混合、MDS 或 DVD/BD 追加。函数只选择会话开放/封盘参数，不执行 OPC、速度设置或托盘操作；关闭轨道/会话后核对完整旧 TOC 并逐字节回读本次载荷，正常结束恢复原写参数。部分写入或关闭失败保留失败状态，不猜测重写或收尾；调用者须检查返回值以及结果中的 writeStarted/sessionClosed/verified，避免失败后重复写盘。封盘后光驱可能改报 CD-ROM；独立只读 API `pipeline_verify_cd_mode1_session` 可据已保存的数据范围重新验证，避免为重验重新发写入命令。现有 `burn`/Write 页仍沿用原空白盘 SAO 路径，未自动调用此实验 API。
+
+第四十一阶段实体只读基线对照原版确认 CD-R/可写容量与 NWA；修正 ATIP 误将 CD-R 响应中非零的 CD-RW 子类型位视为不支持，同时保留可擦写/受限介质拒绝。现场还发现奇数 Full TOC 分配长度在该光驱上少传一字节，读取改为偶数字节分配并仍要求全部声明字节完整；不把短响应本身当作有效 TOC。测试载荷不含文件系统，因此实体样本是原始数据验证盘，不是可在资源管理器中浏览的文件盘。
+
+独立 ISO 的只读地址视图由 `imgburn_iso_session_open/set_start/read/close` 提供，输入为从 0 寻址的完整 2048 字节 ISO。源文件保持只读打开，按目标数据起始 LBA 转换 PVD/Joliet SVD 的路径表位置、根记录、L/M 及可选路径表和全部目录记录的 extent，支持多 extent 文件及目录/路径表跨扇区；文件内容、名称、长度和卷块数保持原值。文件尾部已有的完整扇区 padding 原样保留，容量按来源实际扇区数计算。重新设置基址始终基于源地址，溢出不改变旧视图；输出不插入旧会话前缀，是映射到目标 LBA 的会话载荷，不能直接按普通独立 ISO 挂载，也不引用或合并旧文件树。
+
+实验 `pipeline_write_cd_iso_session` 与 `pipeline_verify_cd_iso_session` 消费同一视图，在设备查询前检查来源，并在已有 TAO 规划及写前复查后绑定实际 NWA；原 BIN API 继续按原始字节处理。ISO 执行入口要求至少 300 个实际来源扇区且仅接受纯 ISO9660，尚未接入 CLI/GUI Write，也未在实体光盘写入或挂载验收。文件视图可重定位 ISO+Joliet，但 MODE1 执行入口在任何设备命令前拒绝 Joliet：[ECMA-119 第5版](https://ecma-international.org/wp-content/uploads/ECMA-119_5th_edition_december_2024.pdf) 的资料性附录 C 忠实重印 1995 年 Joliet 规则，其中 C.5.1.5 对多会话 Joliet CD-ROM 有 MODE1 限制；这不是普通 ISO9660 主体的一般禁令，也不是现代 Windows 接收行为的实测结论。地址字段与数量的区别另据 [ECMA-119 第2版](https://ecma-international.org/wp-content/uploads/ECMA-119_2nd_edition_december_1987.pdf) 及 [libisofs 多会话实现](https://dev.lovelyhq.com/libburnia/libisofs/raw/branch/master/libisofs/ecma119.c) 核对。
+
+当前 ISO 来源子集不包含 UDF-only/ISO+UDF 桥接、引导/El Torito、Rock Ridge/SUSP 等未知目录扩展、XAR、交错、多卷集、已重定位的会话载荷或原始 2352 字节 BIN。项目 Build 默认含 UDF 桥接，不能直接作为本入口的受支持来源；应明确选择纯 ISO9660。合法但未支持的格式与截断、双端序冲突或地址越界分别返回不支持或读取/结构错误。本阶段只有文件及协议验证，既有三会话 CD-R 仅用于只读回归，没有新增耗材。
 
 Read 选择 `.mds` 目标时，支持受检查的单会话单轨 MODE1/2048 CD、经物理格式查询确认的单层 DVD，以及已结束的单会话双层 DVD。CD 使用原版可载入的精简描述，记录标准 150 扇区预间隙元数据，数据文件仍从 LBA 0 起，不把负地址间隙保存为主通道数据。双层从 READ DISC STRUCTURE 格式 00h 的 PFI 取得 OTP/PTP 和实际层位置：OTP 换算反向编号的第二层地址，PTP 分别查询两层，核对它们的总长与 READ CAPACITY。读取结束前再次核对布局，再发布保留该层位置的 MDS；PTP 可保留 L1 长于 L0 的来源，未对齐的原层位置也按原值保存。该 Read 入口不套用制作新刻录镜像的对齐和容量限制，但输出并不因此获得当前 Write 尚未支持的布局能力。现有 Write 可接续符合其边界的 OTP MDS；独立 Verify 比较完整逻辑数据。
 
@@ -271,7 +289,13 @@ ImgBurn.exe dvd-layers movie.mds
 
 成品镜像只列实际已经 16 扇区对齐、L0/L1 均非空、L0 不短于 L1，并满足给定 `DvdMediaProfile` 最小/最大 L0 及总容量的单元；`Actual-LBA` 是该单元在原镜像中的位置，`Padding` 恒为 0，`Total` 保持源的逻辑扇区数。不会调用 Build 重排、取整或补 padding，也不根据 MDS 自带的层位置伪造候选。有效导航但没有符合条件的单元时返回成功并明确显示零候选；无效或未支持格式另报错误。程序打开期间来源及全部配套文件保持只读共享，不发送任何设备命令。
 
-本轮成品入口限于当前项目的 ISO+UDF1.02、单 extent DVD 文件及现有 DataImageSource 数据格式。UDF-only、UDF2.50、复杂角度/交错导航不支持，成品输入不能使用 `--show-interleaved`；已有文件夹显示和 Build 选择保持。UDF 检查只确认基本桥元数据，尚未将 UDF 文件树与 ISO 命名空间做全量一致性核对，不宣称任意第三方 DVD 镜像兼容。现阶段仅提供分析 API/CLI，尚未接设备写入、Write 自动选择、GUI 候选窗口或成品镜像补丁。
+本轮成品入口限于当前项目的 ISO+UDF1.02、单 extent DVD 文件及现有 DataImageSource 数据格式。UDF-only、UDF2.50、复杂角度/交错导航不支持，成品输入不能使用 `--show-interleaved`；已有文件夹显示和 Build 选择保持。UDF 检查只确认基本桥元数据，尚未将 UDF 文件树与 ISO 命名空间做全量一致性核对，不宣称任意第三方 DVD 镜像兼容。分析 API/CLI 及下述 Write 页显式候选查询均已接通；Write 自动评分/最佳单元选择、成品镜像补丁仍未实现。查询及选择本身不发送设备命令，选定 L0 沿用现有 Write 参数转发与介质检查。
+
+Write 页选择现有 ISO/BIN/数据 MDS 后，可明确点击“查询视频换层单元...”。查询在后台执行，候选窗口显示 VTS/PGC/Cell、域与语言单元、VOB/Cell、程序、标题/章节、实际 LBA、语言及 SPLIP；同一物理 LBA 的不同 PGC/LU 引用各占一行。列表不预选、不评分，选中并点击“使用所选单元”或双击后才将该实际 LBA 填入已有双层 L0 字段。该值作为明确指定值转发，保留原有手工值覆盖 MDS、留空按 MDS/数据自动规则处理的优先级；普通数据自动平衡不称为视频单元选择。
+
+窗口分别提示成功、合法零候选、不支持格式、读取/导航错误和取消。直接关闭、取消或 Escape 会清除本次候选与派生 L0；来源变化、过时完成结果或手工覆盖 L0 也会释放派生状态。独立手工输入的 L0 不因候选取消而被清空。同来源 Write→Read→Write 保留已明确选择的值。列表及已选状态存续期间保持来源描述和全部配套文件的只读句柄，防止来源被改写/替换；换源、取消、手工覆盖或退出后释放，不从界面线程执行镜像解析。
+
+查询不自动寻找最佳单元，不重排、补 padding、修改镜像，也不扩大 UDF-only 或复杂交错支持范围。候选采用现有标准双层容量约束，查询不读取光驱实际容量；真实目标是否支持指定位置仍由原有写入流程检查。本轮验证没有执行实体刻录、擦除、OPC、托盘或速度设置。
 
 DVD 视频预览命令示例：
 
@@ -356,3 +380,11 @@ CUE 按原版拒绝 CDG 轨道，REM PREGAP 仍作为注释处理；完整特殊
 第三十七阶段推进剩余写入：无 MDS 的 DVD+R DL 数据镜像可自动平衡 ECC 层容量，GUI/CLI 可显式选择 L0 并覆盖来源元数据；新增 DVD-R DL Sequential 固定层 DAO 与测试写入、分层进度及写后比较。独立协议模型核对完整非零写出、源偏移/分卷、跨层边界、两类介质各自的能力与收尾、取消和结束/重载层位置变化，既有 Read/MDS/特殊会话继续回归。普通数据平衡、视频单元候选、仅首层、Layer Jump、追加多会话及可擦写格式化分别保留边界，实体介质验收仍待用户安排。
 
 第三十八阶段新增已生成 DVD-Video 镜像的只读单元候选分析。真实 extent 与 DataImageSource 跨卷/首偏移读取共用既有导航核对，候选仅使用成品实际对齐 LBA。独立已知导航夹具逐字段核对单元、VOB、章节、镜像地址和容量过滤，记录完整来源 SHA 不变和新入口零设备命令；原文件夹导航/Build 换层及相关 Read/MDS/双层 Write 继续回归。原版确认实际小镜像的 ISO9660/UDF1.02 载入，但其提示小镜像无需双层，未列候选；候选字段采用既有原版导航基准与本轮独立结构核对，不冒充原版大容量或实体介质验收。
+
+第三十九阶段把成品 DVD-Video 只读候选接入 Write 页的显式后台查询、列表和手工选择提示。候选与只读来源一同持有，来源切换/取消/失效清派生选择，手工覆盖释放候选；原有 Read 控件及 L0/MDS 优先级保留。纯文件/隐藏真实窗口模型逐字段核对列表、L0 转发、切页与取消消息，查询计零设备命令、来源 SHA 不变；新增 ListView 窗口销毁通知触发的生命周期问题已在本轮修正并经 x64 ASAN 复验。原版字段与明确选择约定复用既有标题/菜单观察，不将本轮模型或代理 GUI 检查称为原版完整界面/实体介质验收。
+
+第四十阶段增加 CD-R MODE1 追加数据范围的只读规划，复用盘/轨信息和 Full TOC，先确定 TAO 下 NWA 的用户数据语义，不猜测 SAO 预间隙或文件树合并。
+
+第四十一阶段按用户授权将追加写入作为原版以外的实验扩展。独立 API 支持明确建立首会话、追加原始 MODE1 数据、留盘开放和封盘，未接入原有 Write 页或 burn 命令。在同一张 CD-R 上依实际 NWA 写入三个各 8 MiB 的会话，使用独立回采及生产只读验证接口核对全部源 SHA 与旧会话数据不变；没有为兼容问题重写载荷或换第二张盘。现场发现的 ATIP 子类型兼容、奇数 Full TOC 分配及封盘后 CD-ROM Profile 三处具体阻断均定点修正；第二/三次原调用的停止记录及后续只读恢复分别保留，不把恢复说成原调用已成功。四配置及必要规划/MMC/原空白盘门槛回归通过，新增协议模型经 x64 ASAN；GUI 集成、原版的一次性多会话 CUE、SAO 追加、ISO 地址重定位/文件树合并与其他介质实体写入仍未覆盖。
+
+第四十二阶段为独立 ISO 增加只读地址重定位视图，并接入单独的实验 ISO 会话写入/校验 API；既有 BIN、CLI/GUI 和空白盘路径保持原行为。独立构造的两个命名空间、可选路径表、多 extent、空文件、跨扇区记录及尾 padding 样本，逐字段核对实际 NWA、全部地址、非地址字节和文件载荷，覆盖不支持格式、截断/结构冲突、取消、溢出及输入锁。Win32/x64 共 364 项断言、x64 ASAN 182 项断言通过，117 份完整输出通过独立读取和 117,687 项字段核对，四配置构建通过；生产 Build 的纯 ISO、ISO+Joliet 与 UDF 拒绝边界另作兼容检查。既有同一张 CD 的三个原始数据会话由生产校验接口与独立回采只读核对，全部 SHA 不变、设备写入或设置命令为零、新增耗材为零。这些证据不代表新 ISO 的实体写入、挂载或播放器验收；Joliet 仅文件视图、UDF/引导等更多重定位格式、旧文件树合并及界面集成继续保留边界。

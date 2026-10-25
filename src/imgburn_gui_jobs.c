@@ -95,6 +95,32 @@ static bool job_inspect(GuiJob* job) {
     CloseHandle(file); return ok;
 }
 
+static bool job_dvd_candidates(GuiJob* job) {
+    const DvdMediaProfile profile = {0,2086912,4173824}; size_t count = 0;
+    job_progress(0,0,0,job);
+    /* 保留全部来源的只读句柄，候选在窗口及明确选择存续期间始终对应同一份来源。 */
+    if (!imgburn_data_source_open(&job->dvdCandidateSource,job->sources[0].path)) goto failed;
+    bool ok = imgburn_dvd_image_layer_break_candidates_ex(job->sources[0].path,&profile,NULL,0,&count,&job->dvdImageSectors,job->cancel);
+    if (job_cancelled(job)) { SetLastError(ERROR_CANCELLED); goto failed; }
+    if (!ok && GetLastError() != ERROR_INSUFFICIENT_BUFFER) goto failed;
+    if (count) {
+        job->dvdCandidates = calloc(count,sizeof(*job->dvdCandidates)); if (!job->dvdCandidates) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto failed; }
+        if (!imgburn_dvd_image_layer_break_candidates_ex(job->sources[0].path,&profile,job->dvdCandidates,count,&job->dvdCandidateCount,&job->dvdImageSectors,job->cancel)) goto failed;
+    }
+    if (job_cancelled(job)) { SetLastError(ERROR_CANCELLED); goto failed; }
+    if (!job->dvdCandidateCount) {
+        imgburn_data_source_close(&job->dvdCandidateSource);
+        job_text(job,L"分析完成：没有符合标准双层容量且已对齐的视频单元候选。\r\n未填写 L0；手工值、MDS 层位置或数据自动规则仍按原流程处理，数据自动规则不代表视频单元选择。\r\n");
+    } else job_text(job,L"找到 %zu 个 DVD-Video 单元候选（镜像 %u 扇区）。\r\n请明确选择单元后填写 L0；查询不会自动选择最佳单元或修改镜像。\r\n",job->dvdCandidateCount,job->dvdImageSectors);
+    job_progress(100,0,0,job); return true;
+failed:
+    job->error = GetLastError(); if (!job->error) job->error = ERROR_INVALID_DATA;
+    free(job->dvdCandidates); job->dvdCandidates = NULL; job->dvdCandidateCount = 0; job->dvdImageSectors = 0; imgburn_data_source_close(&job->dvdCandidateSource);
+    if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"此来源不支持成品 DVD-Video 单元分析。仅支持现有 ISO/BIN/数据 MDS 范围；UDF-only、复杂角度和交错尚未支持。\r\n");
+    else if (job->error != ERROR_CANCELLED) job_text(job,L"读取或分析来源失败（错误 %lu），没有保留候选。\r\n",job->error);
+    return false;
+}
+
 static bool job_cue(GuiJob* job) {
     if (job->sourceCount > MAX_AUDIO_TRACKS) return false;
     AudioCompilation* comp = (AudioCompilation*)calloc(1, sizeof(*comp)); if (!comp) return false;
@@ -207,6 +233,7 @@ DWORD WINAPI imgburn_gui_job_run(void* context) {
         case GUI_DRIVE_INFO: case GUI_VERIFY_DISC: case GUI_WRITE_DISC: case GUI_READ_DISC: case GUI_ERASE_QUICK: case GUI_ERASE_FULL: case GUI_DISCOVERY_DISC: job->succeeded = job_drive(job); break;
         case GUI_DVD_INFO: job->dvdVideo = true; job->succeeded = job_prepare(job) && imgburn_dvd_read_navigation(&job->builder, &job->navigation); break;
         case GUI_DVD_PREVIEW: job->succeeded = imgburn_dvd_preview_show(&job->builder, &job->preview, NULL) == 0; break;
+        case GUI_DVD_CANDIDATES: job->succeeded = job_dvd_candidates(job); break;
     }
     if (!job->succeeded && job_cancelled(job) && (!job->error || (job->operation != GUI_ERASE_QUICK && job->operation != GUI_ERASE_FULL))) job->error = ERROR_CANCELLED;
     if (!job->succeeded) { if (!job->error) job->error = GetLastError(); if (!job->error) job->error = ERROR_INVALID_DATA; job_text(job, job->error == ERROR_CANCELLED ? L"操作已取消。\r\n" : L"操作失败（错误 %lu）。\r\n", job->error); }
@@ -216,5 +243,5 @@ DWORD WINAPI imgburn_gui_job_run(void* context) {
 void imgburn_gui_job_free(GuiJob* job) {
     if (!job) return;
     if (job->thread) CloseHandle(job->thread); if (job->cancel) CloseHandle(job->cancel);
-    imgburn_dvd_free_navigation(&job->navigation); if (job->builderReady) image_builder_destroy(&job->builder); free(job->sources); free(job);
+    imgburn_dvd_free_navigation(&job->navigation); free(job->dvdCandidates); imgburn_data_source_close(&job->dvdCandidateSource); if (job->builderReady) image_builder_destroy(&job->builder); free(job->sources); free(job);
 }

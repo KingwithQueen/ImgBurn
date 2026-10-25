@@ -129,6 +129,7 @@ bool mmc_read_disc_information(OpticalDrive* drive, MmcDiscInfo* outInfo) {
     outInfo->firstTrack = buffer[3];
     outInfo->numSessions = (uint16_t)((uint16_t)buffer[9] << 8 | buffer[4]);
     outInfo->lastTrack = (uint16_t)((uint16_t)buffer[11] << 8 | buffer[6]);
+    outInfo->firstTrackLastSession = (uint16_t)((uint16_t)buffer[10] << 8 | buffer[5]);
     outInfo->lastSessionStatus = (buffer[2] >> 2) & 3;
 
     /* Byte 16-19: Lead-in LBA */
@@ -168,6 +169,8 @@ bool mmc_read_track_information(OpticalDrive* drive, uint32_t lbaOrTrack, bool i
     outInfo->isCopy = (buffer[5] & 0x10) != 0;
     outInfo->isPacket = (buffer[6] & 0x20) != 0;
     outInfo->isBlank = (buffer[6] & 0x40) != 0;
+    outInfo->isReserved = (buffer[6] & 0x80) != 0;
+    outInfo->fixedPacket = (buffer[6] & 0x10) != 0;
     outInfo->nwaValid = (buffer[7] & 0x01) != 0;
 
     outInfo->trackStartLba = read_be32(&buffer[8]);
@@ -351,8 +354,9 @@ bool mmc_read_cd_write_capacity(OpticalDrive* drive, uint32_t* sectors) {
     if (!spti_send_cdb(drive,cdb,10,data,sizeof(data),true,10)) return false;
     uint32_t bytes = (uint32_t)read_be16(data) + 2;
     if (drive->lastTransferBytes < 16 || drive->lastTransferBytes > sizeof(data) || bytes < 16 || bytes > drive->lastTransferBytes) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
-    /* 仅普通、非受限 CD-R；ATIP 的时间为二进制 MSF，不进行 BCD 转换。 */
-    if (!(data[5] & 0x40) || (data[6] & 0xF8) != 0x80) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    /* 仅非受限CD-R；子类型用于CD-RW，兼容CD-R响应中非零的子类型位，不将其误判为CD-RW。 */
+    if (!(data[5] & 0x40) || (data[6] & 0xC0) != 0x80) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    /* ATIP的时间为二进制MSF，不进行BCD转换。 */
     if (data[12] > 79 || data[13] >= 60 || data[14] >= 75) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
     uint32_t end = ((uint32_t)data[12] * 60 + data[13]) * 75 + data[14];
     if (end <= 150) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA); *sectors = end - 150; return true;
@@ -614,10 +618,12 @@ bool mmc_read_cd_full_toc(OpticalDrive* drive, MmcCdFullToc* toc) {
     if (drive->lastTransferBytes != sizeof(header)) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
     unsigned bytes = (unsigned)read_be16(header) + 2;
     if (bytes < 48 || bytes > UINT16_MAX || (bytes - 4) % 11 || header[2] != 1 || !header[3] || header[3] > 99) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
-    uint8_t* data = malloc(bytes); if (!data) return mmc_write_parameter_error(drive,ERROR_NOT_ENOUGH_MEMORY);
-    memset(data,0,bytes); write_be16(cdb + 7,(uint16_t)bytes);
-    if (!spti_send_cdb(drive,cdb,10,data,bytes,true,10)) { free(data); return false; }
-    if (drive->lastTransferBytes != bytes) { free(data); return mmc_write_parameter_error(drive,ERROR_READ_FAULT); }
+    /* ATAPI设备可能按字传输；奇数TOC长度向偶数分配，仍要求完整取得声明的有效字节。 */
+    unsigned allocation = bytes + (bytes & 1);
+    uint8_t* data = malloc(allocation); if (!data) return mmc_write_parameter_error(drive,ERROR_NOT_ENOUGH_MEMORY);
+    memset(data,0,allocation); write_be16(cdb + 7,(uint16_t)allocation);
+    if (!spti_send_cdb(drive,cdb,10,data,allocation,true,10)) { free(data); return false; }
+    if (drive->lastTransferBytes < bytes || drive->lastTransferBytes > allocation) { free(data); return mmc_write_parameter_error(drive,ERROR_READ_FAULT); }
     MmcCdFullToc parsed = {0}; MmcCdTrack numbered[99] = {0}; uint8_t owner[99] = {0}, seen[99] = {0}; unsigned previousSession = 0;
     if (memcmp(header,data,sizeof(header))) goto invalid_full;
     parsed.sessionCount = data[3];
@@ -656,6 +662,47 @@ bool mmc_read_cd_full_toc(OpticalDrive* drive, MmcCdFullToc* toc) {
     parsed.leadOutLba = previousLeadOut; *toc = parsed; free(data); drive->lastError = ERROR_SUCCESS; SetLastError(ERROR_SUCCESS); return true;
 invalid_full:
     free(data); return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+}
+
+bool mmc_plan_cd_mode1_append(const MmcDiscInfo* disc, const MmcTrackInfo* nextTrack, const MmcCdFullToc* toc, const MmcWriteParameters* parameters, uint64_t sourceSectors, MmcCdAppendPlan* plan) {
+    if (!plan) { SetLastError(ERROR_INVALID_PARAMETER); return false; } memset(plan,0,sizeof(*plan));
+    if (!disc || !nextTrack || !toc || !parameters || !sourceSectors) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    if (sourceSectors > UINT32_MAX) { SetLastError(ERROR_ARITHMETIC_OVERFLOW); return false; }
+    if (disc->currentProfile != MMC_PROFILE_CD_R || disc->isErasable || disc->discStatus != DISC_STATUS_APPENDABLE) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+    /* MMC-5表377：可追加盘的最后会话为空或未完；本批只接完整旧会话后的空新会话。 */
+    if (disc->lastSessionStatus > 1) { SetLastError(ERROR_INVALID_DATA); return false; }
+    if (disc->lastSessionStatus || !nextTrack->isBlank || nextTrack->isDamage || nextTrack->isReserved || nextTrack->isPacket || nextTrack->fixedPacket || !nextTrack->nwaValid) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+    if ((parameters->size != 52 && parameters->size != 56) || (parameters->page[0] & 0x7F) != 5 || parameters->page[1] + 2 != parameters->size) { SetLastError(ERROR_INVALID_DATA); return false; }
+    uint8_t writeType = parameters->page[2] & 15, trackMode = parameters->page[3] & 15, blockType = parameters->page[4] & 15;
+    /* 表509脚注5的SAO NWA不是已确认的INDEX01；不能固定加150或套用空白盘CUE。 */
+    if (writeType != 1 || trackMode != 4 || blockType != 8 || parameters->page[8]) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+    /* CD的负NWA仅属于RAW导入区；通用无符号容器不能让TAO接纳该地址编码。 */
+    if (nextTrack->nextWritableAddress > INT32_MAX) { SetLastError(ERROR_INVALID_DATA); return false; }
+    if (!toc->sessionCount || toc->sessionCount > 99 || !toc->trackCount || toc->trackCount > 99) { SetLastError(ERROR_INVALID_DATA); return false; }
+    unsigned used = 0, lastTrack = 0; uint32_t previousLeadOut = 0;
+    for (unsigned i = 0; i < toc->sessionCount; i++) {
+        const MmcCdSession* session = &toc->sessions[i];
+        if (session->number != i + 1 || session->firstTrackIndex != used || !session->trackCount || session->trackCount > toc->trackCount - used || !session->firstTrack || session->lastTrack > 99 || session->lastTrack < session->firstTrack || session->trackCount != (unsigned)session->lastTrack - session->firstTrack + 1 || (lastTrack && session->firstTrack != lastTrack + 1)) { SetLastError(ERROR_INVALID_DATA); return false; }
+        if (session->discType) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+        for (unsigned j = 0; j < session->trackCount; j++) {
+            const MmcCdTrack* track = &toc->tracks[used + j];
+            if (track->number != session->firstTrack + j || track->startLba >= session->leadOutLba || (j ? track->startLba <= toc->tracks[used + j - 1].startLba : track->startLba < previousLeadOut)) { SetLastError(ERROR_INVALID_DATA); return false; }
+            if (track->control != 4) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+        }
+        used += session->trackCount; lastTrack = session->lastTrack; previousLeadOut = session->leadOutLba;
+    }
+    if (used != toc->trackCount || previousLeadOut != toc->leadOutLba || disc->firstTrack != toc->tracks[0].number) { SetLastError(ERROR_INVALID_DATA); return false; }
+    if (toc->sessionCount == 99 || lastTrack == 99) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+    unsigned nextSession = toc->sessionCount + 1, nextNumber = lastTrack + 1;
+    /* Full TOC只含完整会话；RDI及不可见轨必须明确指向同一空的新会话和下一轨。 */
+    if (disc->numSessions != nextSession || disc->firstTrackLastSession != nextNumber || disc->lastTrack != nextNumber || nextTrack->sessionNumber != nextSession || nextTrack->trackNumber != nextNumber || nextTrack->trackStartLba != nextTrack->nextWritableAddress || nextTrack->nextWritableAddress <= previousLeadOut) { SetLastError(ERROR_INVALID_DATA); return false; }
+    uint64_t dataEnd = (uint64_t)nextTrack->nextWritableAddress + sourceSectors, availableEnd = (uint64_t)nextTrack->nextWritableAddress + nextTrack->freeBlocks;
+    if (dataEnd > UINT32_MAX || availableEnd > UINT32_MAX) { SetLastError(ERROR_ARITHMETIC_OVERFLOW); return false; }
+    if (sourceSectors > nextTrack->freeBlocks) { SetLastError(ERROR_DISK_FULL); return false; }
+    MmcCdAppendPlan result = {0}; result.sessionNumber = (uint16_t)nextSession; result.trackNumber = (uint16_t)nextNumber;
+    result.previousLeadOutLba = previousLeadOut; result.nextWritableAddress = nextTrack->nextWritableAddress; result.dataStartLba = nextTrack->nextWritableAddress; result.dataEndLba = (uint32_t)dataEnd;
+    result.sourceSectors = (uint32_t)sourceSectors; result.availableDataSectors = nextTrack->freeBlocks; result.remainingDataSectors = nextTrack->freeBlocks - (uint32_t)sourceSectors; result.sectorBytes = 2048;
+    result.writeType = writeType; result.trackMode = trackMode; result.dataBlockType = blockType; *plan = result; SetLastError(ERROR_SUCCESS); return true;
 }
 
 static bool mmc_read_cd_transfer(OpticalDrive* drive, uint32_t lba, uint16_t count, void* buffer, unsigned subChannel) {

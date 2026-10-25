@@ -11,24 +11,32 @@
 #define DVD_IMAGE_BLOCK 2048u
 #define DVD_IMAGE_MAX_FILE 0x3FFFF800u
 
+typedef struct { DataImageSource image; HANDLE cancel; } DvdImageReader;
+
 static uint16_t dvd_image_le16(const uint8_t* p) { return (uint16_t)((uint16_t)p[1] << 8 | p[0]); }
 static uint32_t dvd_image_le32(const uint8_t* p) { return (uint32_t)p[3] << 24 | (uint32_t)p[2] << 16 | (uint32_t)p[1] << 8 | p[0]; }
 static uint32_t dvd_image_be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 static bool dvd_image_error(DWORD error) { SetLastError(error); return false; }
+/* 只在后台分块读取之间检查取消，不从工作线程访问窗口。 */
+static bool dvd_image_cancelled(const DvdImageReader* source) { return source->cancel && WaitForSingleObject(source->cancel,0) == WAIT_OBJECT_0; }
+static bool dvd_image_blocks(DvdImageReader* source, uint32_t lba, uint16_t count, void* data) {
+    if (dvd_image_cancelled(source)) return dvd_image_error(ERROR_CANCELLED);
+    return imgburn_data_source_read(&source->image,lba,count,data);
+}
 static bool dvd_image_both32(const uint8_t* p, uint32_t* result) { *result = dvd_image_le32(p); return *result == dvd_image_be32(p + 4); }
-static bool dvd_image_extent(DataImageSource* source, uint32_t lba, uint64_t bytes) { return bytes && lba < source->sectors && (bytes + DVD_IMAGE_BLOCK - 1) / DVD_IMAGE_BLOCK <= source->sectors - lba; }
+static bool dvd_image_extent(DvdImageReader* source, uint32_t lba, uint64_t bytes) { return bytes && lba < source->image.sectors && (bytes + DVD_IMAGE_BLOCK - 1) / DVD_IMAGE_BLOCK <= source->image.sectors - lba; }
 
-static bool dvd_image_read(DataImageSource* source, uint64_t position, void* output, size_t bytes) {
-    if (position > (uint64_t)source->sectors * DVD_IMAGE_BLOCK || bytes > (uint64_t)source->sectors * DVD_IMAGE_BLOCK - position) return dvd_image_error(ERROR_INVALID_DATA);
+static bool dvd_image_read(DvdImageReader* source, uint64_t position, void* output, size_t bytes) {
+    if (position > (uint64_t)source->image.sectors * DVD_IMAGE_BLOCK || bytes > (uint64_t)source->image.sectors * DVD_IMAGE_BLOCK - position) return dvd_image_error(ERROR_INVALID_DATA);
     uint8_t* target = output;
     while (bytes) {
         uint32_t lba = (uint32_t)(position / DVD_IMAGE_BLOCK), inside = (uint32_t)(position % DVD_IMAGE_BLOCK);
         if (!inside && bytes >= DVD_IMAGE_BLOCK) {
             uint16_t count = (uint16_t)(bytes / DVD_IMAGE_BLOCK > 32 ? 32 : bytes / DVD_IMAGE_BLOCK);
-            if (!imgburn_data_source_read(source,lba,count,target)) return false;
+            if (!dvd_image_blocks(source,lba,count,target)) return false;
             size_t transferred = (size_t)count * DVD_IMAGE_BLOCK; target += transferred; position += transferred; bytes -= transferred;
         } else {
-            uint8_t block[DVD_IMAGE_BLOCK]; if (!imgburn_data_source_read(source,lba,1,block)) return false;
+            uint8_t block[DVD_IMAGE_BLOCK]; if (!dvd_image_blocks(source,lba,1,block)) return false;
             size_t count = bytes < DVD_IMAGE_BLOCK - inside ? bytes : DVD_IMAGE_BLOCK - inside; memcpy(target,block + inside,count); target += count; position += count; bytes -= count;
         }
     }
@@ -46,20 +54,20 @@ static bool dvd_image_tag(const uint8_t* data, uint16_t id, uint32_t lba) {
     return dvd_image_le16(data) == id && dvd_image_le16(data + 2) == 2 && sum == data[4] && dvd_image_le32(data + 12) == lba && bytes <= DVD_IMAGE_BLOCK - 16 && udf_crc16(data + 16,bytes) == dvd_image_le16(data + 8);
 }
 
-static bool dvd_image_udf102(DataImageSource* source, uint32_t vrs) {
+static bool dvd_image_udf102(DvdImageReader* source, uint32_t vrs) {
     uint8_t data[DVD_IMAGE_BLOCK];
     const char* identifiers[] = {"BEA01","NSR02","TEA01"};
     for (unsigned i = 0; i < 3; i++) {
-        if (!imgburn_data_source_read(source,vrs + i,1,data)) return false;
+        if (!dvd_image_blocks(source,vrs + i,1,data)) return false;
         if (data[0] || memcmp(data + 1,identifiers[i],5) || data[6] != 1) return dvd_image_error(ERROR_NOT_SUPPORTED);
     }
-    if (!imgburn_data_source_read(source,256,1,data)) return false;
+    if (!dvd_image_blocks(source,256,1,data)) return false;
     if (!dvd_image_tag(data,UDF_TAG_AVDP,256)) return dvd_image_error(ERROR_INVALID_DATA);
     uint32_t length = dvd_image_le32(data + 16), first = dvd_image_le32(data + 20);
     if (!length || length % DVD_IMAGE_BLOCK || length / DVD_IMAGE_BLOCK > 16 || !dvd_image_extent(source,first,length)) return dvd_image_error(ERROR_NOT_SUPPORTED);
     bool partition = false, logical = false, terminated = false;
     for (uint32_t i = 0; i < length / DVD_IMAGE_BLOCK; i++) {
-        uint32_t lba = first + i; if (!imgburn_data_source_read(source,lba,1,data)) return false;
+        uint32_t lba = first + i; if (!dvd_image_blocks(source,lba,1,data)) return false;
         uint16_t id = dvd_image_le16(data); if (!dvd_image_tag(data,id,lba)) return dvd_image_error(ERROR_INVALID_DATA);
         if (id == UDF_TAG_PD) {
             const UdfPartitionDesc* descriptor = (const UdfPartitionDesc*)data;
@@ -74,7 +82,7 @@ static bool dvd_image_udf102(DataImageSource* source, uint32_t vrs) {
     return partition && logical && terminated ? true : dvd_image_error(ERROR_INVALID_DATA);
 }
 
-static bool dvd_image_record(DataImageSource* source, const uint8_t* record, uint32_t* lba, uint32_t* bytes) {
+static bool dvd_image_record(DvdImageReader* source, const uint8_t* record, uint32_t* lba, uint32_t* bytes) {
     if (record[0] < 34 || record[1] || record[32] > record[0] - 33 || record[26] || record[27] || dvd_image_le16(record + 28) != 1 || record[30] || record[31] != 1 || !dvd_image_both32(record + 2,lba) || !dvd_image_both32(record + 10,bytes)) return dvd_image_error(ERROR_INVALID_DATA);
     if (!dvd_image_extent(source,*lba,*bytes)) return dvd_image_error(ERROR_INVALID_DATA);
     return true;
@@ -105,11 +113,11 @@ static FsFileNode* dvd_image_find(FsDirectoryNode* directory, const wchar_t* nam
     return NULL;
 }
 
-static bool dvd_image_directory(DataImageSource* source, FsDirectoryNode* directory, uint32_t lba, uint32_t bytes, bool root) {
+static bool dvd_image_directory(DvdImageReader* source, FsDirectoryNode* directory, uint32_t lba, uint32_t bytes, bool root) {
     if (bytes % DVD_IMAGE_BLOCK) return dvd_image_error(ERROR_NOT_SUPPORTED);
     uint8_t block[DVD_IMAGE_BLOCK]; bool found = false;
     for (uint32_t sector = 0; sector < bytes / DVD_IMAGE_BLOCK; sector++) {
-        if (!imgburn_data_source_read(source,lba + sector,1,block)) return false;
+        if (!dvd_image_blocks(source,lba + sector,1,block)) return false;
         for (unsigned position = 0; position < DVD_IMAGE_BLOCK;) {
             const uint8_t* record = block + position; unsigned length = record[0]; if (!length) break;
             if (length < 34 || length > DVD_IMAGE_BLOCK - position || record[32] > length - 33) return dvd_image_error(ERROR_INVALID_DATA);
@@ -134,7 +142,7 @@ static bool dvd_image_directory(DataImageSource* source, FsDirectoryNode* direct
     return found ? true : dvd_image_error(ERROR_INVALID_DATA);
 }
 
-static bool dvd_image_equal(DataImageSource* source, const FsFileNode* first, const FsFileNode* second) {
+static bool dvd_image_equal(DvdImageReader* source, const FsFileNode* first, const FsFileNode* second) {
     if (first->fileSize != second->fileSize) return dvd_image_error(ERROR_INVALID_DATA);
     uint8_t left[16384], right[16384];
     for (uint64_t offset = 0; offset < first->fileSize;) {
@@ -145,7 +153,7 @@ static bool dvd_image_equal(DataImageSource* source, const FsFileNode* first, co
     return true;
 }
 
-static bool dvd_image_navigation_files(DataImageSource* source, FsDirectoryNode* directory) {
+static bool dvd_image_navigation_files(DvdImageReader* source, FsDirectoryNode* directory) {
     if (!dvd_image_find(directory,L"VIDEO_TS.IFO") || !dvd_image_find(directory,L"VIDEO_TS.BUP")) return dvd_image_error(ERROR_INVALID_DATA);
     for (FsFileNode* file = directory->firstFile; file; file = file->next) {
         unsigned group, order; if (!dvd_image_video_name(file->nameW,&group,&order)) continue;
@@ -182,16 +190,22 @@ static bool dvd_image_navigation_files(DataImageSource* source, FsDirectoryNode*
 }
 
 bool imgburn_dvd_image_layer_break_candidates(const wchar_t* path, const DvdMediaProfile* profile, DvdLayerBreakCandidate* candidates, size_t capacity, size_t* count, uint32_t* imageSectors) {
+    return imgburn_dvd_image_layer_break_candidates_ex(path,profile,candidates,capacity,count,imageSectors,NULL);
+}
+
+bool imgburn_dvd_image_layer_break_candidates_ex(const wchar_t* path, const DvdMediaProfile* profile, DvdLayerBreakCandidate* candidates, size_t capacity, size_t* count, uint32_t* imageSectors, HANDLE cancelEvent) {
     if (count) *count = 0; if (imageSectors) *imageSectors = 0;
     if (!path || !path[0] || !count || (!candidates && capacity) || !profile || !profile->maximumL0 || profile->minimumL0 > profile->maximumL0 || profile->maximumL0 > 2086912 || !profile->mediaCapacity || profile->mediaCapacity > 4173824) return dvd_image_error(ERROR_INVALID_PARAMETER);
-    DataImageSource source; if (!imgburn_data_source_open(&source,path)) return false;
+    DvdImageReader source = {0}; source.cancel = cancelEvent;
+    if (dvd_image_cancelled(&source)) return dvd_image_error(ERROR_CANCELLED);
+    if (!imgburn_data_source_open(&source.image,path)) return false;
     ImageBuilder builder = {0}; bool initialized = false, ok = false; DWORD error = ERROR_SUCCESS; uint8_t data[DVD_IMAGE_BLOCK]; uint32_t rootLba = 0, rootBytes = 0, volumeSectors = 0, terminator = 0;
-    if (source.sectors <= 256) { error = ERROR_NOT_SUPPORTED; goto done; }
-    if (!imgburn_data_source_read(&source,16,1,data)) { error = GetLastError(); goto done; }
+    if (source.image.sectors <= 256) { error = ERROR_NOT_SUPPORTED; goto done; }
+    if (!dvd_image_blocks(&source,16,1,data)) { error = GetLastError(); goto done; }
     if (data[0] != 1 || memcmp(data + 1,"CD001\1",6)) { error = ERROR_NOT_SUPPORTED; goto done; }
-    if (!dvd_image_both32(data + 80,&volumeSectors) || volumeSectors != source.sectors || dvd_image_le16(data + 128) != DVD_IMAGE_BLOCK || data[130] != 8 || data[131] || data[156 + 25] != 2 || !dvd_image_record(&source,data + 156,&rootLba,&rootBytes)) { error = ERROR_INVALID_DATA; goto done; }
+    if (!dvd_image_both32(data + 80,&volumeSectors) || volumeSectors != source.image.sectors || dvd_image_le16(data + 128) != DVD_IMAGE_BLOCK || data[130] != 8 || data[131] || data[156 + 25] != 2 || !dvd_image_record(&source,data + 156,&rootLba,&rootBytes)) { error = ERROR_INVALID_DATA; goto done; }
     for (uint32_t lba = 17; lba < 32; lba++) {
-        if (!imgburn_data_source_read(&source,lba,1,data)) { error = GetLastError(); goto done; }
+        if (!dvd_image_blocks(&source,lba,1,data)) { error = GetLastError(); goto done; }
         if (memcmp(data + 1,"CD001\1",6)) { error = ERROR_NOT_SUPPORTED; goto done; }
         if (data[0] == 255) { terminator = lba; break; }
         if (data[0] != 2) { error = ERROR_NOT_SUPPORTED; goto done; }
@@ -199,10 +213,11 @@ bool imgburn_dvd_image_layer_break_candidates(const wchar_t* path, const DvdMedi
     if (!terminator) { error = ERROR_NOT_SUPPORTED; goto done; }
     if (!dvd_image_udf102(&source,terminator + 1)) { error = GetLastError(); goto done; }
     if (!image_builder_init(&builder,"DVD_IMAGE_NAVIGATION")) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; } initialized = true;
-    builder.config.dvdVideoCompliance = true; builder.config.fsTypes = FS_TYPE_ISO_UDF; builder.config.udfRev = UDF_REV_102; builder.config.totalImageSectors = source.sectors;
+    builder.config.dvdVideoCompliance = true; builder.config.fsTypes = FS_TYPE_ISO_UDF; builder.config.udfRev = UDF_REV_102; builder.config.totalImageSectors = source.image.sectors;
     if (!dvd_image_directory(&source,builder.rootDir,rootLba,rootBytes,true) || !dvd_image_navigation_files(&source,builder.rootDir->firstChildDir)) { error = GetLastError(); goto done; }
     ok = fs_dvd_layer_break_candidates_fixed(&builder,profile,candidates,capacity,count,dvd_image_file_read,&source); error = GetLastError();
-    if (imageSectors && (ok || error == ERROR_INSUFFICIENT_BUFFER)) *imageSectors = source.sectors;
+    if (imageSectors && (ok || error == ERROR_INSUFFICIENT_BUFFER)) *imageSectors = source.image.sectors;
 done:
-    if (initialized) image_builder_destroy(&builder); imgburn_data_source_close(&source); SetLastError(ok ? ERROR_SUCCESS : error ? error : ERROR_INVALID_DATA); return ok;
+    if (dvd_image_cancelled(&source)) { ok = false; *count = 0; error = ERROR_CANCELLED; }
+    if (initialized) image_builder_destroy(&builder); imgburn_data_source_close(&source.image); SetLastError(ok ? ERROR_SUCCESS : error ? error : ERROR_INVALID_DATA); return ok;
 }

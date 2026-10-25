@@ -3,9 +3,10 @@
 
 #include "imgburn_image.h"
 #include "imgburn_spti.h"
+#include "imgburn_data_source.h"
 
 typedef enum { GUI_EZ, GUI_READ, GUI_BUILD, GUI_WRITE, GUI_VERIFY, GUI_DISCOVERY } GuiMode;
-typedef enum { GUI_CALCULATE, GUI_BUILD_IMAGE, GUI_INSPECT, GUI_CREATE_CUE, GUI_CREATE_MDS, GUI_DRIVE_INFO, GUI_VERIFY_DISC, GUI_WRITE_DISC, GUI_DVD_INFO, GUI_DVD_PREVIEW, GUI_READ_DISC, GUI_ERASE_QUICK, GUI_ERASE_FULL, GUI_DISCOVERY_DISC } GuiOperation;
+typedef enum { GUI_CALCULATE, GUI_BUILD_IMAGE, GUI_INSPECT, GUI_CREATE_CUE, GUI_CREATE_MDS, GUI_DRIVE_INFO, GUI_VERIFY_DISC, GUI_WRITE_DISC, GUI_DVD_INFO, GUI_DVD_PREVIEW, GUI_READ_DISC, GUI_ERASE_QUICK, GUI_ERASE_FULL, GUI_DISCOVERY_DISC, GUI_DVD_CANDIDATES } GuiOperation;
 typedef struct { wchar_t path[MAX_PATH]; } GuiPath;
 enum { GUI_JOB_PROGRESS = WM_APP + 40, GUI_JOB_DONE, GUI_JOB_STATUS };
 
@@ -34,6 +35,10 @@ typedef struct {
     ImageBuilder builder;
     DvdNavigation navigation;
     DvdPreviewPlan preview;
+    DvdLayerBreakCandidate* dvdCandidates;
+    size_t dvdCandidateCount;
+    uint32_t dvdImageSectors;
+    DataImageSource dvdCandidateSource; /* 窗口接管候选时一并接管只读来源，直至派生选择失效。 */
 } GuiJob;
 
 /* 工作者只通过消息报告结果，不从后台线程读取或修改窗口控件。 */

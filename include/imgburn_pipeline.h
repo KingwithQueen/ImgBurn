@@ -92,6 +92,21 @@ bool pipeline_burn_image(const BurnConfig* config,
                          PipelineProgressCallback callback,
                          void* userData);
 
+/* 原版以外的实验扩展：只写一个MODE1原始数据会话；不接入原有Write入口。
+ * 输入为至少300个2048字节扇区的BIN载荷，不解释或重定位文件系统，不合并旧文件树。
+ * 只接受当前已为TAO的CD-R，allowBlank显式允许建立首会话；finalizeDisc决定本次是否封盘。
+ * 不执行OPC、速度设置或托盘动作；函数始终回读本次数据，并核对旧会话TOC未变化。 */
+typedef struct { OpticalDrive* drive; const wchar_t* rawDataPath; HANDLE cancelEvent; bool allowBlank, finalizeDisc; } CdSessionConfig;
+typedef struct { MmcCdAppendPlan data; bool writeStarted, sessionClosed, verified; } CdSessionResult;
+bool pipeline_write_cd_mode1_session(const CdSessionConfig* config, CdSessionResult* result, PipelineProgressCallback callback, void* userData);
+/* 只读重验已有会话；封盘后允许光驱报告CD-ROM，不重新发送任何写入或设置命令。 */
+bool pipeline_verify_cd_mode1_session(OpticalDrive* drive, const wchar_t* rawDataPath, const MmcCdAppendPlan* data, HANDLE cancelEvent);
+/* 独立ISO追加扩展：只重定位本次ISO，不导入旧文件树；MODE1入口当前仅接受纯ISO9660。
+ * ISO+Joliet只提供文件地址视图，尚不开放其MODE1多会话介质路径。 */
+typedef struct { OpticalDrive* drive; const wchar_t* isoPath; HANDLE cancelEvent; bool allowBlank, finalizeDisc; } CdIsoSessionConfig;
+bool pipeline_write_cd_iso_session(const CdIsoSessionConfig* config, CdSessionResult* result, PipelineProgressCallback callback, void* userData);
+bool pipeline_verify_cd_iso_session(OpticalDrive* drive, const wchar_t* isoPath, const MmcCdAppendPlan* data, HANDLE cancelEvent);
+
 /* Discovery 使用内存零数据，sectors 为零时写入全部空余扇区。 */
 typedef struct {
     OpticalDrive* drive;

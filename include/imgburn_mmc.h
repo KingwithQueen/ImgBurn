@@ -64,6 +64,7 @@ typedef struct {
     uint32_t leadOutLba;
     MmcProfile currentProfile;
     const char* profileName;
+    uint16_t firstTrackLastSession; /* 包括尚未记录的最后会话首轨，来自响应字节5/10。 */
 } MmcDiscInfo;
 
 /**
@@ -81,6 +82,7 @@ typedef struct {
     uint32_t nextWritableAddress;
     uint32_t freeBlocks;
     uint32_t trackSize;
+    bool isReserved, fixedPacket; /* RT/FP：区分不可见轨与已预留轨及固定包地址。 */
 } MmcTrackInfo;
 
 /**
@@ -221,6 +223,18 @@ typedef struct { unsigned trackCount; uint32_t leadOutLba; MmcCdTrack tracks[99]
 typedef struct { uint32_t leadOutLba; unsigned firstTrackIndex, trackCount; uint8_t number, firstTrack, lastTrack, discType; } MmcCdSession;
 typedef struct { unsigned sessionCount, trackCount; uint32_t leadOutLba; MmcCdSession sessions[99]; MmcCdTrack tracks[99]; } MmcCdFullToc;
 bool mmc_read_cd_full_toc(OpticalDrive* drive, MmcCdFullToc* toc);
+
+/* 只读的下一会话数据范围；dataEndLba为排他终点，余量仅为报告的用户数据块预算。 */
+typedef struct {
+    uint16_t sessionNumber, trackNumber;
+    uint32_t previousLeadOutLba, nextWritableAddress, dataStartLba, dataEndLba;
+    uint32_t sourceSectors, availableDataSectors, remainingDataSectors, sectorBytes;
+    uint8_t writeType, trackMode, dataBlockType;
+} MmcCdAppendPlan;
+/* 输入须为同一盘状态下的已解析快照，包括当前写参数页；不读取设备或选择写模式。
+ * 仅确认TAO模式下空不可见轨的MODE1/2048数据范围；SAO的NWA/预间隙解释尚未支持。
+ * 不生成导入区、预间隙或结束策略，不保证完整会话开销，不启用追加执行或合并旧文件树。 */
+bool mmc_plan_cd_mode1_append(const MmcDiscInfo* disc, const MmcTrackInfo* nextTrack, const MmcCdFullToc* toc, const MmcWriteParameters* parameters, uint64_t sourceSectors, MmcCdAppendPlan* plan);
 
 /* 单会话 CD 的完整 TOC；READ CD 同时返回原始主通道与格式化 Q。 */
 bool mmc_read_cd_toc(OpticalDrive* drive, MmcCdToc* toc);
