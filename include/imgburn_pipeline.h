@@ -76,6 +76,7 @@ typedef struct {
     bool cycleTrayBeforeVerify;     /* 写后校验前按原版默认流程重新装载介质。 */
     bool performOpc;                /* 显式请求写入前功率校准，默认关闭。 */
     uint32_t layerBreakLba;          /* DVD+R DL用户指定L0容量，覆盖MDS；0采用MDS或按ECC块平衡。 */
+    bool keepCurrentWriteSpeed;     /* 显式沿用设备当前速度，不发送速度设置；默认false保留原有速度请求。 */
 } BurnConfig;
 
 /**

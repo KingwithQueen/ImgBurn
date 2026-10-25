@@ -531,7 +531,7 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
         snprintf(stats.statusMessage,sizeof(stats.statusMessage),"DVD %s L0 capacity: %u sectors (%s).",profile == MMC_PROFILE_DVD_PLUS_R_DL ? "+R DL" : "-R DL",layerBreak,profile == MMC_PROFILE_DVD_R_DL_SEQ ? "fixed medium boundary" : config->layerBreakLba ? "user specified" : dataSource.layerBreakLba ? "MDS layout" : "balanced ECC blocks"); if (callback) callback(&stats,userData);
     }
     if (cdImage && profile != MMC_PROFILE_CD_R) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"CD CUE writing requires blank CD-R media.",callback,userData); goto cleanup; }
-    if (profile != MMC_PROFILE_BD_R_SRM && config->writeSpeedKbps > 0xFFFF && config->writeSpeedKbps != UINT32_MAX) { burn_failure(&stats,ERROR_INVALID_PARAMETER,"CD/DVD write speed exceeds the command range.",callback,userData); goto cleanup; }
+    if (!config->keepCurrentWriteSpeed && profile != MMC_PROFILE_BD_R_SRM && config->writeSpeedKbps > 0xFFFF && config->writeSpeedKbps != UINT32_MAX) { burn_failure(&stats,ERROR_INVALID_PARAMETER,"CD/DVD write speed exceeds the command range.",callback,userData); goto cleanup; }
     if (config->testMode && profile != MMC_PROFILE_DVD_R_SEQ && profile != MMC_PROFILE_DVD_R_DL_SEQ && profile != MMC_PROFILE_CD_R) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"Device test writing requires supported CD-R or DVD-R media.",callback,userData); goto cleanup; }
     if (profile == MMC_PROFILE_CD_R) {
         MmcCdWriteFeatures cd; if (!mmc_get_cd_write_features(config->drive,&cd)) { pipeline_failure(&stats,"Cannot query CD-R SAO write capabilities.",callback,userData); goto cleanup; }
@@ -575,7 +575,7 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
         if (!mmc_set_write_parameters(config->drive,&selected) || !mmc_get_write_parameters(config->drive,&actual)) { pipeline_failure(&stats,"Cannot set CD-R SAO or DVD-R DAO write parameters.",callback,userData); goto cleanup; }
         if ((actual.page[2] & 0x5F) != selected.page[2] || actual.page[3] != selected.page[3] || actual.page[4] != selected.page[4] || (profile == MMC_PROFILE_CD_R && ((actual.page[7] & 0x3F) || actual.page[8] != selected.page[8] || (actual.page[16] & 0x80) || (actual.page[32] & 0x80)))) { burn_failure(&stats,ERROR_INVALID_DATA,"The drive did not accept the requested write mode.",callback,userData); goto cleanup; }
     }
-    if (!mmc_set_burn_speed(config->drive,profile,config->writeSpeedKbps)) { pipeline_failure(&stats,"Cannot set write speed.",callback,userData); goto cleanup; }
+    if (!config->keepCurrentWriteSpeed && !mmc_set_burn_speed(config->drive,profile,config->writeSpeedKbps)) { pipeline_failure(&stats,"Cannot set write speed.",callback,userData); goto cleanup; }
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
     if (profile == MMC_PROFILE_DVD_PLUS_R_DL) {
         snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Setting DVD+R DL L0 capacity to %u sectors...",layerBreak); if (callback) callback(&stats,userData);
