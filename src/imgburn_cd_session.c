@@ -49,6 +49,25 @@ static bool cd_session_read_source(HANDLE source, IsoSessionSource* iso, uint32_
     if (actual != bytes) { SetLastError(ERROR_READ_FAULT); return false; } return true;
 }
 
+bool pipeline_plan_cd_iso_session(const CdIsoSessionConfig* config, MmcCdAppendPlan* data) {
+    if (!data) { SetLastError(ERROR_INVALID_PARAMETER); return false; } memset(data,0,sizeof(*data));
+    if (!config || !config->drive || !config->isoPath) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    const wchar_t* extension = wcsrchr(config->isoPath,L'.'); if (!extension || _wcsicmp(extension,L".iso")) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+    CdSessionConfig common = {config->drive,config->isoPath,config->cancelEvent,config->allowBlank,config->finalizeDisc};
+    if (cd_session_cancelled(&common)) return false;
+    IsoSessionSource iso = {0}; if (!imgburn_iso_session_open(&iso,config->isoPath,config->cancelEvent)) return false;
+    CdSessionSnapshot snapshot = {0}; MmcCdAppendPlan plan = {0}; bool success = false;
+    if (iso.joliet) { SetLastError(ERROR_NOT_SUPPORTED); goto done; }
+    if (iso.sectors < 300) { SetLastError(ERROR_INVALID_DATA); goto done; }
+    /* 与执行入口使用相同快照、用户块预算和TAO能力；这里仅发送查询，不选择写参数。 */
+    if (!cd_session_snapshot(config->drive,&snapshot) || !cd_session_plan(&snapshot,iso.sectors,config->allowBlank,&plan) || !cd_session_tao_feature(config->drive)) goto done;
+    if (!(snapshot.parameters.page[2] & 0x40) || (snapshot.parameters.page[2] & 0x10)) { SetLastError(ERROR_NOT_SUPPORTED); goto done; }
+    if (!imgburn_iso_session_set_start(&iso,plan.dataStartLba) || cd_session_cancelled(&common)) goto done;
+    *data = plan; success = true;
+done:
+    { DWORD error = success ? ERROR_SUCCESS : GetLastError(); imgburn_iso_session_close(&iso); SetLastError(error); } return success;
+}
+
 static bool cd_session_write(const CdSessionConfig* config, CdSessionResult* result, PipelineProgressCallback callback, void* userData, bool isoInput) {
     if (!result) { SetLastError(ERROR_INVALID_PARAMETER); return false; } memset(result,0,sizeof(*result));
     if (!config || !config->drive || !config->rawDataPath) { SetLastError(ERROR_INVALID_PARAMETER); return false; }

@@ -83,6 +83,9 @@ int spti_enumerate_drives(OpticalDriveInfo* drives, int maxDrives);
  */
 bool spti_open_drive(OpticalDrive* drive, const wchar_t* devicePath, bool exclusiveLock);
 
+/* 仅打开和查询设备描述，不改变MCN或获取卷锁；SPTI命令仍需要读写访问权。 */
+bool spti_open_drive_passive(OpticalDrive* drive, const wchar_t* devicePath);
+
 /**
  * @brief Close the optical drive handle and release locks
  */

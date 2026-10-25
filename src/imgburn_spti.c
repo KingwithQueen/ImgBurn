@@ -256,7 +256,7 @@ int spti_enumerate_drives(OpticalDriveInfo* drives, int maxDrives) {
     return foundCount;
 }
 
-bool spti_open_drive(OpticalDrive* drive, const wchar_t* devicePath, bool exclusiveLock) {
+static bool spti_open_drive_internal(OpticalDrive* drive, const wchar_t* devicePath, bool exclusiveLock, bool manageMcn) {
     if (!drive || !devicePath || wcslen(devicePath) >= sizeof(drive->info.devicePath) / sizeof(drive->info.devicePath[0])) return false;
     memset(drive, 0, sizeof(*drive));
     DWORD access = GENERIC_READ | GENERIC_WRITE;
@@ -313,8 +313,8 @@ bool spti_open_drive(OpticalDrive* drive, const wchar_t* devicePath, bool exclus
     wcscpy(drive->info.devicePath, devicePath);
     query_device_descriptor(drive->hDevice, &drive->info);
 
-    /* Disable AutoPlay/MCN during operation */
-    spti_set_mcn_control(drive, true);
+    /* 原入口仍管理MCN；只读查询入口只打开句柄，不改变通知状态。 */
+    if (manageMcn) spti_set_mcn_control(drive, true);
 
     if (exclusiveLock) {
         if (!spti_lock_drive(drive, true)) {
@@ -329,6 +329,10 @@ bool spti_open_drive(OpticalDrive* drive, const wchar_t* devicePath, bool exclus
     drive->deviceAccess = access; drive->accessKnown = true;
     return true;
 }
+
+bool spti_open_drive(OpticalDrive* drive, const wchar_t* devicePath, bool exclusiveLock) { return spti_open_drive_internal(drive,devicePath,exclusiveLock,true); }
+
+bool spti_open_drive_passive(OpticalDrive* drive, const wchar_t* devicePath) { return spti_open_drive_internal(drive,devicePath,false,false); }
 
 void spti_close_drive(OpticalDrive* drive) {
     if (!drive || drive->hDevice == INVALID_HANDLE_VALUE || !drive->hDevice) {

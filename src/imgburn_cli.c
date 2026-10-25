@@ -21,6 +21,7 @@
 #include "imgburn_fs.h"
 #include "imgburn_udf.h"
 #include "imgburn_pipeline.h"
+#include "imgburn_iso_session.h"
 #include "imgburn_sector.h"
 #include "imgburn_vendor.h"
 #include "imgburn_image.h"
@@ -89,6 +90,10 @@ static void print_usage(void) {
     printf("                                 Burn ISO/BIN, data MDS or supported CD CUE images\n");
     printf("                                 DVD+R DL uses MDS/automatic L0; --layer-break <sectors> overrides it\n"
            "                                 DVD-R DL DAO uses the fixed medium layer boundary\n");
+    printf("  append-iso <drive> <file.iso> [--write] [--allow-blank] [--finalize]\n");
+    printf("                                 Experimental CD-R TAO extension; read-only plan by default\n");
+    printf("                                 Pure ISO9660 only; independent tree, without merging old files\n");
+    printf("                                 --write records and verifies; keep open unless --finalize\n");
     printf("  erase <drive> [--quick|--full]   Erase CD-RW/DVD-RW; cancellation waits for the device\n");
     printf("  discovery <drive> [--sectors <n>] [--speed <Nx|MAX>] [--test]\n");
     printf("        [--verify|--no-verify] [--no-cycle] [--opc]\n");
@@ -518,6 +523,56 @@ static int cmd_read(int argc, char** argv) {
     if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock); spti_close_drive(&drive);
     if (ok) printf(config.autoSplit ? "\nDisc image read successfully. If split, use its same-name MDS descriptor.\n" : extension && !_wcsicmp(extension,L".mds") ? "\nDisc image and MDS descriptor created successfully; the MDS lists its data files in order.\n" : "\nDisc image read successfully.\n");
     else printf("\nDisc read failed (error %lu).\n",error); return ok ? 0 : 1;
+}
+
+/* 追加扩展单独显示全盘LBA和源长度，避免将非零会话地址当成来源进度。 */
+static void on_cli_cd_session_progress(const PipelineStats* stats, void* context) {
+    (void)context; printf("\r  [%s] %3d%% | LBA %u | Source sectors %u",stats->statusMessage,stats->progressPercent,stats->currentLba,stats->totalSectors); fflush(stdout);
+}
+static void print_cd_session_plan(const MmcCdAppendPlan* data) {
+    printf("\n  sessionNumber: %u\n  trackNumber: %u\n  previousLeadOutLba: %u\n  nextWritableAddress: %u\n",data->sessionNumber,data->trackNumber,data->previousLeadOutLba,data->nextWritableAddress);
+    printf("  dataStartLba: %u\n  dataEndLba: %u\n  sourceSectors: %u\n",data->dataStartLba,data->dataEndLba,data->sourceSectors);
+    printf("  availableDataSectors: %u\n  remainingDataSectors: %u\n",data->availableDataSectors,data->remainingDataSectors);
+    printf("  sectorBytes: %u\n  writeType: %u\n  trackMode: %u\n  dataBlockType: %u\n",data->sectorBytes,data->writeType,data->trackMode,data->dataBlockType);
+}
+
+/* 原版以外的显式入口：默认只读规划，--write才执行，不合并旧文件树。 */
+static int cmd_append_iso(int argc, char** argv) {
+    if (argc < 4) { printf("Usage: imgburn append-iso <drive> <file.iso> [--write] [--allow-blank] [--finalize]\n"); return 1; }
+    unsigned options = 0;
+    for (int i = 4; i < argc; i++) {
+        unsigned flag = !_stricmp(argv[i],"--write") ? 1 : !_stricmp(argv[i],"--allow-blank") ? 2 : !_stricmp(argv[i],"--finalize") ? 4 : 0;
+        if (!flag || (options & flag)) { printf("Error: Unknown or duplicate append-iso option: %s\n",argv[i]); return 1; } options |= flag;
+    }
+    wchar_t device[MAX_PATH], image[MAX_PATH]; if (!parse_drive_path(argv[2],device,MAX_PATH) || !utf8_path(argv[3],image,MAX_PATH)) return 1;
+    const wchar_t* extension = wcsrchr(image,L'.'); if (!extension || _wcsicmp(extension,L".iso")) { printf("Error: append-iso requires an independent .iso source.\n"); return 1; }
+    HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) return 1;
+    AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock); bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
+    IsoSessionSource source = {0}; OpticalDrive drive = {0}; bool opened = false, ok = false; DWORD error = ERROR_SUCCESS;
+    /* 在打开设备之前验证并保持源锁，规划和执行再按各自接口复查；不支持来源不会触及设备。 */
+    if (!imgburn_iso_session_open(&source,image,cancel)) goto done;
+    if (source.joliet) { SetLastError(ERROR_NOT_SUPPORTED); goto done; }
+    if (source.sectors < 300) { SetLastError(ERROR_INVALID_DATA); goto done; }
+    printf("Experimental CD-R TAO append extension: independent pure ISO9660, no old file-tree merge.\n");
+    printf("Mode: %s; blank disc: %s; end strategy: %s.\n",options & 1 ? "WRITE AND VERIFY" : "READ-ONLY PLAN",options & 2 ? "explicitly allowed" : "not allowed",options & 4 ? "finalize disc" : "keep disc open");
+    printf("Source sectors: %u; volume sectors: %u. Data end LBA is exclusive.\n",source.sectors,source.volumeSectors);
+    if (!spti_open_drive_passive(&drive,device)) goto done; opened = true;
+    if (drive.accessKnown && (drive.deviceAccess & (GENERIC_READ | GENERIC_WRITE)) != (GENERIC_READ | GENERIC_WRITE)) { SetLastError(ERROR_ACCESS_DENIED); goto done; }
+    CdIsoSessionConfig config = {&drive,image,cancel,(options & 2) != 0,(options & 4) != 0};
+    if (options & 1) {
+        CdSessionResult result = {0}; ok = pipeline_write_cd_iso_session(&config,&result,on_cli_cd_session_progress,NULL); error = GetLastError();
+        if (result.data.sourceSectors) print_cd_session_plan(&result.data);
+        printf("\n  writeStarted: %u\n  sessionClosed: %u\n  verified: %u\n",result.writeStarted ? 1 : 0,result.sessionClosed ? 1 : 0,result.verified ? 1 : 0);
+    } else {
+        MmcCdAppendPlan data = {0}; ok = pipeline_plan_cd_iso_session(&config,&data); error = GetLastError(); if (ok) print_cd_session_plan(&data);
+    }
+done:
+    if (!ok && !error) error = GetLastError();
+    if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock);
+    if (opened) spti_close_drive(&drive); imgburn_iso_session_close(&source);
+    if (ok) printf(options & 1 ? "\nISO session written and verified.\n" : "\nRead-only plan complete; execution will recheck the actual layout.\n");
+    else printf("\nISO session %s stopped (error %lu). Requires a supported source and an eligible CD-R already using TAO/MODE1; inspect recorded state before any retry.\n",options & 1 ? "write" : "plan",error);
+    return ok ? 0 : 1;
 }
 
 /* 整盘擦除使用同一后台命令流程；Ctrl+C 不打断正在进行的物理擦除。 */
@@ -1015,6 +1070,8 @@ static int run_cli(int argc, char **argv) {
         return cmd_build(argc, argv);
     } else if (_stricmp(cmd, "burn") == 0) {
         return cmd_burn(argc, argv);
+    } else if (_stricmp(cmd, "append-iso") == 0) {
+        return cmd_append_iso(argc,argv);
     } else if (_stricmp(cmd, "erase") == 0) {
         return cmd_erase(argc,argv);
     } else if (_stricmp(cmd, "discovery") == 0) {

@@ -104,6 +104,8 @@ bool pipeline_verify_cd_mode1_session(OpticalDrive* drive, const wchar_t* rawDat
 /* 独立ISO追加扩展：只重定位本次ISO，不导入旧文件树；MODE1入口当前仅接受纯ISO9660。
  * ISO+Joliet只提供文件地址视图，尚不开放其MODE1多会话介质路径。 */
 typedef struct { OpticalDrive* drive; const wchar_t* isoPath; HANDLE cancelEvent; bool allowBlank, finalizeDisc; } CdIsoSessionConfig;
+/* 只读查询来源及当前介质的同一TAO布局；不锁卷、不改参数，不承诺稍后写入时NWA仍相同。 */
+bool pipeline_plan_cd_iso_session(const CdIsoSessionConfig* config, MmcCdAppendPlan* data);
 bool pipeline_write_cd_iso_session(const CdIsoSessionConfig* config, CdSessionResult* result, PipelineProgressCallback callback, void* userData);
 bool pipeline_verify_cd_iso_session(OpticalDrive* drive, const wchar_t* isoPath, const MmcCdAppendPlan* data, HANDLE cancelEvent);
 
