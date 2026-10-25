@@ -17,7 +17,8 @@ static const wchar_t* const imageNames[ASSET_COUNT] = {
     L"ui_images\\tfrmmain\\Panel_ISOWRITE_SourceBrowseAdd.png", L"ui_images\\tfrmmain\\Panel_ISOWRITE_SourceOpen.png", L"ui_images\\tfrmmain\\Panel_ISOWRITE_SourceCreateCUE.png",
     L"ui_images\\tfrmmain\\Panel_ISOWRITE_DestinationLoad.png", L"ui_images\\tfrmmain\\Panel_ISOWRITE_DestinationEject.png", L"ui_images\\tfrmmain\\Panel_ISOWRITE_DestinationErase.png", L"ui_images\\tfrmmain\\Panel_ISOWRITE_DestinationChangerControl.png",
     L"ui_images\\tfrmmain\\Panel_ISOWRITE_SettingsBookType.png", L"ui_images\\tfrmmain\\Panel_ISOWRITE_SettingsAdvancedSettings.png", L"ui_images\\tfrmmain\\Panel_ISOWRITE_SettingsAutomaticWriteSpeed.png",
-    L"ui_images\\tfrmmain\\Panel_ISOWRITE_GraphDataDisplay.png", L"ui_images\\tfrmmain\\Panel_ISOWRITE_GraphDataExport.png", L"ui_images\\tfrmmain\\PngImageList32.png", L"ui_images\\tfrmmain\\PngImageList32_2.png", L"ui_images\\tfrmmain\\ImageList.png"
+    L"ui_images\\tfrmmain\\Panel_ISOWRITE_GraphDataDisplay.png", L"ui_images\\tfrmmain\\Panel_ISOWRITE_GraphDataExport.png", L"ui_images\\tfrmmain\\PngImageList32.png", L"ui_images\\tfrmmain\\PngImageList32_2.png", L"ui_images\\tfrmmain\\ImageList.png",
+    L"ui_images\\tfrmmain\\Panel_ISOREAD_SourceSectorViewer.png"
 };
 
 /* 整数化的Round近似沿用原组件的最近偶数规则，避免在正好半值时一律向上。 */

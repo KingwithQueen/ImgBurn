@@ -19,6 +19,18 @@ static void job_text(GuiJob* job, const wchar_t* format, ...) {
     va_list args; va_start(args, format); _vsnwprintf_s(job->result + used, 8192 - used, _TRUNCATE, format, args); va_end(args);
 }
 static bool job_cancelled(const GuiJob* job) { return job->cancel && WaitForSingleObject(job->cancel, 0) == WAIT_OBJECT_0; }
+static bool job_read_destination_info(GuiJob* job) {
+    job->readDestinationReady = false; job->readDestinationFreeBytes = job->readDestinationTotalBytes = 0; job->readDestinationFileSystem[0] = 0;
+    wchar_t parent[MAX_PATH], volume[MAX_PATH], system[40]; DWORD length = GetFullPathNameW(job->destination,MAX_PATH,parent,NULL);
+    if (!length || length >= MAX_PATH) { SetLastError(ERROR_INVALID_NAME); return false; }
+    wchar_t* slash = wcsrchr(parent,L'\\'); if (!slash || !slash[1]) { SetLastError(ERROR_INVALID_NAME); return false; } slash[1] = 0;
+    ULARGE_INTEGER available, total; if (!GetDiskFreeSpaceExW(parent,&available,&total,NULL)) return false;
+    if (job_cancelled(job)) { SetLastError(ERROR_CANCELLED); return false; }
+    if (!GetVolumePathNameW(parent,volume,MAX_PATH) || !GetVolumeInformationW(volume,NULL,0,NULL,NULL,NULL,system,40)) return false;
+    if (job_cancelled(job)) { SetLastError(ERROR_CANCELLED); return false; }
+    job->readDestinationFreeBytes = available.QuadPart; job->readDestinationTotalBytes = total.QuadPart; wcscpy(job->readDestinationFileSystem,system); job->readDestinationReady = true;
+    job_text(job,L"目标位置：%ls\r\n容量：%llu 字节\r\n可用空间：%llu 字节\r\n文件系统：%ls\r\n",parent,job->readDestinationTotalBytes,job->readDestinationFreeBytes,system); return true;
+}
 static void job_progress(int percent, uint32_t current, uint32_t total, void* context) {
     (void)current; (void)total; GuiJob* job = (GuiJob*)context;
     if (job->owner) PostMessageW(job->owner, GUI_JOB_PROGRESS, (WPARAM)percent, (LPARAM)job);
@@ -319,6 +331,7 @@ DWORD WINAPI imgburn_gui_job_run(void* context) {
         case GUI_CALCULATE: job->succeeded = job_prepare(job); break;
         case GUI_BUILD_IMAGE: job->succeeded = job_build(job); break;
         case GUI_INSPECT: job->succeeded = job_inspect(job); break;
+        case GUI_READ_DEST_INFO: job->succeeded = job_read_destination_info(job); break;
         case GUI_CREATE_CUE: job->succeeded = job_cue(job); break;
         case GUI_CREATE_MDS: job->succeeded = job_mds(job); break;
         case GUI_DRIVE_INFO: case GUI_VERIFY_DISC: case GUI_WRITE_DISC: case GUI_READ_DISC: case GUI_ERASE_QUICK: case GUI_ERASE_FULL: case GUI_DISCOVERY_DISC: job->succeeded = job_drive(job); break;

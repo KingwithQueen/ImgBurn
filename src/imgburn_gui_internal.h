@@ -8,7 +8,7 @@
 #include "imgburn_iso_session.h"
 
 typedef enum { GUI_EZ, GUI_READ, GUI_BUILD, GUI_WRITE, GUI_VERIFY, GUI_DISCOVERY } GuiMode;
-typedef enum { GUI_CALCULATE, GUI_BUILD_IMAGE, GUI_INSPECT, GUI_CREATE_CUE, GUI_CREATE_MDS, GUI_DRIVE_INFO, GUI_VERIFY_DISC, GUI_WRITE_DISC, GUI_DVD_INFO, GUI_DVD_PREVIEW, GUI_READ_DISC, GUI_ERASE_QUICK, GUI_ERASE_FULL, GUI_DISCOVERY_DISC, GUI_DVD_CANDIDATES, GUI_CD_ISO_PLAN, GUI_CD_ISO_WRITE, GUI_WRITE_OPTIONS } GuiOperation;
+typedef enum { GUI_CALCULATE, GUI_BUILD_IMAGE, GUI_INSPECT, GUI_CREATE_CUE, GUI_CREATE_MDS, GUI_DRIVE_INFO, GUI_VERIFY_DISC, GUI_WRITE_DISC, GUI_DVD_INFO, GUI_DVD_PREVIEW, GUI_READ_DISC, GUI_ERASE_QUICK, GUI_ERASE_FULL, GUI_DISCOVERY_DISC, GUI_DVD_CANDIDATES, GUI_CD_ISO_PLAN, GUI_CD_ISO_WRITE, GUI_WRITE_OPTIONS, GUI_READ_OPTIONS, GUI_READ_DEST_INFO } GuiOperation;
 typedef struct { wchar_t path[MAX_PATH]; } GuiPath;
 enum { GUI_JOB_PROGRESS = WM_APP + 40, GUI_JOB_DONE, GUI_JOB_STATUS };
 
@@ -38,6 +38,9 @@ typedef struct {
     uint64_t sourceBytes;
     uint32_t sourceSectors, sourceSectorBytes;
     wchar_t sourceVolume[128], sourceImplementation[128], sourceFileSystems[64]; /* 只填来源解析可确认的字段，未知值保持空。 */
+    bool readDestinationReady;
+    uint64_t readDestinationFreeBytes, readDestinationTotalBytes;
+    wchar_t readDestinationFileSystem[40]; /* 目标所在文件系统信息，与光盘来源文件系统分开。 */
     ImageBuilder builder;
     DvdNavigation navigation;
     DvdPreviewPlan preview;
