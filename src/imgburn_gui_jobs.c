@@ -67,32 +67,67 @@ static bool job_build(GuiJob* job) {
     job_text(job, L"镜像已生成：%ls\r\n", job->destination); return true;
 }
 
+static void job_source_ascii(wchar_t* output, size_t capacity, const uint8_t* input, size_t bytes) {
+    size_t length = bytes; while (length && (input[length - 1] == ' ' || !input[length - 1])) length--;
+    for (size_t i = 0; i < length; i++) if (input[i] < 32 || input[i] > 126) return;
+    if (length >= capacity) length = capacity - 1; for (size_t i = 0; i < length; i++) output[i] = input[i]; output[length] = 0;
+}
+
+/* 只识别已读到的描述符标志，不以摘要代替写入格式检查；不解析新的原始轨道地址框架。 */
+static bool job_source_descriptors(GuiJob* job, HANDLE file, DataImageSource* source, uint64_t sectors, bool logLabel) {
+    bool iso = false, joliet = false, udf = false;
+    for (uint32_t lba = 16; lba < 32 && lba < sectors; lba++) {
+        if (job_cancelled(job)) { SetLastError(ERROR_CANCELLED); return false; }
+        uint8_t descriptor[2048]; bool read;
+        if (source) read = imgburn_data_source_read(source,lba,1,descriptor);
+        else { LARGE_INTEGER position; position.QuadPart = (LONGLONG)lba * 2048; DWORD got = 0; read = SetFilePointerEx(file,position,NULL,FILE_BEGIN) && ReadFile(file,descriptor,sizeof(descriptor),&got,NULL) && got == sizeof(descriptor); }
+        /* 原镜像信息流程允许附加卷标读取失败；基本文件/描述解析结果继续保留。 */
+        if (!read) break;
+        if (descriptor[6] == 1 && !memcmp(descriptor + 1,"CD001",5)) {
+            if (descriptor[0] == 1 && !iso) {
+                iso = true; job_source_ascii(job->sourceVolume,128,descriptor + 40,32);
+                /* ECMA-119 8.4.22：Application Identifier为BP575–702，不冒充UDF实现标识。 */
+                if (descriptor[574] != '_') job_source_ascii(job->sourceImplementation,128,descriptor + 574,128);
+                if (logLabel && lba == 16) { wchar_t label[33]; for (unsigned i = 0; i < 32; i++) label[i] = descriptor[40 + i]; label[32] = 0; for (int i = 31; i >= 0 && label[i] == L' '; i--) label[i] = 0; job_text(job,L"ISO9660 卷标：%ls\r\n",label); }
+            } else if (descriptor[0] == 2 && descriptor[88] == '%' && descriptor[89] == '/' && (descriptor[90] == '@' || descriptor[90] == 'C' || descriptor[90] == 'E')) joliet = true;
+        }
+        if (!descriptor[0] && descriptor[6] == 1 && (!memcmp(descriptor + 1,"NSR02",5) || !memcmp(descriptor + 1,"NSR03",5))) udf = true;
+    }
+    if (iso) wcscpy(job->sourceFileSystems,L"ISO9660");
+    if (iso && joliet) wcscat_s(job->sourceFileSystems,64,L", Joliet");
+    if (udf) wcscat_s(job->sourceFileSystems,64,iso ? L", UDF" : L"UDF");
+    if (job_cancelled(job)) { SetLastError(ERROR_CANCELLED); return false; } return true;
+}
+
 static bool job_inspect(GuiJob* job) {
     const wchar_t* path = job->sources[0].path; DiscImageType type = imgburn_image_detect_type(path);
+    job->sourceInfoReady = false; job->sourceBytes = 0; job->sourceSectors = job->sourceSectorBytes = 0; job->sourceVolume[0] = job->sourceImplementation[0] = job->sourceFileSystems[0] = 0;
     job_text(job, L"来源：%ls\r\n", path);
     if (type == IMAGE_TYPE_CUE) {
         CueSheet* cue = (CueSheet*)calloc(1, sizeof(*cue)); if (!cue) return false;
         bool ok = imgburn_cue_parse(path, cue);
         if (ok) { job_text(job, L"CUE：%u 会话，%d 轨道，%u 扇区\r\n", cue->sessionCount, cue->trackCount, cue->totalSectors); for (int i = 0; i < cue->trackCount; i++) job_text(job, L"会话 %u / 轨道 %d：LBA %u，长度 %u，扇区 %u 字节\r\n", cue->tracks[i].sessionNumber, cue->tracks[i].trackNumber, cue->tracks[i].startLba, cue->tracks[i].sectorCount, cue->tracks[i].sectorSize); }
-        free(cue); return ok;
+        if (ok) { job->sourceSectors = cue->totalSectors; uint32_t bytes = cue->trackCount ? cue->tracks[0].sectorSize : 0; for (int i = 1; i < cue->trackCount; i++) if (cue->tracks[i].sectorSize != bytes) bytes = 0; job->sourceSectorBytes = bytes; job->sourceBytes = (uint64_t)cue->totalSectors * bytes; }
+        if (job_cancelled(job)) { SetLastError(ERROR_CANCELLED); ok = false; } job->sourceInfoReady = ok; free(cue); return ok;
     }
     if (type == IMAGE_TYPE_MDS) {
         MdsSheet* mds = (MdsSheet*)calloc(1, sizeof(*mds)); if (!mds) return false;
         bool ok = imgburn_mds_parse(path, mds);
         if (ok) { job_text(job, L"MDS：%u 会话，%d 轨道，%u 扇区\r\n分卷：%u\r\n层切换：%u\r\n路径：%ls\r\n", mds->sessionCount, mds->trackCount, mds->totalSectors, mds->dataFileCount, mds->layerBreakLba, mds->oppositeTrackPath ? L"OTP" : L"PTP"); for (unsigned i = 0; i < mds->dataFileCount; i++) job_text(job, L"%ls\r\n", mds->files[i].path); }
-        free(mds); return ok;
+        if (ok) {
+            job->sourceSectors = mds->totalSectors; uint32_t bytes = mds->trackCount ? mds->tracks[0].sectorSize : 0; for (int i = 1; i < mds->trackCount; i++) if (mds->tracks[i].sectorSize != bytes) bytes = 0; job->sourceSectorBytes = bytes; job->sourceBytes = (uint64_t)mds->totalSectors * bytes;
+            DataImageSource source = {0}; if (imgburn_data_source_open(&source,path)) { job->sourceSectors = source.sectors; job->sourceSectorBytes = 2048; job->sourceBytes = (uint64_t)source.sectors * 2048; ok = job_source_descriptors(job,NULL,&source,source.sectors,false); imgburn_data_source_close(&source); }
+        }
+        if (job_cancelled(job)) { SetLastError(ERROR_CANCELLED); ok = false; } job->sourceInfoReady = ok; free(mds); return ok;
     }
     HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL); if (file == INVALID_HANDLE_VALUE) return false;
     LARGE_INTEGER size; bool ok = GetFileSizeEx(file, &size) && size.QuadPart > 0 && size.QuadPart % 2048 == 0;
     if (ok) {
         job_text(job, L"大小：%llu 字节\r\n扇区：%llu (MODE1/2048)\r\n", (uint64_t)size.QuadPart, (uint64_t)size.QuadPart / 2048);
-        LARGE_INTEGER position; position.QuadPart = 16 * 2048; uint8_t descriptor[2048]; DWORD got = 0;
-        if (SetFilePointerEx(file, position, NULL, FILE_BEGIN) && ReadFile(file, descriptor, sizeof(descriptor), &got, NULL) && got == sizeof(descriptor) && descriptor[0] == 1 && !memcmp(descriptor + 1, "CD001", 5)) {
-            wchar_t label[33]; for (unsigned i = 0; i < 32; i++) label[i] = descriptor[40 + i]; label[32] = 0;
-            for (int i = 31; i >= 0 && label[i] == L' '; i--) label[i] = 0; job_text(job, L"ISO9660 卷标：%ls\r\n", label);
-        }
+        uint64_t sectors = (uint64_t)size.QuadPart / 2048; job->sourceBytes = (uint64_t)size.QuadPart; job->sourceSectorBytes = 2048; if (sectors <= UINT32_MAX) job->sourceSectors = (uint32_t)sectors;
+        ok = job_source_descriptors(job,file,NULL,sectors,true);
     }
-    CloseHandle(file); return ok;
+    CloseHandle(file); job->sourceInfoReady = ok; return ok;
 }
 
 static bool job_dvd_candidates(GuiJob* job) {
@@ -217,6 +252,8 @@ static bool job_drive(GuiJob* job) {
         if (ready && (mmc_get_current_profile(&drive) == MMC_PROFILE_DVD_R_SEQ || mmc_get_current_profile(&drive) == MMC_PROFILE_DVD_R_DL_SEQ)) { MmcDvdWriteFeatures features; if (mmc_get_dvd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
         if (ready && mmc_get_current_profile(&drive) == MMC_PROFILE_CD_R) { MmcCdWriteFeatures features; if (mmc_get_cd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
         if (ready) { MmcDiscInfo disc; if (mmc_read_disc_information(&drive,&disc)) {
+            /* 只供原Write按钮显示空白介质候选；完整能力/布局仍由既有写入worker检查。 */
+            job->writeMediaReady = disc.discStatus == DISC_STATUS_EMPTY && !disc.isErasable && !disc.lastSessionStatus && disc.numSessions == 1 && disc.firstTrack == 1 && disc.lastTrack == 1 && (disc.currentProfile == MMC_PROFILE_CD_R || disc.currentProfile == MMC_PROFILE_DVD_R_SEQ || disc.currentProfile == MMC_PROFILE_DVD_R_DL_SEQ || disc.currentProfile == MMC_PROFILE_DVD_PLUS_R || disc.currentProfile == MMC_PROFILE_DVD_PLUS_R_DL || disc.currentProfile == MMC_PROFILE_BD_R_SRM);
             job->eraseSupported = disc.isErasable && (disc.currentProfile == MMC_PROFILE_CD_RW || disc.currentProfile == MMC_PROFILE_DVD_RW_SEQ || disc.currentProfile == MMC_PROFILE_DVD_RW_RO);
             if (disc.currentProfile >= MMC_PROFILE_CD_ROM && disc.currentProfile <= MMC_PROFILE_CD_RW && disc.numSessions > 1) {
                 MmcCdFullToc* toc = calloc(1,sizeof(*toc));
