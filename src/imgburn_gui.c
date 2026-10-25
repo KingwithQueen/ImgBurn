@@ -32,6 +32,7 @@ enum {
     UI_DVD, UI_BD, UI_OPTIMIZE, UI_TAB, UI_TEST, UI_VERIFY_CHECK, UI_TOOL_ADD, UI_TOOL_REMOVE, UI_TOOL_UP, UI_TOOL_DOWN,
     UI_TOOL_LAYER, UI_TOOL_LBA, UI_TOOL_OTP, UI_TOOL_PTP, UI_TOOL_OK, UI_TOOL_CLOSE, UI_IMAGE_INFO, UI_REMOVE_SOURCE, UI_VERIFY_COMPARE, UI_READ_CDTEXT,
     UI_DISCOVERY_ALL, UI_DISCOVERY_CUSTOM, UI_DISCOVERY_SECTORS, UI_DISCOVERY_CAPACITY, UI_DISCOVERY_SPEED, UI_DISCOVERY_SIZE, UI_READ_SPLIT, UI_READ_RAW_MDS, UI_SESSION_PREGAPS, UI_READ_SPEED, UI_READ_AUDIO_SPEED, UI_READ_RETRIES, UI_READ_EJECT, UI_WRITE_LAYER, UI_DVD_CANDIDATES, UI_DVD_CANDIDATE_LIST,
+    UI_CD_ISO_OPEN, UI_CD_ALLOW_BLANK, UI_CD_FINALIZE, UI_CD_PLAN, UI_CD_SELECT, UI_CD_WRITE, UI_CD_PLAN_LIST, UI_CD_SOURCE, UI_CD_DRIVE,
     UI_EZ_FIRST = 1100
 };
 
@@ -43,6 +44,8 @@ typedef struct {
     GuiPath* sources;
     size_t count;
     bool candidateAccepted, candidateClosing;
+    HWND cdAllowBlank, cdFinalize, cdPlanButton, cdSelect, cdWrite;
+    bool cdClosing;
 } GuiTool;
 
 struct GuiWindow {
@@ -69,6 +72,10 @@ struct GuiWindow {
     wchar_t dvdCandidateSource[MAX_PATH];
     DataImageSource dvdCandidateLock;
     bool dvdLayerDerived, updatingWriteLayer;
+    MmcCdAppendPlan cdPlan;
+    IsoSessionSource cdIsoLock;
+    wchar_t cdPlanSource[MAX_PATH], cdPlanDrive[MAX_PATH];
+    bool cdAllowBlank, cdFinalize, cdPlanValid, cdPlanSelected;
     OpticalDriveInfo devices[MAX_OPTICAL_DRIVES];
     int driveCount, selectedDrive;
     GuiJob* job;
@@ -86,6 +93,9 @@ static void gui_refresh(GuiWindow* ui);
 static void gui_tool_open(GuiWindow* ui, GuiOperation operation);
 static void gui_dvd_candidates_open(GuiWindow* ui);
 static void gui_dvd_candidates_fill(GuiTool* tool);
+static void gui_cd_plan_fill(GuiTool* tool);
+static void gui_cd_iso_open(GuiWindow* ui);
+static bool gui_cd_iso_start(GuiWindow* ui, bool writing);
 
 static int px(const GuiWindow* ui, int value) { return MulDiv(value, (int)ui->dpi, 96); }
 static GuiAssetId gui_control_asset(UINT id) { return id == UI_SOURCE_FILE || id == UI_DESTINATION ? ASSET_BROWSE : id == UI_SOURCE_FOLDER ? ASSET_FOLDER : id == UI_REMOVE_SOURCE ? ASSET_REMOVE : id == UI_IMAGE_INFO ? ASSET_INFO : ASSET_COUNT; }
@@ -112,9 +122,31 @@ static void gui_dvd_candidates_clear(GuiWindow* ui, bool clearDerived) {
     if (ui->tool && ui->tool->operation == GUI_DVD_CANDIDATES && ui->tool->list) { ListView_DeleteAllItems(ui->tool->list); EnableWindow(ui->tool->ok,FALSE); }
 }
 
+/* 计划与只读来源一起持有，取消或上下文变化即收回写入选择。 */
+static void gui_cd_plan_clear(GuiWindow* ui) {
+    imgburn_iso_session_close(&ui->cdIsoLock); memset(&ui->cdPlan,0,sizeof(ui->cdPlan));
+    ui->cdPlanSource[0] = ui->cdPlanDrive[0] = 0; ui->cdPlanValid = ui->cdPlanSelected = false;
+    if (ui->tool && ui->tool->operation == GUI_CD_ISO_PLAN) { ListView_DeleteAllItems(ui->tool->list); EnableWindow(ui->tool->cdSelect,FALSE); EnableWindow(ui->tool->cdWrite,FALSE); }
+}
+static bool gui_cd_plan_current(const GuiWindow* ui) {
+    return ui->mode == GUI_WRITE && ui->cdPlanValid && ui->cdIsoLock.file && ui->cdIsoLock.file != INVALID_HANDLE_VALUE && ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount && !_wcsicmp(ui->sourceImage,ui->cdPlanSource) && !_wcsicmp(ui->devices[ui->selectedDrive].devicePath,ui->cdPlanDrive);
+}
+static bool gui_cd_plan_take(GuiWindow* ui, GuiJob* job) {
+    gui_cd_plan_clear(ui);
+    if (!job->succeeded || !ui->tool || ui->tool->operation != GUI_CD_ISO_PLAN || ui->tool->cdClosing || (job->cancel && WaitForSingleObject(job->cancel,0) == WAIT_OBJECT_0) || job->sourceCount != 1 || ui->mode != GUI_WRITE || _wcsicmp(ui->sourceImage,job->sources[0].path) || ui->selectedDrive < 0 || ui->selectedDrive >= ui->driveCount || _wcsicmp(ui->devices[ui->selectedDrive].devicePath,job->drive) || ui->cdAllowBlank != job->cdAllowBlank || ui->cdFinalize != job->cdFinalize) return false;
+    if (!job->cdPlan.sourceSectors || !job->cdIsoSource.file || job->cdIsoSource.file == INVALID_HANDLE_VALUE) return false;
+    ui->cdPlan = job->cdPlan; ui->cdIsoLock = job->cdIsoSource; ui->cdIsoLock.cancelEvent = NULL; memset(&job->cdIsoSource,0,sizeof(job->cdIsoSource));
+    wcscpy(ui->cdPlanSource,job->sources[0].path); wcscpy(ui->cdPlanDrive,job->drive); ui->cdPlanValid = true; return true;
+}
+static bool gui_cd_plan_select(GuiWindow* ui) {
+    if (ui->job || !gui_cd_plan_current(ui)) { gui_cd_plan_clear(ui); return false; }
+    ui->cdPlanSelected = true; if (ui->tool && ui->tool->operation == GUI_CD_ISO_PLAN) gui_cd_plan_fill(ui->tool); gui_status(ui,L"已明确选择追加计划，可在扩展窗口执行写入并回读"); return true;
+}
+
 static void gui_dvd_source_set(GuiWindow* ui, const wchar_t* path) {
-    if (_wcsicmp(ui->sourceImage,path)) gui_dvd_candidates_clear(ui,true);
+    if (_wcsicmp(ui->sourceImage,path)) { gui_dvd_candidates_clear(ui,true); gui_cd_plan_clear(ui); }
     wcscpy(ui->sourceImage,path);
+    if (ui->tool && ui->tool->operation == GUI_CD_ISO_PLAN && !ui->job) gui_cd_plan_fill(ui->tool);
 }
 
 static bool gui_dvd_candidates_take(GuiWindow* ui, GuiJob* job) {
@@ -224,7 +256,7 @@ static void gui_menu(GuiWindow* ui) {
         wchar_t size[80]; uint64_t sectors = ui->discoveryAll ? ui->discoveryCapacity : _wcstoui64(ui->discoveryCount,NULL,10); swprintf(size,80,L"数据大小：%.2f MiB",(double)sectors / 512.0); SetWindowTextW(GetDlgItem(ui->window,UI_DISCOVERY_SIZE),size);
     }
     if (ui->writeLayer) EnableWindow(ui->writeLayer,idle);
-    if (write) { const wchar_t* extension = wcsrchr(ui->sourceImage,L'.'); EnableWindow(GetDlgItem(ui->window,UI_DVD_CANDIDATES),idle && extension && (!_wcsicmp(extension,L".iso") || !_wcsicmp(extension,L".bin") || !_wcsicmp(extension,L".mds"))); }
+    if (write) { const wchar_t* extension = wcsrchr(ui->sourceImage,L'.'); EnableWindow(GetDlgItem(ui->window,UI_DVD_CANDIDATES),idle && extension && (!_wcsicmp(extension,L".iso") || !_wcsicmp(extension,L".bin") || !_wcsicmp(extension,L".mds"))); EnableWindow(GetDlgItem(ui->window,UI_CD_ISO_OPEN),idle && drive && extension && !_wcsicmp(extension,L".iso")); }
     if (ui->go) EnableWindow(ui->go, build ? idle && source && !ui->outputDevice : read ? readAction : discovery ? discoveryAction : (write || verify) && discAction);
     HMENU bar = CreateMenu(), file = CreatePopupMenu(), view = CreatePopupMenu(), mode = CreatePopupMenu(), tools = CreatePopupMenu(), help = CreatePopupMenu();
     if (build || write || verify) item(file, UI_SOURCE_FILE, build ? L"浏览文件(&M)..." : L"浏览来源文件(&M)...\tCtrl+O", idle && (!verify || ui->verifyAgainstImage));
@@ -256,7 +288,7 @@ static void gui_menu(GuiWindow* ui) {
 }
 
 static void gui_mode(GuiWindow* ui, GuiMode mode) {
-    gui_read_controls(ui); HWND child = GetWindow(ui->window, GW_CHILD);
+    gui_read_controls(ui); if (mode != GUI_WRITE) gui_cd_plan_clear(ui); HWND child = GetWindow(ui->window, GW_CHILD);
     while (child) { HWND next = GetWindow(child, GW_HWNDNEXT); if (child != ui->status) DestroyWindow(child); child = next; }
     ui->sources = ui->sourceEdit = ui->destination = ui->drives = ui->info = ui->progress = ui->go = ui->cancel = ui->tabs = NULL;
     ui->fs = ui->udf = ui->label = ui->dvd = ui->bd = ui->optimize = ui->verify = ui->compare = ui->readText = ui->readSplit = ui->readRawMds = ui->sessionPregaps = ui->discoverySectors = ui->discoverySpeed = ui->readSpeed = ui->readAudioSpeed = ui->readRetries = ui->readEject = ui->writeLayer = NULL; ui->mode = mode;
@@ -295,7 +327,7 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
         ctl(ui, ui->window, L"BUTTON", L"镜像信息", WS_TABSTOP, UI_IMAGE_INFO, 16, 68, 90, 26);
         if (mode == GUI_WRITE) ctl(ui,ui->window,L"BUTTON",L"查询视频换层单元...",WS_TABSTOP,UI_DVD_CANDIDATES,112,68,204,26);
     }
-    if (mode == GUI_WRITE) { ctl(ui,ui->window,L"STATIC",L"双层 L0 扇区（留空自动）：",0,0,18,104,190,22); ui->writeLayer = ctl(ui,ui->window,L"EDIT",ui->writeLayerValue,WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,UI_WRITE_LAYER,210,101,106,24); SendMessageW(ui->writeLayer,EM_SETLIMITTEXT,10,0); }
+    if (mode == GUI_WRITE) { ctl(ui,ui->window,L"STATIC",L"双层 L0 扇区（留空自动）：",0,0,18,104,190,22); ui->writeLayer = ctl(ui,ui->window,L"EDIT",ui->writeLayerValue,WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,UI_WRITE_LAYER,210,101,106,24); SendMessageW(ui->writeLayer,EM_SETLIMITTEXT,10,0); ctl(ui,ui->window,L"BUTTON",L"CD-R 独立 ISO 追加（扩展）...",WS_TABSTOP,UI_CD_ISO_OPEN,16,132,300,24); }
     int targetY = build ? 205 : mode == GUI_READ ? 195 : 170; ctl(ui, ui->window, L"BUTTON", imageDestination || mode == GUI_READ ? L"目标" : mode == GUI_VERIFY ? L"镜像文件" : L"目标驱动器", BS_GROUPBOX, 0, 8, targetY, 320, 67);
     if (imageDestination || mode == GUI_READ || mode == GUI_VERIFY) {
         ui->destination = ctl(ui, ui->window, L"EDIT", mode == GUI_VERIFY ? ui->sourceImage : mode == GUI_READ ? ui->readImage : ui->destinationImage, WS_TABSTOP | ES_AUTOHSCROLL, UI_DEST_EDIT, 16, targetY + 24, 276, 24);
@@ -356,6 +388,7 @@ static void gui_build_page(GuiWindow* ui) {
 }
 
 static void gui_refresh(GuiWindow* ui) {
+    gui_cd_plan_clear(ui);
     ui->driveCount = spti_enumerate_drives(ui->devices, MAX_OPTICAL_DRIVES); ui->selectedDrive = ui->driveCount > 0 ? 0 : -1; ui->mediaReady = ui->eraseSupported = ui->testWriteSupported = false; ui->discoveryCapacity = 0;
     if (ui->drives) { SendMessageW(ui->drives, CB_RESETCONTENT, 0, 0); for (int i = 0; i < ui->driveCount; i++) { wchar_t text[128]; swprintf(text, 128, L"%c:  %hs %hs", ui->devices[i].driveLetter ? ui->devices[i].driveLetter : L'?', ui->devices[i].vendorId, ui->devices[i].productId); SendMessageW(ui->drives, CB_ADDSTRING, 0, (LPARAM)text); } SendMessageW(ui->drives, CB_SETCURSEL, ui->selectedDrive, 0); }
     wchar_t text[80]; swprintf(text, 80, L"找到 %d 个光驱。", ui->driveCount); gui_log(ui, text); gui_menu(ui);
@@ -384,15 +417,34 @@ static GuiJob* gui_job(GuiWindow* ui, GuiOperation operation, const GuiPath* pat
     if (!job->sources || !job->cancel) { imgburn_gui_job_free(job); return NULL; }
     memcpy(job->sources, paths, count * sizeof(*paths)); job->sourceCount = count; job->owner = ui->window; job->operation = operation;
     wcscpy(job->destination, ui->mode == GUI_READ ? ui->readImage : ui->destinationImage); wcscpy(job->label, ui->volumeLabel); job->fsTypes = ui->fsTypes; job->revision = ui->revision; job->dvdVideo = ui->dvdVideo; job->bluray = ui->bluray; job->optimize = ui->deduplicate; job->testMode = (operation == GUI_WRITE_DISC || operation == GUI_DISCOVERY_DISC) && ui->testMode; job->verify = ui->verifyAfter && !job->testMode; job->speed = 0xFFFF; job->oppositeTrackPath = true;
+    job->cdAllowBlank = ui->cdAllowBlank; job->cdFinalize = ui->cdFinalize;
     if (ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount) wcscpy(job->drive, ui->devices[ui->selectedDrive].devicePath); return job;
 }
 static bool gui_launch(GuiWindow* ui, GuiJob* job) {
     if (!job || ui->job) { imgburn_gui_job_free(job); return false; }
     ui->job = job; job->thread = CreateThread(NULL, 0, imgburn_gui_job_run, job, 0, NULL);
     if (!job->thread) { ui->job = NULL; imgburn_gui_job_free(job); return false; }
-    if (ui->go) EnableWindow(ui->go, FALSE); if (ui->cancel) EnableWindow(ui->cancel, job->operation == GUI_CALCULATE || job->operation == GUI_BUILD_IMAGE || job->operation == GUI_CREATE_CUE || job->operation == GUI_DVD_CANDIDATES || job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC || job->operation == GUI_ERASE_QUICK || job->operation == GUI_ERASE_FULL || job->operation == GUI_DISCOVERY_DISC);
+    if (ui->go) EnableWindow(ui->go, FALSE); if (ui->cancel) EnableWindow(ui->cancel, job->operation == GUI_CALCULATE || job->operation == GUI_BUILD_IMAGE || job->operation == GUI_CREATE_CUE || job->operation == GUI_DVD_CANDIDATES || job->operation == GUI_CD_ISO_PLAN || job->operation == GUI_CD_ISO_WRITE || job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC || job->operation == GUI_ERASE_QUICK || job->operation == GUI_ERASE_FULL || job->operation == GUI_DISCOVERY_DISC);
     if (job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC || job->operation == GUI_ERASE_QUICK || job->operation == GUI_ERASE_FULL || job->operation == GUI_DISCOVERY_DISC) { EnableWindow(ui->destination,FALSE); EnableWindow(ui->drives,FALSE); }
     gui_write_checks(ui); gui_status(ui, L"正在执行..."); gui_menu(ui); return true;
+}
+
+static bool gui_cd_iso_start(GuiWindow* ui, bool writing) {
+    if (ui->job || !ui->tool || ui->tool->operation != GUI_CD_ISO_PLAN || ui->mode != GUI_WRITE) return false;
+    gui_read_controls(ui); GuiTool* tool = ui->tool;
+    bool allow = SendMessageW(tool->cdAllowBlank,BM_GETCHECK,0,0) == BST_CHECKED, finalize = SendMessageW(tool->cdFinalize,BM_GETCHECK,0,0) == BST_CHECKED;
+    if (allow != ui->cdAllowBlank || finalize != ui->cdFinalize) { ui->cdAllowBlank = allow; ui->cdFinalize = finalize; gui_cd_plan_clear(ui); }
+    if (ui->selectedDrive < 0 || ui->selectedDrive >= ui->driveCount || !ui->sourceImage[0]) return false;
+    if (writing && (!ui->cdPlanSelected || !gui_cd_plan_current(ui))) { gui_cd_plan_clear(ui); SetWindowTextW(tool->candidateStatus,L"请先只读规划并明确使用此计划。"); gui_cd_plan_fill(tool); return false; }
+    if (!writing) gui_cd_plan_clear(ui);
+    GuiPath path = {0}; wcscpy(path.path,ui->sourceImage); GuiJob* job = gui_job(ui,writing ? GUI_CD_ISO_WRITE : GUI_CD_ISO_PLAN,&path,1);
+    if (!job) { gui_cd_plan_clear(ui); return false; }
+    if (writing) {
+        job->cdPlan = ui->cdPlan; job->cdPlanSelected = true; job->cdIsoSource = ui->cdIsoLock; job->cdIsoSource.cancelEvent = job->cancel; memset(&ui->cdIsoLock,0,sizeof(ui->cdIsoLock));
+        ui->cdPlanValid = ui->cdPlanSelected = false;
+    }
+    if (!gui_launch(ui,job)) { gui_cd_plan_clear(ui); SetWindowTextW(tool->candidateStatus,L"无法启动后台操作，请重新规划。"); gui_cd_plan_fill(tool); return false; }
+    SetWindowTextW(tool->candidateStatus,writing ? L"正在执行明确选择的计划并回读；实际状态会在完成后显示。" : L"正在后台只读查询来源和光盘布局..."); gui_cd_plan_fill(tool); return true;
 }
 
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
@@ -468,12 +520,50 @@ static void gui_dvd_candidates_open(GuiWindow* ui) {
     if (!gui_launch(ui,job)) { SetWindowTextW(tool->candidateStatus,L"无法启动后台候选查询，请关闭后重试。"); SetWindowTextW(GetDlgItem(window,UI_TOOL_CLOSE),L"关闭"); }
 }
 
+static void gui_cd_plan_fill(GuiTool* tool) {
+    GuiWindow* ui = tool->parent; bool busy = ui->job != NULL, current = gui_cd_plan_current(ui);
+    SetWindowTextW(GetDlgItem(tool->window,UI_CD_SOURCE),ui->sourceImage);
+    SetWindowTextW(GetDlgItem(tool->window,UI_CD_DRIVE),ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount ? ui->devices[ui->selectedDrive].devicePath : L"未选择目标光驱");
+    ListView_DeleteAllItems(tool->list);
+    if (ui->cdPlan.sourceSectors) {
+        const MmcCdAppendPlan* p = &ui->cdPlan;
+        const wchar_t* names[] = {L"会话",L"轨号",L"原末会话 lead-out",L"下一可写位置 NWA",L"数据起始 LBA",L"数据结束 LBA（不含）",L"来源扇区",L"可用数据扇区",L"剩余数据扇区",L"扇区字节",L"写类型（TAO）",L"轨道模式（MODE1）",L"数据块类型（2048）"};
+        const uint32_t values[] = {p->sessionNumber,p->trackNumber,p->previousLeadOutLba,p->nextWritableAddress,p->dataStartLba,p->dataEndLba,p->sourceSectors,p->availableDataSectors,p->remainingDataSectors,p->sectorBytes,p->writeType,p->trackMode,p->dataBlockType};
+        for (unsigned i = 0; i < 13; i++) { wchar_t number[32]; swprintf(number,32,L"%u",values[i]); LVITEMW item = {0}; item.mask = LVIF_TEXT; item.iItem = (int)i; item.pszText = (wchar_t*)names[i]; SendMessageW(tool->list,LVM_INSERTITEMW,0,(LPARAM)&item); item.iSubItem = 1; item.pszText = number; SendMessageW(tool->list,LVM_SETITEMTEXTW,i,(LPARAM)&item); }
+    }
+    SendMessageW(tool->cdAllowBlank,BM_SETCHECK,ui->cdAllowBlank ? BST_CHECKED : BST_UNCHECKED,0); SendMessageW(tool->cdFinalize,BM_SETCHECK,ui->cdFinalize ? BST_CHECKED : BST_UNCHECKED,0);
+    EnableWindow(tool->cdAllowBlank,!busy); EnableWindow(tool->cdFinalize,!busy);
+    EnableWindow(tool->cdPlanButton,!busy && ui->mode == GUI_WRITE && ui->sourceImage[0] && ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount);
+    EnableWindow(tool->cdSelect,!busy && current && !ui->cdPlanSelected); EnableWindow(tool->cdWrite,!busy && current && ui->cdPlanSelected);
+    SetWindowTextW(GetDlgItem(tool->window,UI_TOOL_CLOSE),busy ? L"取消" : L"关闭"); EnableWindow(GetDlgItem(tool->window,UI_TOOL_CLOSE),!tool->cdClosing);
+}
+static void gui_cd_iso_open(GuiWindow* ui) {
+    if (ui->mode != GUI_WRITE || ui->tool || ui->job || !ui->sourceImage[0] || ui->selectedDrive < 0 || ui->selectedDrive >= ui->driveCount) return;
+    GuiTool* tool = calloc(1,sizeof(*tool)); if (!tool) return; tool->parent = ui; tool->operation = GUI_CD_ISO_PLAN; ui->tool = tool;
+    RECT rect = {0,0,px(ui,654),px(ui,460)}; AdjustWindowRectEx(&rect,WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,FALSE,WS_EX_DLGMODALFRAME);
+    HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME,L"ImgBurnCommand",L"CD-R 独立 ISO 追加（扩展）",WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,CW_USEDEFAULT,CW_USEDEFAULT,rect.right - rect.left,rect.bottom - rect.top,ui->window,NULL,ui->instance,tool);
+    if (!window) { ui->tool = NULL; free(tool); return; } EnableWindow(ui->window,FALSE); ShowWindow(window,SW_SHOW);
+}
+
 static void gui_tool_fill(GuiTool* tool) { SendMessageW(tool->list, LB_RESETCONTENT, 0, 0); for (size_t i = 0; i < tool->count; i++) SendMessageW(tool->list, LB_ADDSTRING, 0, (LPARAM)tool->sources[i].path); EnableWindow(tool->ok, tool->count != 0); }
 static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     GuiTool* tool = (GuiTool*)GetWindowLongPtrW(window, GWLP_USERDATA);
     if (message == WM_NCCREATE) { tool = (GuiTool*)((CREATESTRUCTW*)lp)->lpCreateParams; tool->window = window; SetWindowLongPtrW(window, GWLP_USERDATA, (LONG_PTR)tool); }
     if (!tool) return DefWindowProcW(window, message, wp, lp); GuiWindow* ui = tool->parent;
     if (message == WM_CREATE) {
+        if (tool->operation == GUI_CD_ISO_PLAN) {
+            ctl(ui,window,L"STATIC",L"独立纯 ISO9660，不合并旧文件树。默认只读规划；写入后完整回读。",0,0,10,10,634,22);
+            ctl(ui,window,L"STATIC",ui->sourceImage,SS_PATHELLIPSIS,UI_CD_SOURCE,10,36,634,22); ctl(ui,window,L"STATIC",L"",0,UI_CD_DRIVE,10,60,634,22);
+            tool->cdAllowBlank = ctl(ui,window,L"BUTTON",L"允许空白盘首会话",WS_TABSTOP | BS_AUTOCHECKBOX,UI_CD_ALLOW_BLANK,10,86,240,22);
+            tool->cdFinalize = ctl(ui,window,L"BUTTON",L"本次封盘（不选则留盘开放）",WS_TABSTOP | BS_AUTOCHECKBOX,UI_CD_FINALIZE,270,86,374,22);
+            tool->list = ctl(ui,window,WC_LISTVIEWW,L"",WS_TABSTOP | WS_VSCROLL | LVS_REPORT | LVS_SINGLESEL,UI_CD_PLAN_LIST,10,112,634,224); ListView_SetExtendedListViewStyle(tool->list,LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+            const wchar_t* columns[] = {L"计划字段",L"值"}; for (unsigned i = 0; i < 2; i++) { LVCOLUMNW column = {0}; column.mask = LVCF_TEXT | LVCF_WIDTH; column.pszText = (wchar_t*)columns[i]; column.cx = px(ui,i ? 280 : 320); SendMessageW(tool->list,LVM_INSERTCOLUMNW,i,(LPARAM)&column); }
+            tool->candidateStatus = ctl(ui,window,L"EDIT",L"请选择首会话/结束方式，再点击只读规划。尚未选择计划，不能写入。",ES_MULTILINE | ES_READONLY | WS_VSCROLL,0,10,344,634,64);
+            tool->cdPlanButton = ctl(ui,window,L"BUTTON",L"只读规划",WS_TABSTOP | BS_DEFPUSHBUTTON,UI_CD_PLAN,10,420,104,28);
+            tool->cdSelect = ctl(ui,window,L"BUTTON",L"使用此计划",WS_TABSTOP,UI_CD_SELECT,124,420,124,28);
+            tool->cdWrite = ctl(ui,window,L"BUTTON",L"写入并回读",WS_TABSTOP,UI_CD_WRITE,258,420,144,28);
+            ctl(ui,window,L"BUTTON",L"关闭",WS_TABSTOP,UI_TOOL_CLOSE,556,420,88,28); gui_cd_plan_fill(tool); return 0;
+        }
         if (tool->operation == GUI_DVD_CANDIDATES) {
             ctl(ui,window,L"STATIC",ui->sourceImage,SS_PATHELLIPSIS,0,10,10,824,24);
             tool->list = ctl(ui,window,WC_LISTVIEWW,L"",WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,UI_DVD_CANDIDATE_LIST,10,42,824,250); ListView_SetExtendedListViewStyle(tool->list,LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
@@ -499,7 +589,15 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
         return 0;
     }
     if (message == WM_COMMAND) {
-        if (ui->job && LOWORD(wp) != UI_TOOL_CLOSE && !(tool->operation == GUI_DVD_CANDIDATES && LOWORD(wp) == IDCANCEL)) return 0;
+        if (ui->job && LOWORD(wp) != UI_TOOL_CLOSE && !((tool->operation == GUI_DVD_CANDIDATES || tool->operation == GUI_CD_ISO_PLAN) && LOWORD(wp) == IDCANCEL)) return 0;
+        if (tool->operation == GUI_CD_ISO_PLAN) {
+            if (LOWORD(wp) == UI_CD_PLAN) gui_cd_iso_start(ui,false);
+            else if (LOWORD(wp) == UI_CD_SELECT) { if (gui_cd_plan_select(ui)) SetWindowTextW(tool->candidateStatus,L"已明确使用此计划。可点击写入并回读；执行前会再次核对实际布局。"); else { gui_cd_plan_fill(tool); SetWindowTextW(tool->candidateStatus,L"计划已失效，请重新只读规划。"); } }
+            else if (LOWORD(wp) == UI_CD_WRITE) gui_cd_iso_start(ui,true);
+            else if (LOWORD(wp) == UI_CD_ALLOW_BLANK || LOWORD(wp) == UI_CD_FINALIZE) { ui->cdAllowBlank = SendMessageW(tool->cdAllowBlank,BM_GETCHECK,0,0) == BST_CHECKED; ui->cdFinalize = SendMessageW(tool->cdFinalize,BM_GETCHECK,0,0) == BST_CHECKED; gui_cd_plan_clear(ui); gui_cd_plan_fill(tool); SetWindowTextW(tool->candidateStatus,L"选项已变更，请重新只读规划并选择。"); }
+            else if (LOWORD(wp) == UI_TOOL_CLOSE || LOWORD(wp) == IDCANCEL) SendMessageW(window,WM_CLOSE,0,0);
+            return 0;
+        }
         if (tool->operation == GUI_DVD_CANDIDATES) {
             if (LOWORD(wp) == UI_TOOL_OK) { int selected = ListView_GetNextItem(tool->list,-1,LVNI_SELECTED); if (selected >= 0 && gui_dvd_candidate_select(ui,(size_t)selected)) { tool->candidateAccepted = true; gui_status(ui,L"已明确选择视频单元，双层 L0 已填入。"); DestroyWindow(window); } else { gui_dvd_candidates_clear(ui,true); SetWindowTextW(tool->candidateStatus,L"候选来源已失效，请关闭后重新查询。"); } }
             else if (LOWORD(wp) == UI_TOOL_CLOSE || LOWORD(wp) == IDCANCEL) SendMessageW(window,WM_CLOSE,0,0);
@@ -519,8 +617,8 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
             case UI_TOOL_CLOSE: SendMessageW(window, WM_CLOSE, 0, 0); break;
         } return 0;
     }
-    if (message == WM_CLOSE) { if (tool->operation == GUI_DVD_CANDIDATES) { tool->candidateClosing = true; gui_dvd_candidates_clear(ui,true); if (!ui->job) gui_status(ui,L"已关闭候选窗口，未保留派生单元选择"); } if (!ui->job) DestroyWindow(window); else { SetEvent(ui->job->cancel); EnableWindow(GetDlgItem(window,UI_TOOL_CLOSE),FALSE); SetWindowTextW(window,L"正在取消..."); } return 0; }
-    if (message == WM_DESTROY) { if (tool->operation == GUI_DVD_CANDIDATES && !tool->candidateAccepted) gui_dvd_candidates_clear(ui,true); EnableWindow(ui->window, TRUE); SetForegroundWindow(ui->window); ui->tool = NULL; SetWindowLongPtrW(window,GWLP_USERDATA,0); free(tool->sources); free(tool); return 0; }
+    if (message == WM_CLOSE) { if (tool->operation == GUI_CD_ISO_PLAN) { tool->cdClosing = true; gui_cd_plan_clear(ui); } if (tool->operation == GUI_DVD_CANDIDATES) { tool->candidateClosing = true; gui_dvd_candidates_clear(ui,true); if (!ui->job) gui_status(ui,L"已关闭候选窗口，未保留派生单元选择"); } if (!ui->job) DestroyWindow(window); else { SetEvent(ui->job->cancel); EnableWindow(GetDlgItem(window,UI_TOOL_CLOSE),FALSE); SetWindowTextW(window,L"正在取消..."); } return 0; }
+    if (message == WM_DESTROY) { if (tool->operation == GUI_CD_ISO_PLAN) gui_cd_plan_clear(ui); if (tool->operation == GUI_DVD_CANDIDATES && !tool->candidateAccepted) gui_dvd_candidates_clear(ui,true); EnableWindow(ui->window, TRUE); SetForegroundWindow(ui->window); ui->tool = NULL; SetWindowLongPtrW(window,GWLP_USERDATA,0); free(tool->sources); free(tool); return 0; }
     return DefWindowProcW(window, message, wp, lp);
 }
 
@@ -563,6 +661,20 @@ static void gui_ez_draw(GuiWindow* ui, DRAWITEMSTRUCT* draw) {
 
 static void gui_complete(GuiWindow* ui, GuiJob* job) {
     if (ui->job != job) return; WaitForSingleObject(job->thread, INFINITE); ui->job = NULL;
+    if (job->operation == GUI_CD_ISO_PLAN || job->operation == GUI_CD_ISO_WRITE) {
+        bool planning = job->operation == GUI_CD_ISO_PLAN;
+        if (planning) {
+            if (!gui_cd_plan_take(ui,job) && job->succeeded) { job->succeeded = false; job->error = job->cancel && WaitForSingleObject(job->cancel,0) == WAIT_OBJECT_0 ? ERROR_CANCELLED : ERROR_MEDIA_CHANGED; wcscpy(job->result,job->error == ERROR_CANCELLED ? L"追加规划已取消。\r\n" : L"来源、驱动器或选项已变化，请重新规划。\r\n"); }
+        } else { gui_cd_plan_clear(ui); ui->cdPlan = job->cdResult.data; }
+        if (ui->progress) SendMessageW(ui->progress,PBM_SETPOS,job->succeeded ? 100 : 0,0); if (ui->info) SetWindowTextW(ui->info,job->result); gui_log(ui,job->result);
+        gui_status(ui,job->succeeded ? planning ? L"只读规划完成，请明确使用此计划" : L"独立 ISO 会话已写入并通过回读" : job->error == ERROR_CANCELLED ? L"追加操作已取消" : job->error == ERROR_NOT_SUPPORTED ? L"来源或介质不在追加扩展支持范围" : L"追加操作停止，请查看实际结果");
+        if (ui->cancel) EnableWindow(ui->cancel,FALSE);
+        if (ui->tool && ui->tool->operation == GUI_CD_ISO_PLAN) {
+            if (ui->tool->cdClosing) DestroyWindow(ui->tool->window);
+            else { gui_cd_plan_fill(ui->tool); SetWindowTextW(ui->tool->candidateStatus,job->result); }
+        }
+        imgburn_gui_job_free(job); gui_write_checks(ui); gui_menu(ui); return;
+    }
     if (job->operation == GUI_DVD_CANDIDATES) {
         bool accepted = gui_dvd_candidates_take(ui,job);
         if (!accepted && job->succeeded) { job->succeeded = false; job->error = job->cancel && WaitForSingleObject(job->cancel,0) == WAIT_OBJECT_0 ? ERROR_CANCELLED : ERROR_MEDIA_CHANGED; wcscpy(job->result,job->error == ERROR_CANCELLED ? L"候选查询已取消。\r\n" : L"候选来源已失效，请重新查询。\r\n"); }
@@ -636,7 +748,7 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
         UINT command = LOWORD(wp);
         if (command >= UI_EZ_FIRST && command < UI_EZ_FIRST + 6) { static const GuiMode modes[] = {GUI_WRITE,GUI_BUILD,GUI_READ,GUI_BUILD,GUI_VERIFY,GUI_DISCOVERY}; ui->outputDevice = command == UI_EZ_FIRST + 1; gui_mode(ui,modes[command - UI_EZ_FIRST]); return 0; }
         if (command == UI_LOG) { ui->logVisible = !ui->logVisible; ShowWindow(ui->logWindow,ui->logVisible ? SW_SHOWNOACTIVATE : SW_HIDE); gui_menu(ui); return 0; }
-        if (ui->job) { if (command == UI_CANCEL) { SetEvent(ui->job->cancel); EnableWindow(ui->cancel,FALSE); gui_status(ui,ui->job->operation == GUI_ERASE_QUICK || ui->job->operation == GUI_ERASE_FULL ? L"正在取消；已经开始的擦除须等待设备结束..." : L"正在取消..."); } return 0; }
+        if (ui->job) { if (command == UI_CANCEL) { SetEvent(ui->job->cancel); if (ui->job->operation == GUI_CD_ISO_PLAN || ui->job->operation == GUI_CD_ISO_WRITE) gui_cd_plan_clear(ui); EnableWindow(ui->cancel,FALSE); gui_status(ui,ui->job->operation == GUI_ERASE_QUICK || ui->job->operation == GUI_ERASE_FULL ? L"正在取消；已经开始的擦除须等待设备结束..." : L"正在取消..."); } return 0; }
         switch (command) {
             case UI_MODE_EZ: gui_mode(ui,GUI_EZ); break; case UI_MODE_READ: gui_mode(ui,GUI_READ); break; case UI_MODE_BUILD: gui_mode(ui,GUI_BUILD); break; case UI_MODE_WRITE: gui_mode(ui,GUI_WRITE); break; case UI_MODE_VERIFY: gui_mode(ui,GUI_VERIFY); break; case UI_MODE_DISCOVERY: gui_mode(ui,GUI_DISCOVERY); break;
             case UI_SOURCE_FILE: gui_source(ui,false); break; case UI_SOURCE_FOLDER: gui_source(ui,true); break;
@@ -668,8 +780,9 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
             case UI_BD: if (ui->dvd && SendMessageW(ui->bd,BM_GETCHECK,0,0) == BST_CHECKED) SendMessageW(ui->dvd,BM_SETCHECK,BST_UNCHECKED,0); break;
             case UI_IMAGE_INFO: if (ui->sourceImage[0]) gui_start(ui,GUI_INSPECT); break;
             case UI_DVD_CANDIDATES: gui_dvd_candidates_open(ui); break;
+            case UI_CD_ISO_OPEN: gui_cd_iso_open(ui); break;
             case UI_WRITE_LAYER: if (HIWORD(wp) == EN_CHANGE && ui->writeLayer && !ui->updatingWriteLayer) { wchar_t value[16]; GetWindowTextW(ui->writeLayer,value,16); gui_dvd_candidates_clear(ui,false); wcscpy(ui->writeLayerValue,value); } break;
-            case UI_DRIVE: if (HIWORD(wp) == CBN_SELCHANGE) { gui_read_controls(ui); ui->mediaReady = ui->eraseSupported = ui->testWriteSupported = false; ui->discoveryCapacity = 0; gui_menu(ui); if (ui->selectedDrive >= 0) gui_start(ui,GUI_DRIVE_INFO); } break;
+            case UI_DRIVE: if (HIWORD(wp) == CBN_SELCHANGE) { gui_cd_plan_clear(ui); gui_read_controls(ui); ui->mediaReady = ui->eraseSupported = ui->testWriteSupported = false; ui->discoveryCapacity = 0; gui_menu(ui); if (ui->selectedDrive >= 0) gui_start(ui,GUI_DRIVE_INFO); } break;
             case UI_HELP_GUIDES: ShellExecuteW(window,L"open",L"https://forum.imgburn.com/forum/4-guides/",NULL,NULL,SW_SHOWNORMAL); break;
             case UI_HELP_SITE: ShellExecuteW(window,L"open",L"https://www.imgburn.com/",NULL,NULL,SW_SHOWNORMAL); break;
             case UI_HELP_FORUM: ShellExecuteW(window,L"open",L"https://forum.imgburn.com/",NULL,NULL,SW_SHOWNORMAL); break;
@@ -702,5 +815,5 @@ int imgburn_gui_show(HINSTANCE instance, int show) {
         while (GetMessageW(&msg,NULL,0,0) > 0) { if (!ui->tool && msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN && msg.hwnd == ui->sourceEdit && ui->mode == GUI_BUILD) { wchar_t path[MAX_PATH]; GetWindowTextW(ui->sourceEdit,path,MAX_PATH); if (gui_paths_add(&ui->paths,&ui->pathCount,path)) gui_mode(ui,GUI_BUILD); else MessageBoxW(window,L"无法添加该路径。",L"ImgBurn",MB_OK | MB_ICONERROR); continue; } if (ui->tool && IsDialogMessageW(ui->tool->window,&msg)) continue; if ((ui->tool || !TranslateAcceleratorW(window,accel,&msg)) && !IsDialogMessageW(window,&msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); } }
         if (accel) DestroyAcceleratorTable(accel);
     }
-    gui_dvd_candidates_clear(ui,false); free(ui->paths); imgburn_gui_assets_free(&ui->assets); if (ui->font) DeleteObject(ui->font); if (ui->bold) DeleteObject(ui->bold); if (SUCCEEDED(comResult)) CoUninitialize(); free(ui); return window ? 0 : 1;
+    gui_dvd_candidates_clear(ui,false); gui_cd_plan_clear(ui); free(ui->paths); imgburn_gui_assets_free(&ui->assets); if (ui->font) DeleteObject(ui->font); if (ui->bold) DeleteObject(ui->bold); if (SUCCEEDED(comResult)) CoUninitialize(); free(ui); return window ? 0 : 1;
 }

@@ -107,6 +107,8 @@ typedef struct { OpticalDrive* drive; const wchar_t* isoPath; HANDLE cancelEvent
 /* 只读查询来源及当前介质的同一TAO布局；不锁卷、不改参数，不承诺稍后写入时NWA仍相同。 */
 bool pipeline_plan_cd_iso_session(const CdIsoSessionConfig* config, MmcCdAppendPlan* data);
 bool pipeline_write_cd_iso_session(const CdIsoSessionConfig* config, CdSessionResult* result, PipelineProgressCallback callback, void* userData);
+/* GUI明确选择后的计划在执行前和最终NWA复查时必须仍相同；旧入口不依赖此选择。 */
+bool pipeline_write_cd_iso_session_planned(const CdIsoSessionConfig* config, const MmcCdAppendPlan* expected, CdSessionResult* result, PipelineProgressCallback callback, void* userData);
 bool pipeline_verify_cd_iso_session(OpticalDrive* drive, const wchar_t* isoPath, const MmcCdAppendPlan* data, HANDLE cancelEvent);
 
 /* Discovery 使用内存零数据，sectors 为零时写入全部空余扇区。 */

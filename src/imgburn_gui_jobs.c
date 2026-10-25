@@ -121,6 +121,60 @@ failed:
     return false;
 }
 
+static void job_cd_iso_layout(GuiJob* job, const MmcCdAppendPlan* data) {
+    job_text(job,L"会话：%u\r\n轨号：%u\r\n原末会话 lead-out：%u\r\n下一可写位置 NWA：%u\r\n",data->sessionNumber,data->trackNumber,data->previousLeadOutLba,data->nextWritableAddress);
+    job_text(job,L"数据起始 LBA：%u\r\n数据结束 LBA（不含）：%u\r\n来源扇区：%u\r\n可用数据扇区：%u\r\n剩余数据扇区：%u\r\n",data->dataStartLba,data->dataEndLba,data->sourceSectors,data->availableDataSectors,data->remainingDataSectors);
+    job_text(job,L"扇区字节：%u\r\n写类型：%u（TAO）\r\n轨道模式：%u（MODE1）\r\n数据块类型：%u（2048）\r\n",data->sectorBytes,data->writeType,data->trackMode,data->dataBlockType);
+}
+
+/* 独立ISO扩展不经过原Write打开流程；默认规划只查询，写入只消费明确选择的计划。 */
+static bool job_cd_iso(GuiJob* job) {
+    bool writing = job->operation == GUI_CD_ISO_WRITE, opened = false, ok = false; DWORD error = ERROR_SUCCESS; OpticalDrive drive = {0};
+    if (job_cancelled(job)) { SetLastError(ERROR_CANCELLED); goto done; }
+    const wchar_t* extension = wcsrchr(job->sources[0].path,L'.'); if (!extension || _wcsicmp(extension,L".iso")) { SetLastError(ERROR_NOT_SUPPORTED); goto done; }
+    if (writing && (!job->cdPlanSelected || !job->cdPlan.sourceSectors)) { SetLastError(ERROR_INVALID_PARAMETER); goto done; }
+    if (!job->cdIsoSource.file || job->cdIsoSource.file == INVALID_HANDLE_VALUE) {
+        if (!imgburn_iso_session_open(&job->cdIsoSource,job->sources[0].path,job->cancel)) goto done;
+    }
+    job->cdIsoSource.cancelEvent = job->cancel;
+    /* 先固定来源再查询光驱；Joliet、UDF及坏来源均不进入设备路径。 */
+    if (job->cdIsoSource.joliet) { SetLastError(ERROR_NOT_SUPPORTED); goto done; }
+    if (job->cdIsoSource.sectors < 300) { SetLastError(ERROR_INVALID_DATA); goto done; }
+    if (job_cancelled(job)) { SetLastError(ERROR_CANCELLED); goto done; }
+    job_progress(0,0,job->cdIsoSource.sectors,job);
+    if (!spti_open_drive_passive(&drive,job->drive)) goto done; opened = true;
+    if (drive.accessKnown && (drive.deviceAccess & (GENERIC_READ | GENERIC_WRITE)) != (GENERIC_READ | GENERIC_WRITE)) { SetLastError(ERROR_ACCESS_DENIED); goto done; }
+    CdIsoSessionConfig config = {&drive,job->sources[0].path,job->cancel,job->cdAllowBlank,job->cdFinalize};
+    if (writing) ok = pipeline_write_cd_iso_session_planned(&config,&job->cdPlan,&job->cdResult,job_pipeline_progress,job);
+    else {
+        ok = pipeline_plan_cd_iso_session(&config,&job->cdPlan);
+        if (ok) ok = imgburn_iso_session_set_start(&job->cdIsoSource,job->cdPlan.dataStartLba);
+        if (ok && job_cancelled(job)) { SetLastError(ERROR_CANCELLED); ok = false; }
+    }
+done:
+    error = ok ? ERROR_SUCCESS : GetLastError(); if (!ok && !error) error = ERROR_INVALID_DATA;
+    if (opened) spti_close_drive(&drive);
+    if (writing) {
+        if (job->cdResult.data.sourceSectors) { job_text(job,L"本次执行布局：\r\n"); job_cd_iso_layout(job,&job->cdResult.data); }
+        job_text(job,L"writeStarted：%u\r\nsessionClosed：%u\r\nverified：%u\r\n",job->cdResult.writeStarted ? 1 : 0,job->cdResult.sessionClosed ? 1 : 0,job->cdResult.verified ? 1 : 0);
+        if (ok) job_text(job,L"独立 ISO 会话写入完成并通过全部回读校验。\r\n");
+        else if (error == ERROR_MEDIA_CHANGED) job_text(job,job->cdResult.writeStarted ? L"介质或布局发生变化；本次已开始写入，请核对以上实际状态，不自动重试。\r\n" : L"当前介质或布局与所选计划不一致，未开始写入；请重新查询并选择。\r\n");
+        job->cdPlanSelected = false;
+    } else if (ok) {
+        job_text(job,L"独立纯 ISO9660 会话规划（只读）：\r\n"); job_cd_iso_layout(job,&job->cdPlan);
+        job_text(job,L"空白首会话：%ls\r\n结束选择：%ls\r\n此查询没有写入；需要明确选择此计划后再执行写入并回读。不合并旧文件树。\r\n",job->cdAllowBlank ? L"显式允许" : L"不允许",job->cdFinalize ? L"封盘" : L"留盘开放");
+        job_progress(100,0,job->cdIsoSource.sectors,job);
+    }
+    if (!ok) {
+        job->error = error; job->cdPlanSelected = false; memset(&job->cdPlan,0,sizeof(job->cdPlan));
+        if (error == ERROR_NOT_SUPPORTED) job_text(job,L"仅支持已确认 TAO/MODE1 的可追加 CD-R 与独立纯 ISO9660；Joliet、UDF、引导等来源和其他介质不在此入口范围。\r\n");
+        else if (error == ERROR_ACCESS_DENIED) job_text(job,L"未取得光驱命令访问权，或设备拒绝了命令；没有更改权限。\r\n");
+        else if (error == ERROR_DISK_FULL) job_text(job,L"当前可用数据扇区不足。\r\n");
+    }
+    if (writing || !ok) imgburn_iso_session_close(&job->cdIsoSource);
+    SetLastError(error); return ok;
+}
+
 static bool job_cue(GuiJob* job) {
     if (job->sourceCount > MAX_AUDIO_TRACKS) return false;
     AudioCompilation* comp = (AudioCompilation*)calloc(1, sizeof(*comp)); if (!comp) return false;
@@ -224,7 +278,7 @@ DWORD WINAPI imgburn_gui_job_run(void* context) {
     GuiJob* job = (GuiJob*)context; SetLastError(ERROR_SUCCESS);
     if (!job) return 1;
     if (!job->sourceCount || !job->sources) { job->error = ERROR_INVALID_PARAMETER; if (job->owner) PostMessageW(job->owner, GUI_JOB_DONE, 0, (LPARAM)job); return 1; }
-    if (!job_cancelled(job)) switch (job->operation) {
+    if (!job_cancelled(job) || job->operation == GUI_CD_ISO_PLAN || job->operation == GUI_CD_ISO_WRITE) switch (job->operation) {
         case GUI_CALCULATE: job->succeeded = job_prepare(job); break;
         case GUI_BUILD_IMAGE: job->succeeded = job_build(job); break;
         case GUI_INSPECT: job->succeeded = job_inspect(job); break;
@@ -234,6 +288,7 @@ DWORD WINAPI imgburn_gui_job_run(void* context) {
         case GUI_DVD_INFO: job->dvdVideo = true; job->succeeded = job_prepare(job) && imgburn_dvd_read_navigation(&job->builder, &job->navigation); break;
         case GUI_DVD_PREVIEW: job->succeeded = imgburn_dvd_preview_show(&job->builder, &job->preview, NULL) == 0; break;
         case GUI_DVD_CANDIDATES: job->succeeded = job_dvd_candidates(job); break;
+        case GUI_CD_ISO_PLAN: case GUI_CD_ISO_WRITE: job->succeeded = job_cd_iso(job); break;
     }
     if (!job->succeeded && job_cancelled(job) && (!job->error || (job->operation != GUI_ERASE_QUICK && job->operation != GUI_ERASE_FULL))) job->error = ERROR_CANCELLED;
     if (!job->succeeded) { if (!job->error) job->error = GetLastError(); if (!job->error) job->error = ERROR_INVALID_DATA; job_text(job, job->error == ERROR_CANCELLED ? L"操作已取消。\r\n" : L"操作失败（错误 %lu）。\r\n", job->error); }
@@ -243,5 +298,5 @@ DWORD WINAPI imgburn_gui_job_run(void* context) {
 void imgburn_gui_job_free(GuiJob* job) {
     if (!job) return;
     if (job->thread) CloseHandle(job->thread); if (job->cancel) CloseHandle(job->cancel);
-    imgburn_dvd_free_navigation(&job->navigation); free(job->dvdCandidates); imgburn_data_source_close(&job->dvdCandidateSource); if (job->builderReady) image_builder_destroy(&job->builder); free(job->sources); free(job);
+    imgburn_dvd_free_navigation(&job->navigation); free(job->dvdCandidates); imgburn_data_source_close(&job->dvdCandidateSource); imgburn_iso_session_close(&job->cdIsoSource); if (job->builderReady) image_builder_destroy(&job->builder); free(job->sources); free(job);
 }

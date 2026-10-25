@@ -68,7 +68,11 @@ done:
     { DWORD error = success ? ERROR_SUCCESS : GetLastError(); imgburn_iso_session_close(&iso); SetLastError(error); } return success;
 }
 
-static bool cd_session_write(const CdSessionConfig* config, CdSessionResult* result, PipelineProgressCallback callback, void* userData, bool isoInput) {
+static bool cd_session_same_plan(const MmcCdAppendPlan* a, const MmcCdAppendPlan* b) {
+    return a->sessionNumber == b->sessionNumber && a->trackNumber == b->trackNumber && a->previousLeadOutLba == b->previousLeadOutLba && a->nextWritableAddress == b->nextWritableAddress && a->dataStartLba == b->dataStartLba && a->dataEndLba == b->dataEndLba && a->sourceSectors == b->sourceSectors && a->availableDataSectors == b->availableDataSectors && a->remainingDataSectors == b->remainingDataSectors && a->sectorBytes == b->sectorBytes && a->writeType == b->writeType && a->trackMode == b->trackMode && a->dataBlockType == b->dataBlockType;
+}
+
+static bool cd_session_write(const CdSessionConfig* config, CdSessionResult* result, PipelineProgressCallback callback, void* userData, bool isoInput, const MmcCdAppendPlan* expected) {
     if (!result) { SetLastError(ERROR_INVALID_PARAMETER); return false; } memset(result,0,sizeof(*result));
     if (!config || !config->drive || !config->rawDataPath) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
     const wchar_t* extension = wcsrchr(config->rawDataPath,L'.'); if (!extension || _wcsicmp(extension,isoInput ? L".iso" : L".bin")) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
@@ -86,6 +90,7 @@ static bool cd_session_write(const CdSessionConfig* config, CdSessionResult* res
     stats.totalSectors = (uint32_t)(size.QuadPart / 2048); buffers = malloc(2 * 32 * 2048); if (!buffers) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto cleanup; }
     cd_session_progress(&stats,callback,userData,PIPELINE_STATE_INITIALIZING,"Checking experimental CD-R TAO session...");
     if (!cd_session_snapshot(config->drive,&initial) || !cd_session_plan(&initial,stats.totalSectors,config->allowBlank,&result->data) || !cd_session_tao_feature(config->drive)) goto cleanup;
+    if (expected && !cd_session_same_plan(expected,&result->data)) { SetLastError(ERROR_MEDIA_CHANGED); goto cleanup; }
     if (isoInput && !imgburn_iso_session_set_start(&iso,result->data.dataStartLba)) goto cleanup;
     if (!(initial.parameters.page[2] & 0x40) || (initial.parameters.page[2] & 0x10)) { SetLastError(ERROR_NOT_SUPPORTED); goto cleanup; }
     if (cd_session_cancelled(config)) goto cleanup;
@@ -98,6 +103,7 @@ static bool cd_session_write(const CdSessionConfig* config, CdSessionResult* res
     if (!cd_session_snapshot(config->drive,&prepared)) goto cleanup;
     if (memcmp(&prepared.disc,&locked.disc,sizeof(locked.disc)) || memcmp(&prepared.toc,&locked.toc,sizeof(locked.toc)) || prepared.parameters.size != selected.size || memcmp(prepared.parameters.page,selected.page,selected.size)) { SetLastError(ERROR_MEDIA_CHANGED); goto cleanup; }
     if (!cd_session_plan(&prepared,stats.totalSectors,config->allowBlank,&result->data) || cd_session_cancelled(config)) goto cleanup;
+    if (expected && !cd_session_same_plan(expected,&result->data)) { SetLastError(ERROR_MEDIA_CHANGED); goto cleanup; }
     if (isoInput && !imgburn_iso_session_set_start(&iso,result->data.dataStartLba)) goto cleanup;
     cd_session_progress(&stats,callback,userData,PIPELINE_STATE_WRITING,"Writing experimental MODE1 payload...");
     for (uint32_t offset = 0; offset < stats.totalSectors;) {
@@ -165,10 +171,15 @@ cleanup:
     error = success ? ERROR_SUCCESS : GetLastError(); if (isoInput) imgburn_iso_session_close(&iso); else CloseHandle(source); free(buffer); SetLastError(error); return success;
 }
 
-bool pipeline_write_cd_mode1_session(const CdSessionConfig* config, CdSessionResult* result, PipelineProgressCallback callback, void* userData) { return cd_session_write(config,result,callback,userData,false); }
+bool pipeline_write_cd_mode1_session(const CdSessionConfig* config, CdSessionResult* result, PipelineProgressCallback callback, void* userData) { return cd_session_write(config,result,callback,userData,false,NULL); }
 bool pipeline_write_cd_iso_session(const CdIsoSessionConfig* config, CdSessionResult* result, PipelineProgressCallback callback, void* userData) {
-    if (!config) return cd_session_write(NULL,result,callback,userData,true);
-    CdSessionConfig common = {config->drive,config->isoPath,config->cancelEvent,config->allowBlank,config->finalizeDisc}; return cd_session_write(&common,result,callback,userData,true);
+    if (!config) return cd_session_write(NULL,result,callback,userData,true,NULL);
+    CdSessionConfig common = {config->drive,config->isoPath,config->cancelEvent,config->allowBlank,config->finalizeDisc}; return cd_session_write(&common,result,callback,userData,true,NULL);
+}
+bool pipeline_write_cd_iso_session_planned(const CdIsoSessionConfig* config, const MmcCdAppendPlan* expected, CdSessionResult* result, PipelineProgressCallback callback, void* userData) {
+    if (!expected) { if (result) memset(result,0,sizeof(*result)); SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    if (!config) return cd_session_write(NULL,result,callback,userData,true,expected);
+    CdSessionConfig common = {config->drive,config->isoPath,config->cancelEvent,config->allowBlank,config->finalizeDisc}; return cd_session_write(&common,result,callback,userData,true,expected);
 }
 bool pipeline_verify_cd_mode1_session(OpticalDrive* drive, const wchar_t* rawDataPath, const MmcCdAppendPlan* data, HANDLE cancelEvent) { return cd_session_verify(drive,rawDataPath,data,cancelEvent,false); }
 bool pipeline_verify_cd_iso_session(OpticalDrive* drive, const wchar_t* isoPath, const MmcCdAppendPlan* data, HANDLE cancelEvent) { return cd_session_verify(drive,isoPath,data,cancelEvent,true); }
