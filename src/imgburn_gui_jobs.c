@@ -253,17 +253,45 @@ static bool job_mds(GuiJob* job) {
     free(paths); if (ok) job_text(job, L"MDS 已生成：%ls\r\n扇区：%llu，分卷：%zu\r\n", job->destination, bytes / 2048, job->sourceCount); return ok;
 }
 
+/* 元数据查询失败只显示未知，不改变逻辑读取资格，也不猜介质层数。 */
+static void job_bd_information(GuiJob* job, OpticalDrive* drive) {
+    MmcBdDiscStructure structure;
+    if (mmc_read_bd_disc_structure(drive,&structure)) {
+        wchar_t physical[16] = L"未知", manufacturer[7] = L"", media[4] = L"";
+        MultiByteToWideChar(CP_UTF8,0,mmc_get_bd_physical_type_name(structure.physicalType),-1,physical,16);
+        job_text(job,L"当前BD Profile：0x%04X\r\nBD物理介质：%ls\r\nBD物理层数：%u\r\n",structure.currentProfile,physical,structure.layerCount);
+        job_text(job,L"BD类别/版本：%u/%u\r\n",structure.discClass,structure.discVersion);
+        if (structure.hasMediaId) { MultiByteToWideChar(CP_UTF8,0,structure.manufacturerId,-1,manufacturer,7); MultiByteToWideChar(CP_UTF8,0,structure.mediaTypeId,-1,media,4); job_text(job,L"BD介质ID：%ls / %ls（修订 %u）\r\n",manufacturer,media,structure.productRevision); }
+        else job_text(job,L"BD介质ID：未知\r\n");
+    } else job_text(job,L"BD物理介质：未知（错误 %lu）\r\nBD物理层数：未知\r\nBD类别/版本：未知\r\nBD介质ID：未知\r\n",GetLastError());
+}
+static void job_bd_capacity(GuiJob* job, OpticalDrive* drive, const MmcDiscInfo* disc) {
+    if (disc && disc->discStatus == DISC_STATUS_EMPTY) {
+        MmcTrackInfo track;
+        if (mmc_read_track_information(drive,1,false,&track) && track.trackNumber == 1 && track.isBlank && !track.isDamage && track.nwaValid) job_text(job,L"空白轨1空余：%u 扇区（按2048字节数据计 %llu 字节）\r\n",track.freeBlocks,(uint64_t)track.freeBlocks * 2048);
+        else job_text(job,L"空白轨1空余：未知\r\n");
+    } else {
+        uint32_t last = 0, bytes = 0;
+        if (mmc_read_capacity(drive,&last,&bytes) && bytes) { uint64_t sectors = (uint64_t)last + 1; job_text(job,L"逻辑可读容量：%llu 扇区，每扇区 %u 字节（%llu 字节）\r\n",sectors,bytes,sectors * bytes); }
+        else job_text(job,L"逻辑可读容量：未知\r\n");
+    }
+}
+
 static bool job_drive(GuiJob* job) {
-    OpticalDrive drive; if (!spti_open_drive(&drive, job->drive, job->operation == GUI_WRITE_DISC || job->operation == GUI_DISCOVERY_DISC)) return false;
+    OpticalDrive drive; bool opened = job->operation == GUI_DRIVE_INFO ? spti_open_drive_passive(&drive,job->drive) : spti_open_drive(&drive,job->drive,job->operation == GUI_WRITE_DISC || job->operation == GUI_DISCOVERY_DISC); if (!opened) return false;
     bool ok = false; uint32_t last = 0, bytes = 0; bool ready = mmc_test_unit_ready(&drive);
     job->mediaReady = ready;
     if (job->operation == GUI_DRIVE_INFO) {
         uint8_t inquiry[36] = {0}; ok = mmc_inquiry(&drive, inquiry, sizeof(inquiry));
         if (ok) { char text[29]; memcpy(text, inquiry + 8, 28); text[28] = 0; wchar_t wide[29]; MultiByteToWideChar(CP_ACP, 0, text, -1, wide, 29); job_text(job, L"%ls\r\n%ls\r\n", wide, ready ? L"介质已就绪" : L"介质未就绪或未插入光盘"); }
-        if (ready && mmc_read_capacity(&drive, &last, &bytes)) job_text(job, L"容量：%llu 扇区，每扇区 %u 字节\r\n", (uint64_t)last + 1, bytes);
+        MmcProfile infoProfile = ready ? mmc_get_current_profile(&drive) : MMC_PROFILE_NONE; bool bd = infoProfile >= MMC_PROFILE_BD_ROM && infoProfile <= MMC_PROFILE_BD_RE;
+        if (ready && bd) job_bd_information(job,&drive);
+        if (ready && !bd && mmc_read_capacity(&drive, &last, &bytes)) job_text(job, L"容量：%llu 扇区，每扇区 %u 字节\r\n", (uint64_t)last + 1, bytes);
         if (ready && (mmc_get_current_profile(&drive) == MMC_PROFILE_DVD_R_SEQ || mmc_get_current_profile(&drive) == MMC_PROFILE_DVD_R_DL_SEQ)) { MmcDvdWriteFeatures features; if (mmc_get_dvd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
         if (ready && mmc_get_current_profile(&drive) == MMC_PROFILE_CD_R) { MmcCdWriteFeatures features; if (mmc_get_cd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
+        bool bdCapacityShown = false;
         if (ready) { MmcDiscInfo disc; if (mmc_read_disc_information(&drive,&disc)) {
+            if (bd) { job_bd_capacity(job,&drive,&disc); bdCapacityShown = true; }
             /* 只供原Write按钮显示空白介质候选；完整能力/布局仍由既有写入worker检查。 */
             job->writeMediaReady = disc.discStatus == DISC_STATUS_EMPTY && !disc.isErasable && !disc.lastSessionStatus && disc.numSessions == 1 && disc.firstTrack == 1 && disc.lastTrack == 1 && (disc.currentProfile == MMC_PROFILE_CD_R || disc.currentProfile == MMC_PROFILE_DVD_R_SEQ || disc.currentProfile == MMC_PROFILE_DVD_R_DL_SEQ || disc.currentProfile == MMC_PROFILE_DVD_PLUS_R || disc.currentProfile == MMC_PROFILE_DVD_PLUS_R_DL || disc.currentProfile == MMC_PROFILE_BD_R_SRM);
             job->eraseSupported = disc.isErasable && (disc.currentProfile == MMC_PROFILE_CD_RW || disc.currentProfile == MMC_PROFILE_DVD_RW_SEQ || disc.currentProfile == MMC_PROFILE_DVD_RW_RO);
@@ -273,6 +301,7 @@ static bool job_drive(GuiJob* job) {
                 else job_text(job,L"无法读取完整 CD 会话结构。\r\n"); free(toc);
             }
         } }
+        if (ready && bd && !bdCapacityShown) job_bd_capacity(job,&drive,NULL);
         if (ready) pipeline_discovery_capacity(&drive,&job->discoveryCapacity);
     } else if (!ready) SetLastError(ERROR_NOT_READY);
     else if (job->operation == GUI_READ_DISC) {

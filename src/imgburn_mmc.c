@@ -442,6 +442,53 @@ bool mmc_get_bd_write_features(OpticalDrive* drive, bool* verifyNotRequired) {
     bool writable = false; for (unsigned i = 24; i < 32; i++) writable = writable || data[i] != 0;
     if (!writable) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED); *verifyNotRequired = (data[12] & 1) != 0; return true;
 }
+
+const char* mmc_get_bd_physical_type_name(MmcBdPhysicalType type) {
+    switch (type) { case MMC_BD_PHYSICAL_ROM: return "BD-ROM"; case MMC_BD_PHYSICAL_R: return "BD-R"; case MMC_BD_PHYSICAL_RE: return "BD-RE"; default: return "Unknown"; }
+}
+/* 介质ID保留固定字段的完整内容，只移除末尾的空格及零填充。 */
+static bool bd_media_id(char* output, const uint8_t* input, unsigned bytes) {
+    unsigned length = bytes; while (length && (input[length - 1] == 0 || input[length - 1] == ' ')) length--;
+    for (unsigned i = 0; i < length; i++) if (input[i] < 0x20 || input[i] > 0x7E) return false;
+    memcpy(output,input,length); output[length] = 0; return true;
+}
+bool mmc_read_bd_disc_structure(OpticalDrive* drive, MmcBdDiscStructure* structure) {
+    if (structure) memset(structure,0,sizeof(*structure));
+    if (!drive || !structure) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    MmcProfile profile = mmc_get_current_profile(drive);
+    if (profile == MMC_PROFILE_UNKNOWN) { if (drive->lastError) return false; return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED); }
+    if (profile < MMC_PROFILE_BD_ROM || profile > MMC_PROFILE_BD_RE) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    uint8_t cdb[12] = {0xAD,1}, data[4100] = {0}; cdb[8] = 0x10; cdb[9] = 4;
+    if (!spti_send_cdb(drive,cdb,12,data,sizeof(data),true,10)) return false;
+    if (drive->lastTransferBytes != sizeof(data) || read_be16(data) != 4098) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
+    const uint8_t* first = data + 4;
+    if (first[0] != 'D' || first[1] != 'I') return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+    /* 本批只解释已核对的BD-R格式1/3；BD-ROM Profile可能是封盘BD-R，不能用Profile猜物理盘型。 */
+    if (memcmp(first + 8,"BDR",3) || profile == MMC_PROFILE_BD_RE) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    MmcBdDiscStructure parsed = {0}; parsed.currentProfile = profile; parsed.physicalType = MMC_BD_PHYSICAL_R;
+    parsed.diUnitCount = first[3] >> 3;
+    if (!parsed.diUnitCount || parsed.diUnitCount > 31) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+    for (unsigned i = 0; i < parsed.diUnitCount; i++) {
+        const uint8_t* unit = first + i * 112; unsigned format = unit[2] & 0x7F, used = unit[6] & 0x7F, layer = unit[3] & 7;
+        if (unit[0] != 'D' || unit[1] != 'I' || (unit[3] >> 3) != parsed.diUnitCount || unit[5] != i || unit[4] || unit[7] || used < 14 || used > 100) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+        if ((unit[6] & 0x80) || (format != 1 && format != 3)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+        if (memcmp(unit + 8,"BDR",3)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+        uint8_t layers = unit[12] >> 4, type = unit[12] & 15, size = unit[11] >> 6, discClass = (unit[11] >> 4) & 3, version = unit[11] & 15, channel = unit[13] & 15;
+        if (!layers || layer >= layers) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+        if (layers > 2 || type != 2) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+        char manufacturer[7] = {0}, media[4] = {0};
+        if (!bd_media_id(manufacturer,unit + 100,6) || !bd_media_id(media,unit + 106,3)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+        if (!i) {
+            parsed.layerCount = layers; parsed.layerType = type; parsed.discSizeCode = size; parsed.discClass = discClass; parsed.discVersion = version; parsed.channelBitCode = channel;
+            memcpy(parsed.manufacturerId,manufacturer,sizeof(manufacturer)); memcpy(parsed.mediaTypeId,media,sizeof(media)); parsed.productRevision = unit[111]; parsed.hasMediaId = manufacturer[0] && media[0];
+        } else if (parsed.layerCount != layers || parsed.layerType != type || parsed.discSizeCode != size || parsed.discClass != discClass || parsed.discVersion != version || parsed.channelBitCode != channel || memcmp(parsed.manufacturerId,manufacturer,sizeof(manufacturer)) || memcmp(parsed.mediaTypeId,media,sizeof(media)) || parsed.productRevision != unit[111]) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+        parsed.layerMask |= (uint8_t)(1u << layer); parsed.diFormatMask |= 1u << format;
+    }
+    if (parsed.layerMask != (1u << parsed.layerCount) - 1) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    /* 仅检查3584字节DI区的未用槽；最后512字节为EB信息，不要求全零。 */
+    for (unsigned i = (unsigned)parsed.diUnitCount * 112; i < 3584; i++) if (first[i]) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    *structure = parsed; return true;
+}
 bool mmc_set_burn_speed(OpticalDrive* drive, MmcProfile profile, uint32_t writeSpeedKbps) {
     if (profile != MMC_PROFILE_BD_R_SRM && profile != MMC_PROFILE_DVD_R_SEQ && profile != MMC_PROFILE_DVD_R_DL_SEQ && profile != MMC_PROFILE_DVD_PLUS_R && profile != MMC_PROFILE_DVD_PLUS_R_DL && profile != MMC_PROFILE_CD_R) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
     uint32_t speed = !writeSpeedKbps || writeSpeedKbps == 0xFFFF ? UINT32_MAX : writeSpeedKbps;

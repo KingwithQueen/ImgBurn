@@ -57,6 +57,7 @@ static void print_usage(void) {
     printf("Device & Information Commands:\n");
     printf("  devices                        List all optical drives on system\n");
     printf("  info <drive>                   Detailed drive & loaded media inspection\n");
+    printf("  bd-info <drive>                Read-only BD physical identity and capacity\n");
     printf("  booktype <drive> [query|set <dvd_rom|default> [dvd+r|dvd+r_dl]]\n");
     printf("                                 Query or set drive BookType / Bitsetting\n");
     printf("  pioneer <drive> <feature> [value]\n");
@@ -172,6 +173,46 @@ static int cmd_devices(void) {
     return 0;
 }
 
+/* BD的物理身份与当前Profile分别报告；容量只表示可读范围或空白轨1空余。 */
+static bool cli_bd_profile(MmcProfile profile) { return profile >= MMC_PROFILE_BD_ROM && profile <= MMC_PROFILE_BD_RE; }
+static bool cli_bd_information(OpticalDrive* drive) {
+    MmcBdDiscStructure structure; bool identified = mmc_read_bd_disc_structure(drive,&structure); DWORD identifyError = GetLastError();
+    if (identified) {
+        printf("  Current BD Profile:   0x%04X\n",structure.currentProfile);
+        printf("  BD Physical Media:    %s\n",mmc_get_bd_physical_type_name(structure.physicalType));
+        printf("  BD Physical Layers:   %u\n",structure.layerCount);
+        printf("  BD DI Class/Version:  %u/%u | Units %u | Formats 0x%08X\n",structure.discClass,structure.discVersion,structure.diUnitCount,structure.diFormatMask);
+        if (structure.hasMediaId) printf("  BD Media ID:          %s / %s (revision %u)\n",structure.manufacturerId,structure.mediaTypeId,structure.productRevision);
+        else printf("  BD Media ID:          Unknown\n");
+    } else printf("  BD Physical Media:    Unknown (error %lu)\n  BD Physical Layers:   Unknown\n  BD DI Class/Version:  Unknown\n  BD Media ID:          Unknown\n",identifyError);
+    MmcDiscInfo disc; bool haveDisc = mmc_read_disc_information(drive,&disc), capacityKnown = false; DWORD capacityError = GetLastError();
+    if (haveDisc && disc.discStatus == DISC_STATUS_EMPTY) {
+        MmcTrackInfo track;
+        if (mmc_read_track_information(drive,1,false,&track)) {
+            if (track.trackNumber == 1 && track.isBlank && !track.isDamage && track.nwaValid) { printf("  Blank Track 1 Free:   %u sectors (%llu bytes of 2048-byte data)\n",track.freeBlocks,(uint64_t)track.freeBlocks * 2048); capacityKnown = true; }
+            else capacityError = ERROR_INVALID_DATA;
+        } else capacityError = GetLastError();
+        if (!capacityKnown) printf("  Blank Track 1 Free:   Unknown (error %lu)\n",capacityError);
+    } else {
+        uint32_t last = 0, bytes = 0;
+        bool readCapacity = mmc_read_capacity(drive,&last,&bytes);
+        if (readCapacity && bytes) { uint64_t sectors = (uint64_t)last + 1; printf("  Readable Capacity:    %llu sectors, %u bytes/sector (%llu bytes)\n",sectors,bytes,sectors * bytes); capacityKnown = true; }
+        else { capacityError = readCapacity ? ERROR_INVALID_DATA : GetLastError(); printf("  Readable Capacity:    Unknown (error %lu)\n",capacityError); }
+    }
+    return identified && capacityKnown;
+}
+static int cmd_bd_info(const char* driveArg) {
+    wchar_t path[MAX_PATH]; if (!parse_drive_path(driveArg,path,MAX_PATH)) { printf("Invalid drive specified: '%s'\n",driveArg); return 1; }
+    OpticalDrive drive; if (!spti_open_drive_passive(&drive,path)) { printf("Error: Cannot open optical device (error %u).\n",drive.lastError); return 1; }
+    bool ok = mmc_test_unit_ready(&drive);
+    if (ok) {
+        MmcProfile profile = mmc_get_current_profile(&drive);
+        if (cli_bd_profile(profile)) ok = cli_bd_information(&drive);
+        else { printf("  BD Information:       Unknown; current Profile 0x%04X is not supported.\n",profile); ok = false; }
+    } else printf("  BD Information:       Unknown; device is not ready (error %lu).\n",GetLastError());
+    spti_close_drive(&drive); return ok ? 0 : 1;
+}
+
 /* -------------------------------------------------------------------------
  * Command: info <drive>
  * ------------------------------------------------------------------------- */
@@ -217,13 +258,13 @@ static int cmd_info(const char *driveArg) {
         MmcProfile prof = mmc_get_current_profile(&drive);
         printf("  Current Media:        %s (Profile 0x%04X)\n", mmc_get_profile_name(prof), prof);
 
-        uint32_t lastLba = 0, blockSize = 0;
-        if (mmc_read_capacity(&drive, &lastLba, &blockSize)) {
-            uint64_t totalBytes = (uint64_t)(lastLba + 1) * blockSize;
-            printf("  Media Capacity:       %u Sectors (%.2f GB / %.2f MB)\n",
-                   lastLba + 1,
-                   (double)totalBytes / (1024.0 * 1024.0 * 1024.0),
-                   (double)totalBytes / (1024.0 * 1024.0));
+        if (cli_bd_profile(prof)) cli_bd_information(&drive);
+        else {
+            uint32_t lastLba = 0, blockSize = 0;
+            if (mmc_read_capacity(&drive, &lastLba, &blockSize)) {
+                uint64_t totalBytes = (uint64_t)(lastLba + 1) * blockSize;
+                printf("  Media Capacity:       %u Sectors (%.2f GB / %.2f MB)\n",lastLba + 1,(double)totalBytes / (1024.0 * 1024.0 * 1024.0),(double)totalBytes / (1024.0 * 1024.0));
+            }
         }
     }
 
@@ -1068,6 +1109,9 @@ static int run_cli(int argc, char **argv) {
 
     if (_stricmp(cmd, "devices") == 0 || _stricmp(cmd, "list") == 0) {
         return cmd_devices();
+    } else if (_stricmp(cmd, "bd-info") == 0) {
+        if (argc != 3) { printf("Usage: imgburn bd-info <drive>\n"); return 1; }
+        return cmd_bd_info(argv[2]);
     } else if (_stricmp(cmd, "info") == 0 && argc >= 3) {
         return cmd_info(argv[2]);
     } else if (_stricmp(cmd, "build") == 0) {

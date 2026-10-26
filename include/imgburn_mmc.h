@@ -146,6 +146,22 @@ bool mmc_set_burn_speed(OpticalDrive* drive, MmcProfile profile, uint32_t writeS
 bool mmc_get_bd_write_features(OpticalDrive* drive, bool* verifyNotRequired);
 bool mmc_write_bd_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, const void* buffer, bool verifyNotRequired);
 
+/* 只读PIC中的物理介质摘要，与当前逻辑Profile及可写能力分别报告。 */
+typedef enum { MMC_BD_PHYSICAL_UNKNOWN, MMC_BD_PHYSICAL_ROM, MMC_BD_PHYSICAL_R, MMC_BD_PHYSICAL_RE } MmcBdPhysicalType;
+typedef struct {
+    MmcProfile currentProfile;
+    MmcBdPhysicalType physicalType;
+    uint8_t layerCount, layerType, discSizeCode, discClass, discVersion, channelBitCode;
+    uint8_t diUnitCount, layerMask;
+    uint32_t diFormatMask;
+    bool hasMediaId;
+    char manufacturerId[7], mediaTypeId[4];
+    uint8_t productRevision;
+} MmcBdDiscStructure;
+/* 未识别的物理格式不猜字段，失败输出清零；不改变原有ISO Read/Verify资格。 */
+bool mmc_read_bd_disc_structure(OpticalDrive* drive, MmcBdDiscStructure* structure);
+const char* mmc_get_bd_physical_type_name(MmcBdPhysicalType type);
+
 /**
  * @brief Synchronize Cache / Flush FIFO (SCSI 0x35)
  */
