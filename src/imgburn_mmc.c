@@ -443,7 +443,8 @@ bool mmc_get_bd_write_features(OpticalDrive* drive, bool* verifyNotRequired) {
     if (drive->lastTransferBytes == 8 && read_be32(data) == 4) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
     if (drive->lastTransferBytes != sizeof(data) || read_be32(data) < 28) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
     if (read_be16(data + 6) != MMC_PROFILE_BD_R_SRM || read_be16(data + 8) != 0x41 || !(data[10] & 1) || data[11] != 20) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
-    bool writable = false; for (unsigned i = 24; i < 32; i++) writable = writable || data[i] != 0;
+    /* 任意BD-R位图非零不代表支持本批介质；只接受Class0/Version1或BDXL的Class1/Version2。 */
+    bool writable = (read_be16(data + 24) & 2) || (read_be16(data + 26) & 4);
     if (!writable) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED); *verifyNotRequired = (data[12] & 1) != 0; return true;
 }
 
@@ -555,11 +556,14 @@ bool mmc_read_bd_disc_structure(OpticalDrive* drive, MmcBdDiscStructure* structu
     for (unsigned i = 0; i < parsed.diUnitCount; i++) {
         const uint8_t* unit = first + i * 112; unsigned format = unit[2] & 0x7F, used = unit[6] & 0x7F, layer = unit[3] & 7;
         if (unit[0] != 'D' || unit[1] != 'I' || (unit[3] >> 3) != parsed.diUnitCount || unit[5] != i || (!rewritable && unit[4]) || unit[7] || used < 14 || used > 100) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
-        if ((unit[6] & 0x80) || (format != 1 && format != 3 && !(rewritable && format == 2))) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+        bool xl = !rewritable && (format == 4 || format == 5);
+        if ((unit[6] & 0x80) || (format != 1 && format != 3 && !(rewritable && format == 2) && !xl)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
         if (memcmp(unit + 8,rewritable ? "BDW" : "BDR",3)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
         uint8_t layers = unit[12] >> 4, type = unit[12] & 15, size = unit[11] >> 6, discClass = (unit[11] >> 4) & 3, version = unit[11] & 15, channel = unit[13] & 15;
         if (!layers || layer >= layers) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
-        if (layers > 2 || type != (rewritable ? 4 : 2)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+        if ((xl ? (layers != 3 && layers != 4) : layers > 2) || type != (rewritable ? 4 : 2)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+        /* BDXL只解共同头及固定footer；size/channel保留原始码，不解释写策略或推算容量。 */
+        if (xl && (discClass != 1 || version != 2)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
         /* BDW的byte4是旧版层标记，不能按BDR保留字节处理；本批只支持Class0/Version2。 */
         if (rewritable && (discClass || version != 2)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
         if (rewritable && unit[4] != layers) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);

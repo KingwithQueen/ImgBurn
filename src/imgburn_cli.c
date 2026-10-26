@@ -78,7 +78,7 @@ static void print_usage(void) {
     printf("  cdtext-info <file.cdt>         Inspect raw CD-TEXT packs and supported text blocks\n");
     printf("  cdtext-build <file.cue> <out.cdt> [--replace]\n");
     printf("                                 Export CDTEXTFILE or encode supported CUE text\n");
-    printf("  mds <file.mds>                 Parse and display MDS metadata & Layer Break\n\n");
+    printf("  mds <file.mds>                 Parse and display MDS source metadata & source Layer Break\n\n");
     printf("  dvd-layers <folder|image.iso|image.bin|image.mds> [--show-interleaved] [--l0-min <n>] [--l0-max <n>] [--capacity <n>]\n");
     printf("                                 Inspect DVD navigation and layer break cells\n\n");
     printf("  dvd-preview <folder> --title <VTS:PGC:Cell> | --menu <VTS:LU:PGC:Cell> [--ffmpeg <path>]\n");
@@ -1152,8 +1152,8 @@ static int cmd_mds(const char* mdsFile) {
     if (!mds) return 1;
     if (!imgburn_mds_parse(path, mds)) { printf("Error: Failed to parse MDS file '%s'\n", mdsFile); free(mds); return 1; }
     const char* medium = mds->mediumType >= 0x10 ? (mds->layerBreakLba ? "DVD-DL" : "DVD") : mds->mediumType == 2 ? "CD-RW" : mds->mediumType == 1 ? "CD-R" : "CD-ROM";
-    printf("MDS Sheet Metadata:\n  Medium Type: %s (%u)\n  Total Sectors: %u\n  Sessions: %u\n  Tracks: %d\n  Data File References: %u\n  Layer Break: %u\n", medium, mds->mediumType, mds->totalSectors, mds->sessionCount, mds->trackCount, mds->dataFileCount, mds->layerBreakLba);
-    if (mds->layerCount) printf("  Layers: %u | Track Path: %s\n", mds->layerCount, mds->oppositeTrackPath ? "OTP" : "PTP");
+    printf("MDS Source Metadata:\n  Source Medium Type: %s (%u)\n  Total Sectors: %u\n  Sessions: %u\n  Tracks: %d\n  Data File References: %u\n  Source Layer Break: %u\n", medium, mds->mediumType, mds->totalSectors, mds->sessionCount, mds->trackCount, mds->dataFileCount, mds->layerBreakLba);
+    if (mds->layerCount) printf("  Source Layers: %u | Source Track Path: %s\n", mds->layerCount, mds->oppositeTrackPath ? "OTP" : "PTP");
     for (int i = 0; i < mds->trackCount; i++) {
         const MdsTrack* t = &mds->tracks[i];
         printf("  Session %u Track %u: LBA %d | Sectors %u | Sector Size %u | Pregap %u | Files %u\n", t->sessionNumber, t->trackNumber, t->startLba, t->sectorCount, t->sectorSize, t->pregapSectors, t->fileCount);

@@ -54,7 +54,7 @@ BD物理信息可通过 `bd-info` 查询，并已加入GUI现有介质信息文�
 ImgBurn.exe bd-info R:
 ```
 
-该命令及GUI后台介质查询采用passive打开，不管理MCN、不锁盘、不设置速度或托盘。传统`info`只追加BD摘要，保留原设备/厂商查询与打开行为，不能把它当作上述受限入口。`mmc_read_bd_disc_structure`目前精确解释物理BDR格式1/3，以及Class0/Version2物理BDW格式1/2/3的SL/DL信息，核对完整4100字节响应、DI固定112字节单元及跨单元一致性；末尾EB数据不当作DI填充。BDO、BDXL、continuation、混合/未知布局或未支持的ID编码明确为未知/不支持，不影响既有ISO Read/Verify资格。介质ID不是唯一盘序号；双层及BD-RE摘要目前只有模型证据，最近的实盘信息验收为第52阶段已封盘单层BD-R。
+该命令及GUI后台介质查询采用passive打开，不管理MCN、不锁盘、不设置速度或托盘。传统`info`只追加BD摘要，保留原设备/厂商查询与打开行为，不能把它当作上述受限入口。`mmc_read_bd_disc_structure`目前解释物理BDR格式1/3、Class1/Version2 BDR三层/四层格式4/5，以及Class0/Version2物理BDW格式1/2/3的SL/DL公共信息，核对完整4100字节响应、DI固定112字节单元及跨单元一致性；末尾EB数据不当作DI填充。BDXL只解释共同头和固定介质ID区域，size/channel保留原始码，不解写策略或推算容量。BDO、continuation、混合/未知布局或未支持的ID编码明确为未知/不支持，不影响既有ISO Read/Verify资格。介质ID不是唯一盘序号；双层、BDXL及BD-RE摘要目前只有模型证据，最近的实盘信息验收为第52阶段已封盘单层BD-R。BD-R写能力核对设备声明的Class0/Version1或Class1/Version2支持位，不再把任意BD-R类别位非零视为本路径可用。
 
 BD-RE摘要按[JIS X6232:2017](https://kikakurui.com/x6/X6232-2017-01.html)分别解释BDW专用层标记和介质ID，兼容逻辑Profile0040/0043，不能把只读Profile0040当作压制BD-ROM。size/channel保留原始码，不据此补造名义容量或宣称全部物理参数合规；ID缺失明确为未知。此摘要本身不修改介质；BD-RE格式化、覆写和清零使用下述明确选择的独立流程。
 
@@ -103,6 +103,8 @@ ImgBurn.exe burn R: disc.mds --verify
 ```
 
 Write/Verify 共用逻辑数据读取接口，支持单会话、单轨、LBA 0 起始、标准数据控制标志的 2048 字节 DVD 或 MODE1 CD MDS。按描述中的首卷偏移和有效轨道长度跨卷读取，不将文件前缀、末尾多余字节或 MDS 描述本身当作光盘数据；全部引用文件在操作期间保持只读打开。可使用已解析的相对路径和 `*.mdf` 等引用。原始音频、交错子通道、多轨和多会话 MDS 不进入数据 MDS 应用流程；多轨、多会话 CD 使用 CUE，原版 MDS 应用同样限定单会话单轨。独立 Verify 可比较双层 MDS 的逻辑数据，不检查实体层位置；Write 支持下述 DVD+R DL 路径。
+
+数据MDS写入BD-R SRM或显式BD-RE覆写时，来源DVD的层数、OTP/PTP和层切换位置仅作来源描述；完整逻辑数据仍按原偏移与分卷连续写入并回读，不据此设置BD目标层界。有效的来源PTP或非对齐层注释不再误拒BD目标；损坏MDS仍拒绝。显式目标L0仅适用于已支持的DVD双层目标，旧DVD资格检查保留。BD读取为ISO已支持，BD Read生成MDS仍待原版大容量输出字段对照；不能把来源MDS可写BD等同于已完成BD-MDS生成。
 
 DVD+R DL 支持单轨 2048 字节 ISO/BIN、单层数据 MDS 和受支持的 OTP 双层 MDS，含首偏移与分卷。默认优先保留 MDS 的层位置；普通数据来源没有层信息时，按 `ceil(总扇区数 / 32) × 16` 选择完整 ECC 块平衡两层；已固定介质没有源层位置时沿用实际 L0。CLI `--layer-break <sectors>` 或 GUI“工具 → Write扩展 → 双层 L0 扇区（留空自动）”可显式指定非零、16 扇区对齐的 L0，并覆盖 MDS 层值；窗口需点“应用”保存，取消保留原值和已有候选选择，优先级依据[原版作者说明](https://forum.imgburn.com/topic/2566-where-is-my-layer-break-sector/)。
 

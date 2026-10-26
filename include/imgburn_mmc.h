@@ -142,7 +142,7 @@ bool mmc_set_speed(OpticalDrive* drive, uint16_t readSpeedKbps, uint16_t writeSp
 bool mmc_set_read_speed(OpticalDrive* drive, MmcProfile profile, uint32_t readSpeedKbps);
 /* 蓝光使用 SET STREAMING 的 32 位速率，CD/DVD 保留 SET CD SPEED。 */
 bool mmc_set_burn_speed(OpticalDrive* drive, MmcProfile profile, uint32_t writeSpeedKbps);
-/* 当前 BD Write 能力；返回设备是否支持 WRITE (12) 的 VNR 位。 */
+/* 当前BD-R SRM写能力须支持Class0/Version1或Class1/Version2；返回原始WRITE (12) VNR支持位。 */
 bool mmc_get_bd_write_features(OpticalDrive* drive, bool* verifyNotRequired);
 bool mmc_write_bd_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, const void* buffer, bool verifyNotRequired);
 
@@ -171,7 +171,7 @@ typedef struct {
     char manufacturerId[7], mediaTypeId[4];
     uint8_t productRevision;
 } MmcBdDiscStructure;
-/* 支持SL/DL的BDR格式1/3及Class0/Version2的BDW格式1/2/3；未知格式失败清零，不改变ISO Read/Verify资格。 */
+/* 支持SL/DL的BDR格式1/3、Class1/Version2的BDR TL/QL格式4/5及Class0/Version2的BDW格式1/2/3；仅公共摘要，未知格式失败清零，不改变ISO Read/Verify资格。 */
 bool mmc_read_bd_disc_structure(OpticalDrive* drive, MmcBdDiscStructure* structure);
 const char* mmc_get_bd_physical_type_name(MmcBdPhysicalType type);
 

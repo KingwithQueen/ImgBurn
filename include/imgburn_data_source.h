@@ -10,7 +10,7 @@ typedef struct {
     HANDLE descriptor;
     struct DataImagePart* parts;
     unsigned partCount;
-    uint32_t sectors, layerBreakLba;
+    uint32_t sectors, layerBreakLba; /* layerBreak/layerCount/OTP仅描述来源DVD布局，不能当成BD目标层控制。 */
     unsigned layerCount;
     bool oppositeTrackPath, mds;
 } DataImageSource;

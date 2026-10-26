@@ -125,7 +125,7 @@ static bool job_inspect(GuiJob* job) {
     if (type == IMAGE_TYPE_MDS) {
         MdsSheet* mds = (MdsSheet*)calloc(1, sizeof(*mds)); if (!mds) return false;
         bool ok = imgburn_mds_parse(path, mds);
-        if (ok) { job_text(job, L"MDS：%u 会话，%d 轨道，%u 扇区\r\n分卷：%u\r\n层切换：%u\r\n路径：%ls\r\n", mds->sessionCount, mds->trackCount, mds->totalSectors, mds->dataFileCount, mds->layerBreakLba, mds->oppositeTrackPath ? L"OTP" : L"PTP"); for (unsigned i = 0; i < mds->dataFileCount; i++) job_text(job, L"%ls\r\n", mds->files[i].path); }
+        if (ok) { job_text(job, L"MDS来源：%u 会话，%d 轨道，%u 扇区\r\n分卷：%u\r\n来源层切换（仅描述）：%u\r\n来源路径：%ls\r\n", mds->sessionCount, mds->trackCount, mds->totalSectors, mds->dataFileCount, mds->layerBreakLba, mds->oppositeTrackPath ? L"OTP" : L"PTP"); for (unsigned i = 0; i < mds->dataFileCount; i++) job_text(job, L"%ls\r\n", mds->files[i].path); }
         if (ok) {
             job->sourceSectors = mds->totalSectors; uint32_t bytes = mds->trackCount ? mds->tracks[0].sectorSize : 0; for (int i = 1; i < mds->trackCount; i++) if (mds->tracks[i].sectorSize != bytes) bytes = 0; job->sourceSectorBytes = bytes; job->sourceBytes = (uint64_t)mds->totalSectors * bytes;
             DataImageSource source = {0}; if (imgburn_data_source_open(&source,path)) { job->sourceSectors = source.sectors; job->sourceSectorBytes = 2048; job->sourceBytes = (uint64_t)source.sectors * 2048; ok = job_source_descriptors(job,NULL,&source,source.sectors,false); imgburn_data_source_close(&source); }
