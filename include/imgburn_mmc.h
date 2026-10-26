@@ -162,6 +162,21 @@ typedef struct {
 bool mmc_read_bd_disc_structure(OpticalDrive* drive, MmcBdDiscStructure* structure);
 const char* mmc_get_bd_physical_type_name(MmcBdPhysicalType type);
 
+/* READ FORMAT CAPACITIES最多31个描述符：首个当前/最大描述符及30个设备格式描述符。 */
+enum { MMC_MAX_FORMAT_CAPACITIES = 30 };
+typedef struct {
+    uint32_t blockCount, typeDependentParameter;
+    uint8_t formatType;
+} MmcFormattableCapacity;
+typedef struct {
+    uint32_t blockCount, typeDependentParameter;
+    uint8_t descriptorCode, formatCount;
+    MmcFormattableCapacity formats[MMC_MAX_FORMAT_CAPACITIES];
+} MmcFormatCapacities;
+/* 原始24位参数依介质/类型解释，BD-RE当前参数为备区簇数，不能一律当扇区字节数。
+ * 单次23h只读查询，不选择或执行格式化；未知/重复格式及设备顺序保留，失败输出清零。 */
+bool mmc_read_format_capacities(OpticalDrive* drive, MmcFormatCapacities* capacities);
+
 /**
  * @brief Synchronize Cache / Flush FIFO (SCSI 0x35)
  */

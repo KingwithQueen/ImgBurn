@@ -175,7 +175,20 @@ static int cmd_devices(void) {
 
 /* BD的物理身份与当前Profile分别报告；容量只表示可读范围或空白轨1空余。 */
 static bool cli_bd_profile(MmcProfile profile) { return profile >= MMC_PROFILE_BD_ROM && profile <= MMC_PROFILE_BD_RE; }
-static bool cli_bd_information(OpticalDrive* drive) {
+/* 23h只提供描述符；BDRE的TDP是备用簇信息，不能当作块长度相乘。 */
+static void cli_bd_format_capacities(OpticalDrive* drive) {
+    MmcFormatCapacities capacity;
+    if (!mmc_read_format_capacities(drive,&capacity)) { printf("  BD-RE Format State:   Unknown (error %lu)\n",GetLastError()); return; }
+    const char* state = capacity.descriptorCode == 1 ? "Unformatted or Blank" : capacity.descriptorCode == 2 ? "Formatted" : "No Media or Unknown Capacity";
+    printf("  BD-RE Format State:   %s\n  Format Capacities:\n",state);
+    printf("    Current/Maximum: DT=%u | Blocks=%u | Raw TDP=0x%06X\n",capacity.descriptorCode,capacity.blockCount,capacity.typeDependentParameter);
+    if (capacity.descriptorCode == 1) printf("    Maximum Spare Clusters: %u\n",capacity.typeDependentParameter);
+    else if (capacity.descriptorCode == 2) printf("    Allocated Spare Clusters: %u\n",capacity.typeDependentParameter);
+    else printf("    Descriptor values do not establish the current medium capacity.\n");
+    if (!capacity.formatCount) printf("    Formattable descriptors: None returned.\n");
+    for (unsigned i = 0; i < capacity.formatCount; i++) { const MmcFormattableCapacity* format = &capacity.formats[i]; printf("    Formattable [%u]: FT=0x%02X | Blocks=%u | Raw TDP=0x%06X\n",i,format->formatType,format->blockCount,format->typeDependentParameter); }
+}
+static bool cli_bd_information(OpticalDrive* drive, MmcProfile profile) {
     MmcBdDiscStructure structure; bool identified = mmc_read_bd_disc_structure(drive,&structure); DWORD identifyError = GetLastError();
     if (identified) {
         printf("  Current BD Profile:   0x%04X\n",structure.currentProfile);
@@ -199,6 +212,7 @@ static bool cli_bd_information(OpticalDrive* drive) {
         if (readCapacity && bytes) { uint64_t sectors = (uint64_t)last + 1; printf("  Readable Capacity:    %llu sectors, %u bytes/sector (%llu bytes)\n",sectors,bytes,sectors * bytes); capacityKnown = true; }
         else { capacityError = readCapacity ? ERROR_INVALID_DATA : GetLastError(); printf("  Readable Capacity:    Unknown (error %lu)\n",capacityError); }
     }
+    if (profile == MMC_PROFILE_BD_RE || (identified && structure.physicalType == MMC_BD_PHYSICAL_RE)) cli_bd_format_capacities(drive);
     return identified && capacityKnown;
 }
 static int cmd_bd_info(const char* driveArg) {
@@ -207,7 +221,7 @@ static int cmd_bd_info(const char* driveArg) {
     bool ok = mmc_test_unit_ready(&drive);
     if (ok) {
         MmcProfile profile = mmc_get_current_profile(&drive);
-        if (cli_bd_profile(profile)) ok = cli_bd_information(&drive);
+        if (cli_bd_profile(profile)) ok = cli_bd_information(&drive,profile);
         else { printf("  BD Information:       Unknown; current Profile 0x%04X is not supported.\n",profile); ok = false; }
     } else printf("  BD Information:       Unknown; device is not ready (error %lu).\n",GetLastError());
     spti_close_drive(&drive); return ok ? 0 : 1;
@@ -258,7 +272,7 @@ static int cmd_info(const char *driveArg) {
         MmcProfile prof = mmc_get_current_profile(&drive);
         printf("  Current Media:        %s (Profile 0x%04X)\n", mmc_get_profile_name(prof), prof);
 
-        if (cli_bd_profile(prof)) cli_bd_information(&drive);
+        if (cli_bd_profile(prof)) cli_bd_information(&drive,prof);
         else {
             uint32_t lastLba = 0, blockSize = 0;
             if (mmc_read_capacity(&drive, &lastLba, &blockSize)) {

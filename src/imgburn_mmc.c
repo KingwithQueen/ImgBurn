@@ -24,6 +24,10 @@ static inline uint16_t read_be16(const uint8_t* p) {
     return (uint16_t)((p[0] << 8) | p[1]);
 }
 
+static inline uint32_t read_be24(const uint8_t* p) {
+    return ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[2];
+}
+
 static inline uint32_t read_be32(const uint8_t* p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
 }
@@ -493,6 +497,28 @@ bool mmc_read_bd_disc_structure(OpticalDrive* drive, MmcBdDiscStructure* structu
     for (unsigned i = (unsigned)parsed.diUnitCount * 112; i < 3584; i++) if (first[i]) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
     *structure = parsed; return true;
 }
+/* 仅解码声明的描述符范围；返回的额外分配区字节不当作新格式，原始参数不推算容量。 */
+bool mmc_read_format_capacities(OpticalDrive* drive, MmcFormatCapacities* capacities) {
+    if (capacities) memset(capacities,0,sizeof(*capacities));
+    if (!drive || !capacities) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    uint8_t cdb[10] = {0x23}, data[252] = {0}; cdb[8] = (uint8_t)sizeof(data);
+    if (!spti_send_cdb(drive,cdb,10,data,sizeof(data),true,10)) return false;
+    if (drive->lastTransferBytes < 4 || drive->lastTransferBytes > sizeof(data)) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
+    unsigned length = data[3];
+    if (length < 8 || length > 248 || length % 8 || data[0] || data[1] || data[2]) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+    if (drive->lastTransferBytes < 4 + length) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
+    if ((data[8] & 0xFC) || !(data[8] & 3)) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+    MmcFormatCapacities parsed = {0}; parsed.blockCount = read_be32(data + 4); parsed.descriptorCode = data[8] & 3;
+    parsed.typeDependentParameter = read_be24(data + 9); parsed.formatCount = (uint8_t)(length / 8 - 1);
+    for (unsigned i = 0; i < parsed.formatCount; i++) {
+        const uint8_t* descriptor = data + 12 + i * 8;
+        if (descriptor[4] & 3) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+        parsed.formats[i].blockCount = read_be32(descriptor); parsed.formats[i].formatType = descriptor[4] >> 2;
+        parsed.formats[i].typeDependentParameter = read_be24(descriptor + 5);
+    }
+    *capacities = parsed; return true;
+}
+
 bool mmc_set_burn_speed(OpticalDrive* drive, MmcProfile profile, uint32_t writeSpeedKbps) {
     if (profile != MMC_PROFILE_BD_R_SRM && profile != MMC_PROFILE_DVD_R_SEQ && profile != MMC_PROFILE_DVD_R_DL_SEQ && profile != MMC_PROFILE_DVD_PLUS_R && profile != MMC_PROFILE_DVD_PLUS_R_DL && profile != MMC_PROFILE_CD_R) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
     uint32_t speed = !writeSpeedKbps || writeSpeedKbps == 0xFFFF ? UINT32_MAX : writeSpeedKbps;
