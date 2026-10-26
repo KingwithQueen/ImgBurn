@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 
 /* SCSI Status Codes */
 #define SCSI_STATUS_GOOD             0x00
@@ -382,45 +383,23 @@ bool spti_set_mcn_control(OpticalDrive* drive, bool disable) {
     return ok != FALSE;
 }
 
-static void parse_sense_data(OpticalDrive* drive, const uint8_t* senseBuf, uint8_t senseLen) {
-    ScsiSenseResult* res = &drive->lastSense;
-    memset(res, 0, sizeof(*res));
-
-    if (!senseBuf || senseLen < 4) {
-        return;
-    }
-
-    res->senseLength = (senseLen > SENSE_BUFFER_SIZE) ? SENSE_BUFFER_SIZE : senseLen;
-    memcpy(res->senseBuffer, senseBuf, res->senseLength);
-
-    res->responseCode = senseBuf[0] & 0x7F;
+static bool parse_sense_data(OpticalDrive* drive, const uint8_t* senseBuf, uint8_t senseLen) {
+    ScsiSenseResult* res = &drive->lastSense; memset(res,0,sizeof(*res));
+    if (!senseBuf || !senseLen) return false;
+    senseLen = senseLen > SENSE_BUFFER_SIZE ? SENSE_BUFFER_SIZE : senseLen;
+    /* 可用长度同时受实际返回范围与sense自身附加长度限制。 */
+    if (senseLen >= 8 && (unsigned)senseBuf[7] + 8 < senseLen) senseLen = (uint8_t)(senseBuf[7] + 8);
+    res->senseLength = senseLen; memcpy(res->senseBuffer,senseBuf,senseLen); res->responseCode = senseBuf[0] & 0x7F;
     if (res->responseCode == 0x70 || res->responseCode == 0x71) {
-        /* Standard fixed format sense data */
-        res->senseKey = senseBuf[2] & 0x0F;
-        if (senseLen >= 13) {
-            res->asc = senseBuf[12];
-        }
-        if (senseLen >= 14) {
-            res->ascq = senseBuf[13];
-        }
+        /* 短固定格式仍可提供key；不足的ASC/ASCQ不解释为设备返回零。 */
+        if (senseLen < 3) return false; res->senseKey = senseBuf[2] & 0x0F;
+        if (senseLen >= 13) res->asc = senseBuf[12];
+        if (senseLen >= 14) { res->ascq = senseBuf[13]; res->ascAscqStr = lookup_asc_ascq(res->asc,res->ascq); }
     } else if (res->responseCode == 0x72 || res->responseCode == 0x73) {
-        /* Descriptor format sense data */
-        res->senseKey = senseBuf[1] & 0x0F;
-        if (senseLen >= 3) {
-            res->asc = senseBuf[2];
-        }
-        if (senseLen >= 4) {
-            res->ascq = senseBuf[3];
-        }
-    }
-
-    if (res->senseKey < sizeof(SENSE_KEY_STRINGS) / sizeof(SENSE_KEY_STRINGS[0])) {
-        res->senseKeyStr = SENSE_KEY_STRINGS[res->senseKey];
-    } else {
-        res->senseKeyStr = "UNKNOWN SENSE KEY";
-    }
-
-    res->ascAscqStr = lookup_asc_ascq(res->asc, res->ascq);
+        if (senseLen < 4) return false; res->senseKey = senseBuf[1] & 0x0F; res->asc = senseBuf[2]; res->ascq = senseBuf[3]; res->ascAscqStr = lookup_asc_ascq(res->asc,res->ascq);
+    } else return false;
+    res->senseKeyStr = res->senseKey < sizeof(SENSE_KEY_STRINGS) / sizeof(SENSE_KEY_STRINGS[0]) ? SENSE_KEY_STRINGS[res->senseKey] : "UNKNOWN SENSE KEY";
+    return true;
 }
 
 bool spti_send_cdb(OpticalDrive* drive,
@@ -430,7 +409,12 @@ bool spti_send_cdb(OpticalDrive* drive,
                    uint32_t dataLength,
                    bool isDataIn,
                    uint32_t timeoutSeconds) {
-    if (drive) drive->lastTransferBytes = 0;
+    if (drive) {
+        drive->lastTransferBytes = 0; drive->lastError = ERROR_SUCCESS; memset(&drive->lastSense,0,sizeof(drive->lastSense)); memset(&drive->lastCommand,0,sizeof(drive->lastCommand));
+        drive->lastCommand.cdbLength = cdbLength; drive->lastCommand.requestedTransferBytes = dataLength;
+        if (cdb && (cdbLength == 6 || cdbLength == 10 || cdbLength == 12 || cdbLength == 16)) memcpy(drive->lastCommand.cdb,cdb,cdbLength);
+        else if (cdb && cdbLength) drive->lastCommand.cdb[0] = cdb[0];
+    }
     if (!drive || !drive->hDevice || drive->hDevice == INVALID_HANDLE_VALUE || !cdb ||
         (cdbLength != 6 && cdbLength != 10 && cdbLength != 12 && cdbLength != 16) || (dataLength > 0 && !dataBuffer)) {
         if (drive) drive->lastError = ERROR_INVALID_PARAMETER;
@@ -456,6 +440,7 @@ bool spti_send_cdb(OpticalDrive* drive,
     sptdwb.sptd.SenseInfoOffset = (ULONG)((ULONG_PTR)&sptdwb.SenseBuf[0] - (ULONG_PTR)&sptdwb.sptd);
 
     DWORD bytesReturned = 0;
+    drive->lastCommand.attempted = true;
     BOOL ok = DeviceIoControl(drive->hDevice,
                               IOCTL_SCSI_PASS_THROUGH_DIRECT,
                               &sptdwb,
@@ -465,33 +450,47 @@ bool spti_send_cdb(OpticalDrive* drive,
                               &bytesReturned,
                               NULL);
 
-    if (!ok) {
-        drive->lastError = GetLastError();
-        return false;
-    }
-
-    if (sptdwb.sptd.ScsiStatus != SCSI_STATUS_GOOD) {
-        /* Parse sense buffer if available */
-        if (sptdwb.sptd.SenseInfoLength > 0) {
-            parse_sense_data(drive, sptdwb.SenseBuf, sptdwb.sptd.SenseInfoLength);
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError(); SptiCommandResult* result = &drive->lastCommand;
+    result->ioctlSucceeded = ok != FALSE; result->win32Error = error; result->outputBytes = bytesReturned;
+    result->outputHeaderValid = bytesReturned >= sizeof(sptdwb.sptd) && bytesReturned <= sizeof(sptdwb) && sptdwb.sptd.Length == sizeof(sptdwb.sptd) && sptdwb.sptd.CdbLength == cdbLength;
+    if (result->outputHeaderValid) {
+        result->scsiStatusValid = true; result->scsiStatus = sptdwb.sptd.ScsiStatus;
+        result->reportedTransferBytes = sptdwb.sptd.DataTransferLength; result->transferLengthValid = result->reportedTransferBytes <= dataLength;
+        size_t senseOffset = offsetof(SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER,SenseBuf);
+        if (result->scsiStatus != SCSI_STATUS_GOOD && sptdwb.sptd.SenseInfoOffset == senseOffset && bytesReturned > senseOffset) {
+            uint32_t senseBytes = bytesReturned - (uint32_t)senseOffset;
+            if (senseBytes > sptdwb.sptd.SenseInfoLength) senseBytes = sptdwb.sptd.SenseInfoLength;
+            if (senseBytes > SENSE_BUFFER_SIZE) senseBytes = SENSE_BUFFER_SIZE;
+            result->senseValid = parse_sense_data(drive,sptdwb.SenseBuf,(uint8_t)senseBytes);
         }
-        drive->lastError = ERROR_IO_DEVICE; SetLastError(ERROR_IO_DEVICE); return false;
     }
-
-    /* Success: clear last sense */
-    memset(&drive->lastSense, 0, sizeof(drive->lastSense));
-    drive->lastTransferBytes = sptdwb.sptd.DataTransferLength;
-    drive->lastError = ERROR_SUCCESS;
-    return true;
+    /* 传输错误优先保留原始Windows错误，状态和sense只作为独立诊断。 */
+    if (!ok) { drive->lastError = error; SetLastError(error); return false; }
+    if (!result->outputHeaderValid) { drive->lastError = ERROR_READ_FAULT; SetLastError(ERROR_READ_FAULT); return false; }
+    if (result->scsiStatus != SCSI_STATUS_GOOD) { drive->lastError = ERROR_IO_DEVICE; SetLastError(ERROR_IO_DEVICE); return false; }
+    if (!result->transferLengthValid) { error = isDataIn ? ERROR_READ_FAULT : ERROR_WRITE_FAULT; drive->lastError = error; SetLastError(error); return false; }
+    memset(&drive->lastSense,0,sizeof(drive->lastSense)); result->senseValid = false;
+    drive->lastTransferBytes = result->reportedTransferBytes; drive->lastError = ERROR_SUCCESS; SetLastError(ERROR_SUCCESS); return true;
 }
 
 void spti_format_sense_error(const ScsiSenseResult* sense, char* outBuffer, size_t maxLen) {
-    if (!sense || !outBuffer || maxLen == 0) return;
-    snprintf(outBuffer, maxLen,
-             "Sense Key: %s\n"
-             "ASC: 0x%02X, ASCQ: 0x%02X\n"
-             "Interpretation: %s",
-             sense->senseKeyStr ? sense->senseKeyStr : "None",
-             sense->asc, sense->ascq,
-             sense->ascAscqStr ? sense->ascAscqStr : "Unknown");
+    if (!outBuffer || !maxLen) return;
+    if (!sense || !sense->senseKeyStr || !sense->senseLength || ((sense->responseCode != 0x70 && sense->responseCode != 0x71) && (sense->responseCode != 0x72 && sense->responseCode != 0x73))) { snprintf(outBuffer,maxLen,"No valid sense data was returned."); return; }
+    bool descriptor = sense->responseCode == 0x72 || sense->responseCode == 0x73;
+    char ascText[16] = "unavailable", ascqText[16] = "unavailable";
+    if (descriptor || sense->senseLength >= 13) snprintf(ascText,sizeof(ascText),"0x%02X",sense->asc);
+    if (descriptor || sense->senseLength >= 14) snprintf(ascqText,sizeof(ascqText),"0x%02X",sense->ascq);
+    snprintf(outBuffer,maxLen,"Sense Key: %s\nASC: %s, ASCQ: %s\nInterpretation: %s",sense->senseKeyStr,ascText,ascqText,sense->ascAscqStr ? sense->ascAscqStr : "Unavailable in returned sense data");
+}
+
+void spti_format_command_error(const OpticalDrive* drive, char* outBuffer, size_t maxLen) {
+    if (!outBuffer || !maxLen) return;
+    if (!drive) { snprintf(outBuffer,maxLen,"No command diagnostic is available."); return; }
+    const SptiCommandResult* result = &drive->lastCommand; char heading[160], status[64], sense[384];
+    if (!result->attempted) snprintf(heading,sizeof(heading),"Command %02Xh was not sent (error %u).",result->cdb[0],drive->lastError);
+    else if (!result->ioctlSucceeded) snprintf(heading,sizeof(heading),"Transport error %u for command %02Xh (returned bytes %u).",result->win32Error,result->cdb[0],result->outputBytes);
+    else snprintf(heading,sizeof(heading),"Command %02Xh error %u (IOCTL completed, returned bytes %u).",result->cdb[0],drive->lastError,result->outputBytes);
+    if (result->scsiStatusValid) snprintf(status,sizeof(status),"SCSI status: 0x%02X.",result->scsiStatus); else snprintf(status,sizeof(status),"SCSI status: unavailable.");
+    if (result->senseValid) spti_format_sense_error(&drive->lastSense,sense,sizeof(sense)); else snprintf(sense,sizeof(sense),"No valid sense data was returned.");
+    snprintf(outBuffer,maxLen,"%s\n%s\n%s",heading,status,sense);
 }

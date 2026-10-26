@@ -77,6 +77,7 @@ typedef struct {
     bool performOpc;                /* 显式请求写入前功率校准，默认关闭。 */
     uint32_t layerBreakLba;          /* DVD+R DL用户指定L0容量，覆盖MDS；0采用MDS或按ECC块平衡。 */
     bool keepCurrentWriteSpeed;     /* 显式沿用设备当前速度，不发送速度设置；默认false保留原有速度请求。 */
+    bool bdNoReserve;               /* 显式BD-R SRM不再预留，可用完整核对的已有空预留轨；不自动回退，不能与reserveTrack合用。 */
 } BurnConfig;
 
 /**

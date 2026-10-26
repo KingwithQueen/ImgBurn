@@ -51,6 +51,23 @@ typedef struct {
     const char* ascAscqStr;         /* Human-readable ASC/ASCQ description */
 } ScsiSenseResult;
 
+/* 最近一次命令的传输诊断；无有效返回字段时不能把请求初值解释为设备结果。 */
+typedef struct {
+    bool attempted;                 /* 是否实际提交过SPTI请求。 */
+    bool ioctlSucceeded;            /* DeviceIoControl的布尔结果。 */
+    bool outputHeaderValid;         /* 返回范围包含完整且匹配的SPTI头。 */
+    bool scsiStatusValid;
+    bool transferLengthValid;
+    bool senseValid;
+    uint8_t cdb[16];
+    uint8_t cdbLength;
+    uint8_t scsiStatus;
+    uint32_t win32Error;            /* 传输层原始错误；SCSI失败不冒充此值。 */
+    uint32_t outputBytes;
+    uint32_t requestedTransferBytes;
+    uint32_t reportedTransferBytes;
+} SptiCommandResult;
+
 /**
  * @brief Drive Handle and state
  */
@@ -64,6 +81,7 @@ typedef struct {
     uint32_t lastTransferBytes;     /* 最近一次成功命令实际传输的字节数。 */
     DWORD deviceAccess;             /* 打开设备时实际采用的访问标志。 */
     bool accessKnown;               /* 外部自行提供句柄时，访问标志可能未知。 */
+    SptiCommandResult lastCommand;  /* 后续命令会覆盖；调用方应在失败时保存所需诊断。 */
 } OpticalDrive;
 
 /**
@@ -125,6 +143,9 @@ bool spti_send_cdb(OpticalDrive* drive,
  * @brief Format sense data into human readable string
  */
 void spti_format_sense_error(const ScsiSenseResult* sense, char* outBuffer, size_t maxLen);
+
+/* 同时区分传输失败、设备状态与实际可用sense，不执行额外命令。 */
+void spti_format_command_error(const OpticalDrive* drive, char* outBuffer, size_t maxLen);
 
 #ifdef __cplusplus
 }

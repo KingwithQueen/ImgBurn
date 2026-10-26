@@ -86,7 +86,7 @@ static void print_usage(void) {
     printf("                                 Read data ISO or raw CD BIN/CUE with Q indexes\n");
     printf("                                 MDS destination saves MODE1 CD or single/dual-layer DVD data files\n");
     printf("                                 --split sets a per-file MiB limit for MDS; auto follows the target volume file limit\n");
-    printf("  burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle] [--opc]\n");
+    printf("  burn <drive> <image> [--speed <Nx|MAX|KEEP>] [--test] [--verify] [--reserve|--bd-no-reserve] [--no-cycle] [--opc]\n");
     printf("                                 Burn ISO/BIN, data MDS or supported CD CUE images\n");
     printf("                                 DVD+R DL uses MDS/automatic L0; --layer-break <sectors> overrides it\n"
            "                                 DVD-R DL DAO uses the fixed medium layer boundary\n");
@@ -590,7 +590,7 @@ static int cmd_erase(int argc, char** argv) {
 
 static int cmd_burn(int argc, char **argv) {
     if (argc < 4) {
-        printf("Usage: imgburn burn <drive> <image> [--speed <Nx|MAX>] [--test] [--verify] [--reserve] [--no-cycle] [--opc]\n");
+        printf("Usage: imgburn burn <drive> <image> [--speed <Nx|MAX|KEEP>] [--test] [--verify] [--reserve|--bd-no-reserve] [--no-cycle] [--opc]\n");
         return 1;
     }
 
@@ -598,32 +598,36 @@ static int cmd_burn(int argc, char **argv) {
     const char *imageArg = argv[3];
     bool testMode = false;
     bool verifyAfter = false;
-    double speed = 0; bool reserve = false, cycle = true, opc = false; uint32_t layerBreak = 0;
+    double speed = 0; bool reserve = false, cycle = true, opc = false, bdNoReserve = false, keepSpeed = false; uint32_t layerBreak = 0;
 
     for (int i = 4; i < argc; i++) {
         if (_stricmp(argv[i], "--test") == 0) testMode = true;
         else if (_stricmp(argv[i], "--verify") == 0) verifyAfter = true;
         else if (_stricmp(argv[i], "--reserve") == 0) reserve = true;
+        else if (_stricmp(argv[i], "--bd-no-reserve") == 0) bdNoReserve = true;
         else if (_stricmp(argv[i], "--no-cycle") == 0) cycle = false;
         else if (_stricmp(argv[i], "--opc") == 0) opc = true;
         else if (!_stricmp(argv[i],"--layer-break") && i + 1 < argc) { const char* value = argv[++i]; char* end; uint64_t amount = _strtoui64(value,&end,10); if (!value[0] || *end || value[0] == '-' || !amount || amount > UINT32_MAX || amount % 16) { printf("Error: Layer capacity must be a nonzero multiple of 16 sectors.\n"); return 1; } layerBreak = (uint32_t)amount; }
         else if (_stricmp(argv[i], "--speed") == 0 && i + 1 < argc) {
-            const char* value = argv[++i]; if (!_stricmp(value,"MAX")) speed = 0;
+            const char* value = argv[++i]; keepSpeed = !_stricmp(value,"KEEP"); if (keepSpeed || !_stricmp(value,"MAX")) speed = 0;
             else { char* end; speed = strtod(value,&end); if ((*end == 'x' || *end == 'X') && !end[1]) end++; if (!value[0] || *end || !isfinite(speed) || speed < 1 || speed * 4495.5 + 0.5 >= UINT32_MAX) { printf("Error: Invalid write speed.\n"); return 1; } }
         } else { printf("Error: Unknown or incomplete burn option.\n"); return 1; }
     }
+
+    if (bdNoReserve && reserve) { printf("Error: --bd-no-reserve conflicts with --reserve.\n"); return 1; }
 
     wchar_t drivePath[MAX_PATH], imagePath[MAX_PATH];
     if (!parse_drive_path(driveArg, drivePath, MAX_PATH) || !utf8_path(imageArg, imagePath, MAX_PATH)) return 1;
 
     wprintf(L"Target Drive: %ls\n", drivePath);
     wprintf(L"Source Image: %ls\n", imagePath);
-    printf("Options: TestMode=%s, VerifyAfterBurn=%s, Speed=%.2fx (0=MAX)\n\n",
-           testMode ? "YES" : "NO", verifyAfter && !testMode ? "YES" : "NO", speed);
+    if (keepSpeed) printf("Options: TestMode=%s, VerifyAfterBurn=%s, Speed=KEEP (current drive speed)\n\n",testMode ? "YES" : "NO",verifyAfter && !testMode ? "YES" : "NO");
+    else printf("Options: TestMode=%s, VerifyAfterBurn=%s, Speed=%.2fx (0=MAX)\n\n",testMode ? "YES" : "NO",verifyAfter && !testMode ? "YES" : "NO",speed);
+    if (bdNoReserve) printf("BD-R SRM: no new track reservation; any existing empty reserved track must match this image.\n");
 
     OpticalDrive drive;
-    if (!spti_open_drive(&drive, drivePath, true)) {
-        printf("Error: Failed to open drive with exclusive lock.\n");
+    if (!(bdNoReserve ? spti_open_drive_passive(&drive,drivePath) : spti_open_drive(&drive, drivePath, true))) {
+        printf("Error: Cannot open target drive (error %lu).\n",GetLastError());
         return 1;
     }
 
@@ -637,7 +641,7 @@ static int cmd_burn(int argc, char **argv) {
     if (speed > 0 && speedProfile == MMC_PROFILE_UNKNOWN) { printf("Error: Cannot identify media for write speed.\n"); spti_close_drive(&drive); return 1; }
     config.writeSpeedKbps = speed > 0 ? (uint32_t)(speed * (speedProfile == MMC_PROFILE_BD_R_SRM ? 4495.5 : speedProfile == MMC_PROFILE_CD_R ? 176.4 : 1385.0) + 0.5) : UINT32_MAX;
     config.ringBufferBytes = 32 * 1024 * 1024;
-    config.reserveTrack = reserve; config.cycleTrayBeforeVerify = cycle; config.performOpc = opc; config.layerBreakLba = layerBreak;
+    config.reserveTrack = reserve; config.cycleTrayBeforeVerify = cycle; config.performOpc = opc; config.layerBreakLba = layerBreak; config.bdNoReserve = bdNoReserve; config.keepCurrentWriteSpeed = keepSpeed;
     HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; } config.cancelEvent = cancel;
     AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock); bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
 
