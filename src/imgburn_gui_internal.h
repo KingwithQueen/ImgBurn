@@ -8,7 +8,7 @@
 #include "imgburn_iso_session.h"
 
 typedef enum { GUI_EZ, GUI_READ, GUI_BUILD, GUI_WRITE, GUI_VERIFY, GUI_DISCOVERY } GuiMode;
-typedef enum { GUI_CALCULATE, GUI_BUILD_IMAGE, GUI_INSPECT, GUI_CREATE_CUE, GUI_CREATE_MDS, GUI_DRIVE_INFO, GUI_VERIFY_DISC, GUI_WRITE_DISC, GUI_DVD_INFO, GUI_DVD_PREVIEW, GUI_READ_DISC, GUI_ERASE_QUICK, GUI_ERASE_FULL, GUI_DISCOVERY_DISC, GUI_DVD_CANDIDATES, GUI_CD_ISO_PLAN, GUI_CD_ISO_WRITE, GUI_WRITE_OPTIONS, GUI_READ_OPTIONS, GUI_READ_DEST_INFO, GUI_BD_RE_FORMAT_LIST, GUI_BD_RE_FORMAT } GuiOperation;
+typedef enum { GUI_CALCULATE, GUI_BUILD_IMAGE, GUI_INSPECT, GUI_CREATE_CUE, GUI_CREATE_MDS, GUI_DRIVE_INFO, GUI_VERIFY_DISC, GUI_WRITE_DISC, GUI_DVD_INFO, GUI_DVD_PREVIEW, GUI_READ_DISC, GUI_ERASE_QUICK, GUI_ERASE_FULL, GUI_DISCOVERY_DISC, GUI_DVD_CANDIDATES, GUI_CD_ISO_PLAN, GUI_CD_ISO_WRITE, GUI_WRITE_OPTIONS, GUI_READ_OPTIONS, GUI_READ_DEST_INFO, GUI_BD_RE_FORMAT_LIST, GUI_BD_RE_FORMAT, GUI_BD_R_FORMAT_LIST, GUI_BD_R_FORMAT } GuiOperation;
 typedef struct { wchar_t path[MAX_PATH]; } GuiPath;
 enum { GUI_JOB_PROGRESS = WM_APP + 40, GUI_JOB_DONE, GUI_JOB_STATUS };
 
@@ -38,6 +38,10 @@ typedef struct {
     MmcFormatCapacities bdReCapacities;
     BdReFormatConfig bdReFormat;
     BdReFormatResult bdReFormatResult;
+    BdRFormatConfig bdRFormat;
+    BdRFormatResult bdRFormatResult;
+    BdWriteType bdWriteType;
+    bool bdDisableVnr; /* 仅本次明确的BD-R写入意图，不作为覆盖或格式化授权。 */
     bool sourceInfoReady;
     uint64_t sourceBytes;
     uint32_t sourceSectors, sourceSectorBytes;

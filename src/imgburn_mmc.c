@@ -434,6 +434,17 @@ bool mmc_set_write_parameters(OpticalDrive* drive, const MmcWriteParameters* par
     if (!spti_send_cdb(drive,cdb,10,data,size,false,10)) return false;
     if (drive->lastTransferBytes != size) return mmc_write_parameter_error(drive,ERROR_WRITE_FAULT); return true;
 }
+bool mmc_build_bd_write_parameters(const MmcWriteParameters* current, uint8_t writeType, MmcWriteParameters* parameters) {
+    /* 先复制再清输出，允许输入输出为同一对象；失败始终原子清零。 */
+    MmcWriteParameters parsed = {0}; if (current) parsed = *current;
+    if (parameters) memset(parameters,0,sizeof(*parameters));
+    if (!current || !parameters || (writeType != 0 && writeType != 2) || (parsed.size != 52 && parsed.size != 56) || (parsed.page[0] & 0x7F) != 5 || parsed.page[1] + 2 != parsed.size) return mmc_write_parameter_error(NULL,ERROR_INVALID_PARAMETER);
+    parsed.page[2] = (uint8_t)((parsed.page[2] & 0xF0) | writeType);
+    parsed.page[3] = (uint8_t)((parsed.page[3] & 0xD0) | 0x24);
+    parsed.page[4] = (uint8_t)((parsed.page[4] & 0xF0) | 8); parsed.page[8] = 0;
+    write_be32(parsed.page + 10,16); write_be16(parsed.page + 14,150);
+    *parameters = parsed; return true;
+}
 bool mmc_perform_opc(OpticalDrive* drive) { uint8_t cdb[10] = {0x54,1}; return spti_send_cdb(drive,cdb,10,NULL,0,true,180); }
 
 bool mmc_get_bd_write_features(OpticalDrive* drive, bool* verifyNotRequired) {
@@ -449,11 +460,11 @@ bool mmc_get_bd_write_features(OpticalDrive* drive, bool* verifyNotRequired) {
 }
 
 /* RT2只取指定功能；未声明的可选功能作为不Current快照保留，不推测无备区盘的缺陷管理。 */
-static bool mmc_get_bd_re_feature(OpticalDrive* drive, uint16_t feature, uint8_t size, uint8_t* data, bool* present) {
+static bool mmc_get_bd_feature(OpticalDrive* drive, MmcProfile profile, uint16_t feature, uint8_t size, uint8_t* data, bool* present) {
     uint8_t cdb[10] = {0x46,2}; write_be16(cdb + 2,feature); cdb[8] = size; memset(data,0,size); *present = false;
     if (!spti_send_cdb(drive,cdb,10,data,size,true,10)) return false;
     if (drive->lastTransferBytes < 8 || drive->lastTransferBytes > size) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
-    if (read_be16(data + 6) != MMC_PROFILE_BD_RE) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    if (read_be16(data + 6) != profile) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
     if (drive->lastTransferBytes == 8 && read_be32(data) == 4) return true;
     if (drive->lastTransferBytes != size || read_be32(data) < (uint32_t)size - 4) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
     if (read_be16(data + 8) != feature || data[11] != size - 12) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
@@ -463,23 +474,61 @@ bool mmc_get_bd_re_features(OpticalDrive* drive, MmcBdReFeatures* features) {
     if (features) memset(features,0,sizeof(*features));
     if (!drive || !features) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
     MmcBdReFeatures parsed = {0}; uint8_t data[32]; bool present;
-    if (!mmc_get_bd_re_feature(drive,0x41,32,data,&present)) return false;
+    if (!mmc_get_bd_feature(drive,MMC_PROFILE_BD_RE,0x41,32,data,&present)) return false;
     /* 0041的前8位图字节属于BD-RE；只接受本批已解析的Class0/Version2确切位。 */
     if (!present || !(read_be16(data + 16) & 4)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
     parsed.bdWriteCurrent = (data[10] & 1) != 0; parsed.verifyNotRequired = (data[12] & 1) != 0;
-    if (!mmc_get_bd_re_feature(drive,0x23,20,data,&present)) return false;
+    if (!mmc_get_bd_feature(drive,MMC_PROFILE_BD_RE,0x23,20,data,&present)) return false;
     if (present) {
         parsed.formattableCurrent = (data[10] & 1) != 0; parsed.fullCertification = (data[12] & 1) != 0;
         parsed.quickCertification = (data[12] & 2) != 0; parsed.noSpareAreas = (data[12] & 8) != 0;
     }
-    if (!mmc_get_bd_re_feature(drive,0x20,24,data,&present)) return false;
+    if (!mmc_get_bd_feature(drive,MMC_PROFILE_BD_RE,0x20,24,data,&present)) return false;
     if (present) {
         parsed.randomWritableCurrent = (data[10] & 1) != 0; parsed.lastLba = read_be32(data + 12);
         parsed.blockSize = read_be32(data + 16); parsed.blocking = read_be16(data + 20);
     }
-    if (!mmc_get_bd_re_feature(drive,0x24,16,data,&present)) return false;
+    if (!mmc_get_bd_feature(drive,MMC_PROFILE_BD_RE,0x24,16,data,&present)) return false;
     if (present) parsed.defectManagementCurrent = (data[10] & 1) != 0;
     *features = parsed; return true;
+}
+
+bool mmc_get_bd_r_format_features(OpticalDrive* drive, MmcBdRFormatFeatures* features) {
+    if (features) memset(features,0,sizeof(*features));
+    if (!drive || !features) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    MmcBdRFormatFeatures parsed = {0}; uint8_t data[40]; bool present;
+    if (!mmc_get_bd_feature(drive,MMC_PROFILE_BD_R_SRM,0x23,20,data,&present)) return false;
+    if (present) parsed.formattableCurrent = (data[10] & 1) != 0;
+    if (!mmc_get_bd_feature(drive,MMC_PROFILE_BD_R_SRM,0x24,16,data,&present)) return false;
+    if (present) parsed.defectManagementCurrent = (data[10] & 1) != 0;
+    if (!mmc_get_bd_feature(drive,MMC_PROFILE_BD_R_SRM,0x38,16,data,&present)) return false;
+    if (present) parsed.pseudoOverwriteCurrent = (data[10] & 1) != 0;
+    if (!mmc_get_bd_feature(drive,MMC_PROFILE_BD_R_SRM,0x40,40,data,&present)) return false;
+    if (present) parsed.bdReadCurrent = (data[10] & 1) != 0;
+    *features = parsed; return true;
+}
+
+bool mmc_read_bd_spare_area(OpticalDrive* drive, MmcBdSpareArea* area) {
+    if (area) memset(area,0,sizeof(*area));
+    if (!drive || !area) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    uint8_t cdb[12] = {0xAD,1,0,0,0,0,0,0x0A,0,16,0,0}, data[16] = {0};
+    if (!spti_send_cdb(drive,cdb,12,data,sizeof(data),true,10)) return false;
+    if (drive->lastTransferBytes != sizeof(data) || read_be16(data) != 14) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
+    if (data[2] || data[3] || read_be32(data + 4)) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+    MmcBdSpareArea parsed = {read_be32(data + 8),read_be32(data + 12)};
+    if ((parsed.freeBlocks & 31) || (parsed.allocatedBlocks & 31) || parsed.freeBlocks > parsed.allocatedBlocks) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+    *area = parsed; return true;
+}
+
+bool mmc_start_format_bd_r(OpticalDrive* drive, const MmcFormattableCapacity* format) {
+    /* 失败可能已开始改盘；本函数只允许一次04h，不复制原版的FT00自动回退。 */
+    if (drive) { memset(&drive->lastCommand,0,sizeof(drive->lastCommand)); memset(&drive->lastSense,0,sizeof(drive->lastSense)); drive->lastTransferBytes = 0; }
+    if (!drive || !format || format->formatType != 0x32 || !format->blockCount || format->blockCount == UINT32_MAX || format->typeDependentParameter > 0xFFFFFF) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    uint8_t cdb[6] = {4,0x11}, data[12] = {0,0x82,0,8};
+    write_be32(data + 4,format->blockCount); data[8] = 0xC9;
+    /* RFC的raw24只属于容量描述符；原版FT32明确将本次FORMAT的ISA/TDMA分布参数置零。 */
+    if (!spti_send_cdb(drive,cdb,6,data,sizeof(data),false,30)) return false;
+    if (drive->lastTransferBytes != sizeof(data)) return mmc_write_parameter_error(drive,ERROR_WRITE_FAULT); return true;
 }
 
 bool mmc_start_bd_re_format(OpticalDrive* drive, const MmcFormattableCapacity* format, uint8_t certification) {

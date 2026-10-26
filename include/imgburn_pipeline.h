@@ -61,6 +61,9 @@ typedef struct {
 
 typedef void (*PipelineProgressCallback)(const PipelineStats* stats, void* userData);
 
+/* 显式复刻原版BD-R MODE页选择；MMC规定该页不改变BD物理记录方式，不能解释为留盘或取消预留。 */
+typedef enum { BD_WRITE_TYPE_CURRENT = 0, BD_WRITE_TYPE_INCREMENTAL, BD_WRITE_TYPE_SAO } BdWriteType;
+
 /**
  * @brief Burn Pipeline Configuration
  */
@@ -80,6 +83,8 @@ typedef struct {
     bool keepCurrentWriteSpeed;     /* 显式沿用设备当前速度，不发送速度设置；默认false保留原有速度请求。 */
     bool bdNoReserve;               /* 显式BD-R SRM不再预留，可用完整核对的已有空预留轨；不自动回退，不能与reserveTrack合用。 */
     bool bdReOverwrite;             /* 仅本次明确允许覆写已格式化BD-RE；不追加、不自动格式化，默认false保留旧介质范围。 */
+    BdWriteType bdWriteType;        /* 0保留旧入口；明确选择时发送原版Incremental(0)或SAO(2)的MODE页。 */
+    bool bdDisableVnr;             /* 显式关闭BD-R VNR，使用常规WRITE10；有备用区才能实际提供相应缺陷替换。 */
 } BurnConfig;
 
 /**
@@ -132,6 +137,11 @@ bool pipeline_discover_disc(const DiscoveryConfig* config, PipelineProgressCallb
  * BLANK启动后取消等待设备结束；BD-RE清零在命令边界停止，不自动格式化，也不承诺清除备区旧数据。 */
 typedef struct { OpticalDrive* drive; HANDLE cancelEvent; bool full, bdReErase; } EraseConfig;
 bool pipeline_erase_disc(const EraseConfig* config, PipelineProgressCallback callback, void* userData);
+
+/* 原版BD-R带备用区格式化的FT32/FST1切片：confirmFormat声明本次是新的空白SRM，明确选择RFC原索引，不自动回退FT00或写入。 */
+typedef struct { OpticalDrive* drive; HANDLE cancelEvent; uint8_t formatIndex; MmcFormattableCapacity expected; bool confirmFormat; } BdRFormatConfig;
+typedef struct { MmcFormattableCapacity selected; bool commandAttempted, commandAccepted, completed, cancelRequested; uint32_t formattedSectors, allocatedSpareBlocks, freeSpareBlocks; } BdRFormatResult;
+bool pipeline_format_bd_r(const BdRFormatConfig* config, BdRFormatResult* result, PipelineProgressCallback callback, void* userData);
 
 /* BD-RE必须明确选择设备RFC列表中的原索引/描述符及认证方式，confirmErase仅代表本次调用授权。
  * 认证0快速重建、1不认证、2完整认证、3快速认证；格式化不等于清零或安全擦除。

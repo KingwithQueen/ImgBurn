@@ -521,6 +521,8 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
     PipelineStats stats = {0};
     if (!config || !config->drive || (!discovery && !config->imagePath)) return burn_failure(&stats,ERROR_INVALID_PARAMETER,"Invalid burn configuration.",callback,userData);
     if (config->bdReOverwrite && (config->testMode || config->reserveTrack || config->bdNoReserve || config->layerBreakLba)) return burn_failure(&stats,ERROR_INVALID_PARAMETER,"BD-RE overwrite cannot use test, reservation, BD-R no-reserve or DVD layer options.",callback,userData);
+    if (config->bdWriteType != BD_WRITE_TYPE_CURRENT && config->bdWriteType != BD_WRITE_TYPE_INCREMENTAL && config->bdWriteType != BD_WRITE_TYPE_SAO) return burn_failure(&stats,ERROR_INVALID_PARAMETER,"Invalid BD-R write type.",callback,userData);
+    if (config->bdReOverwrite && (config->bdWriteType || config->bdDisableVnr)) return burn_failure(&stats,ERROR_INVALID_PARAMETER,"BD-R write type and VNR options cannot be used for BD-RE overwrite.",callback,userData);
     if (config->bdNoReserve && (discovery || config->reserveTrack)) return burn_failure(&stats,ERROR_INVALID_PARAMETER,"BD no-reserve cannot be combined with reservation or Discovery.",callback,userData);
     if (burn_cancelled(config,&stats,callback,userData)) return false;
     if (config->layerBreakLba && (discovery || config->layerBreakLba % 16)) return burn_failure(&stats,ERROR_INVALID_PARAMETER,"The user layer capacity must be a nonzero multiple of 16 sectors.",callback,userData);
@@ -565,6 +567,7 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
     if (!burn_check_media(config->drive,stats.totalSectors,&profile,!discovery && !config->bdNoReserve,config->bdNoReserve,config->bdReOverwrite,&bdReInitial)) { pipeline_failure(&stats,config->bdReOverwrite ? "Require explicitly selected formatted BD-RE with enough consistent random writable user blocks." : "Require supported blank CD-R, DVD-R/+R, DVD+R DL or BD-R SRM with enough writable sectors.",callback,userData); goto cleanup; }
     if (bdReEraseCapacity && (profile != MMC_PROFILE_BD_RE || bdReInitial.sectors != bdReEraseCapacity)) { burn_failure(&stats,ERROR_MEDIA_CHANGED,"BD-RE zeroing capacity changed before writing.",callback,userData); goto cleanup; }
     if (config->bdNoReserve && profile != MMC_PROFILE_BD_R_SRM) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"BD no-reserve requires BD-R SRM media.",callback,userData); goto cleanup; }
+    if ((config->bdWriteType || config->bdDisableVnr) && profile != MMC_PROFILE_BD_R_SRM) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"Explicit BD-R write type or VNR selection requires BD-R SRM media.",callback,userData); goto cleanup; }
     bool dualLayer = profile == MMC_PROFILE_DVD_PLUS_R_DL || profile == MMC_PROFILE_DVD_R_DL_SEQ; uint32_t layerBreak = 0;
     /* MDS的DVD层信息属于来源；BD目标按逻辑数据流写入，不用它设置目标层界。 */
     bool bdDataTarget = profile == MMC_PROFILE_BD_R_SRM || profile == MMC_PROFILE_BD_RE;
@@ -600,11 +603,13 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
     if (profile == MMC_PROFILE_DVD_R_SEQ || profile == MMC_PROFILE_DVD_R_DL_SEQ) {
         if (!mmc_get_dvd_write_features(config->drive,&features)) { pipeline_failure(&stats,"Cannot query DVD-R DAO write capabilities.",callback,userData); goto cleanup; }
     }
-    if (profile == MMC_PROFILE_DVD_R_SEQ || profile == MMC_PROFILE_DVD_R_DL_SEQ || profile == MMC_PROFILE_CD_R) {
+    if (profile == MMC_PROFILE_DVD_R_SEQ || profile == MMC_PROFILE_DVD_R_DL_SEQ || profile == MMC_PROFILE_CD_R || (profile == MMC_PROFILE_BD_R_SRM && config->bdWriteType)) {
         if (config->testMode && !features.testWrite) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"The drive does not support the requested test writing.",callback,userData); goto cleanup; }
         if (!mmc_get_write_parameters(config->drive,&original)) { pipeline_failure(&stats,"Cannot read the current write parameters.",callback,userData); goto cleanup; }
+        if (profile == MMC_PROFILE_BD_R_SRM && ((original.page[2] & 0x10) || (original.page[3] & 0xC0))) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"Explicit BD-R mode requires a non-test, single-session write parameter page.",callback,userData); goto cleanup; }
     }
     if (profile == MMC_PROFILE_BD_R_SRM && !mmc_get_bd_write_features(config->drive,&bdVerifyNotRequired)) { pipeline_failure(&stats,"Cannot confirm BD-R write capability.",callback,userData); goto cleanup; }
+    if (config->bdDisableVnr) bdVerifyNotRequired = false;
     /* BD-RE默认常规WRITE10；共享SVNR只适用于BD-R，不能拿它代替默认禁用的BD-RE FastWrite。 */
     buffers = malloc((size_t)chunkBytes * 2); if (!buffers) { burn_failure(&stats,ERROR_NOT_ENOUGH_MEMORY,"Cannot allocate source buffers.",callback,userData); goto cleanup; } context.buffer = buffers + chunkBytes;
     if (textRequested) { textBuffer = malloc(682 * 96); if (!textBuffer) { burn_failure(&stats,ERROR_NOT_ENOUGH_MEMORY,"Cannot allocate the CD-TEXT transfer buffer.",callback,userData); goto cleanup; } }
@@ -630,6 +635,14 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
         if (profile == MMC_PROFILE_CD_R) { memset(selected.page + 7,0,45); selected.page[8] = cdImage && cdImage->xa ? 0x20 : 0; selected.page[15] = 150; }
         if (!mmc_set_write_parameters(config->drive,&selected) || !mmc_get_write_parameters(config->drive,&actual)) { pipeline_failure(&stats,"Cannot set CD-R SAO or DVD-R DAO write parameters.",callback,userData); goto cleanup; }
         if ((actual.page[2] & 0x5F) != selected.page[2] || actual.page[3] != selected.page[3] || actual.page[4] != selected.page[4] || (profile == MMC_PROFILE_CD_R && ((actual.page[7] & 0x3F) || actual.page[8] != selected.page[8] || (actual.page[16] & 0x80) || (actual.page[32] & 0x80)))) { burn_failure(&stats,ERROR_INVALID_DATA,"The drive did not accept the requested write mode.",callback,userData); goto cleanup; }
+    }
+    if (profile == MMC_PROFILE_BD_R_SRM && config->bdWriteType) {
+        MmcWriteParameters selected;
+        if (!mmc_build_bd_write_parameters(&original,config->bdWriteType == BD_WRITE_TYPE_INCREMENTAL ? 0 : 2,&selected)) { pipeline_failure(&stats,"Cannot build the selected BD-R write parameter page.",callback,userData); goto cleanup; }
+        parametersChanged = true;
+        if (!mmc_set_write_parameters(config->drive,&selected)) { pipeline_failure(&stats,"Cannot submit the explicitly selected BD-R write parameter page.",callback,userData); goto cleanup; }
+        /* MMC对BD豁免MODE页05；设备可忽略该选择，不能以回显或此选项推断物理写法、追加或预留策略。 */
+        snprintf(stats.statusMessage,sizeof(stats.statusMessage),"BD-R %s parameter page submitted; BD physical operation is unchanged by this page.",config->bdWriteType == BD_WRITE_TYPE_INCREMENTAL ? "Incremental" : "SAO"); if (callback) callback(&stats,userData);
     }
     if (!config->keepCurrentWriteSpeed && !mmc_set_burn_speed(config->drive,profile,config->writeSpeedKbps)) { pipeline_failure(&stats,"Cannot set write speed.",callback,userData); goto cleanup; }
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
@@ -735,6 +748,80 @@ bool pipeline_discover_disc(const DiscoveryConfig* config, PipelineProgressCallb
     if (!config) { PipelineStats stats = {0}; return burn_failure(&stats,ERROR_INVALID_PARAMETER,"Invalid Discovery configuration.",callback,userData); }
     BurnConfig burn = {0}; burn.drive = config->drive; burn.writeSpeedKbps = config->writeSpeedKbps; burn.testMode = config->testMode; burn.verifyAfterWrite = config->verifyAfterWrite; burn.ejectWhenDone = config->ejectWhenDone; burn.ringBufferBytes = config->ringBufferBytes; burn.cancelEvent = config->cancelEvent; burn.cycleTrayBeforeVerify = config->cycleTrayBeforeVerify; burn.performOpc = config->performOpc;
     return burn_image_internal(&burn,true,config->sectors,0,callback,userData);
+}
+
+/* BD-R新盘候选不借用BD-RE的RFC DT2/READ CAPACITY合同；SRM格式后空盘可返回DT3。 */
+typedef struct { MmcDiscInfo disc; MmcTrackInfo track; MmcBdRFormatFeatures features; MmcFormatCapacities formats; bool verifyNotRequired; } BdRFormatSnapshot;
+static bool bd_r_format_inspect(OpticalDrive* drive, BdRFormatSnapshot* snapshot) {
+    memset(snapshot,0,sizeof(*snapshot));
+    if (!mmc_test_unit_ready(drive) || !mmc_read_disc_information(drive,&snapshot->disc)) return false;
+    const MmcDiscInfo* d = &snapshot->disc;
+    if (d->currentProfile != MMC_PROFILE_BD_R_SRM || d->isErasable || d->discStatus != DISC_STATUS_EMPTY || d->lastSessionStatus || d->numSessions != 1 || d->firstTrack != 1 || d->lastTrack != 1 || d->firstTrackLastSession != 1) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+    if (!mmc_read_track_information(drive,1,false,&snapshot->track)) return false;
+    const MmcTrackInfo* t = &snapshot->track;
+    if (t->trackNumber != 1 || t->sessionNumber != 1 || !t->isBlank || t->isDamage || t->isReserved || !t->nwaValid || t->trackStartLba || t->nextWritableAddress || !t->freeBlocks || t->trackSize != t->freeBlocks) { SetLastError(ERROR_INVALID_DATA); return false; }
+    return mmc_get_bd_write_features(drive,&snapshot->verifyNotRequired) && mmc_get_bd_r_format_features(drive,&snapshot->features) && mmc_read_format_capacities(drive,&snapshot->formats);
+}
+static bool bd_r_same_format(const MmcFormattableCapacity* a, const MmcFormattableCapacity* b) { return a->formatType == b->formatType && a->blockCount == b->blockCount && a->typeDependentParameter == b->typeDependentParameter; }
+static bool bd_r_same_snapshot(const BdRFormatSnapshot* a, const BdRFormatSnapshot* b) {
+    if (a->disc.currentProfile != b->disc.currentProfile || a->disc.discStatus != b->disc.discStatus || a->disc.lastSessionStatus != b->disc.lastSessionStatus || a->disc.numSessions != b->disc.numSessions || a->disc.firstTrack != b->disc.firstTrack || a->disc.lastTrack != b->disc.lastTrack || a->disc.firstTrackLastSession != b->disc.firstTrackLastSession || a->disc.isErasable != b->disc.isErasable) return false;
+    if (a->track.trackNumber != b->track.trackNumber || a->track.sessionNumber != b->track.sessionNumber || a->track.trackStartLba != b->track.trackStartLba || a->track.nextWritableAddress != b->track.nextWritableAddress || a->track.freeBlocks != b->track.freeBlocks || a->track.trackSize != b->track.trackSize || a->track.nwaValid != b->track.nwaValid || a->track.isBlank != b->track.isBlank || a->track.isDamage != b->track.isDamage || a->track.isReserved != b->track.isReserved || a->track.isPacket != b->track.isPacket || a->track.fixedPacket != b->track.fixedPacket || a->track.isCopy != b->track.isCopy) return false;
+    if (a->verifyNotRequired != b->verifyNotRequired || a->features.formattableCurrent != b->features.formattableCurrent || a->features.defectManagementCurrent != b->features.defectManagementCurrent || a->features.pseudoOverwriteCurrent != b->features.pseudoOverwriteCurrent || a->features.bdReadCurrent != b->features.bdReadCurrent || a->formats.descriptorCode != b->formats.descriptorCode || a->formats.blockCount != b->formats.blockCount || a->formats.typeDependentParameter != b->formats.typeDependentParameter || a->formats.formatCount != b->formats.formatCount) return false;
+    for (unsigned i = 0; i < a->formats.formatCount; i++) if (!bd_r_same_format(&a->formats.formats[i],&b->formats.formats[i])) return false;
+    return true;
+}
+static bool bd_r_format_cancelled(const BdRFormatConfig* config) { return config->cancelEvent && WaitForSingleObject(config->cancelEvent,0) == WAIT_OBJECT_0; }
+static bool bd_r_format_abort(PipelineStats* stats, bool completed, PipelineProgressCallback callback, void* userData) {
+    stats->state = PIPELINE_STATE_ABORTED; snprintf(stats->statusMessage,sizeof(stats->statusMessage),completed ? "Cancellation requested; BD-R format completed and changed the medium." : "BD-R format cancelled before the device command."); if (callback) callback(stats,userData); SetLastError(ERROR_CANCELLED); return false;
+}
+bool pipeline_format_bd_r(const BdRFormatConfig* config, BdRFormatResult* result, PipelineProgressCallback callback, void* userData) {
+    PipelineStats stats = {0}; if (result) memset(result,0,sizeof(*result));
+    if (!config || !config->drive || !result || !config->confirmFormat || config->formatIndex >= MMC_MAX_FORMAT_CAPACITIES || config->expected.formatType != 0x32 || !config->expected.blockCount || config->expected.blockCount == UINT32_MAX || config->expected.blockCount % 32 || config->expected.typeDependentParameter > 0xFFFFFF) return burn_failure(&stats,ERROR_INVALID_PARAMETER,"BD-R format requires a new blank disc confirmation and an exact FT32 descriptor.",callback,userData);
+    if (bd_r_format_cancelled(config)) { result->cancelRequested = true; return bd_r_format_abort(&stats,false,callback,userData); }
+    stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Inspecting the new blank BD-R and selected spare-area format..."); if (callback) callback(&stats,userData);
+    BdRFormatSnapshot initial, checked; bool success = false, ownedLock = false, prevented = false; DWORD error = ERROR_SUCCESS;
+    if (!bd_r_format_inspect(config->drive,&initial)) return pipeline_failure(&stats,"Cannot inspect a blank, unreserved BD-R SRM format candidate.",callback,userData);
+    /* 这是本项目的新盘候选组合，不把某条查询错误当作通用的未格式化正证明。 */
+    if (!initial.features.formattableCurrent || initial.features.defectManagementCurrent || initial.features.pseudoOverwriteCurrent || initial.features.bdReadCurrent || initial.formats.descriptorCode != 1 || initial.formats.blockCount == UINT32_MAX || initial.formats.blockCount <= config->expected.blockCount) return burn_failure(&stats,ERROR_NOT_SUPPORTED,"Require a new blank BD-R candidate without a current formatted/readable/POW state.",callback,userData);
+    if (config->formatIndex >= initial.formats.formatCount || !bd_r_same_format(&config->expected,&initial.formats.formats[config->formatIndex])) return burn_failure(&stats,ERROR_MEDIA_CHANGED,"The selected BD-R format descriptor changed; query the list again.",callback,userData);
+    result->selected = config->expected;
+    if (bd_r_format_cancelled(config)) { result->cancelRequested = true; return bd_r_format_abort(&stats,false,callback,userData); }
+    if (!config->drive->isLocked) { if (!spti_lock_drive(config->drive,true)) { pipeline_failure(&stats,"Cannot lock the volume for BD-R format.",callback,userData); goto cleanup; } ownedLock = true; }
+    if (!mmc_prevent_removal(config->drive,true)) { pipeline_failure(&stats,"Cannot prevent removal during BD-R format.",callback,userData); goto cleanup; } prevented = true;
+    if (!bd_r_format_inspect(config->drive,&checked)) { pipeline_failure(&stats,"Cannot recheck the BD-R format candidate.",callback,userData); goto cleanup; }
+    if (!bd_r_same_snapshot(&initial,&checked)) { burn_failure(&stats,ERROR_MEDIA_CHANGED,"BD-R format selection or capabilities changed under the volume lock.",callback,userData); goto cleanup; }
+    stats.state = PIPELINE_STATE_FORMATTING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Starting BD-R spare-area format; this cannot be undone..."); if (callback) callback(&stats,userData);
+    if (bd_r_format_cancelled(config)) { result->cancelRequested = true; bd_r_format_abort(&stats,false,callback,userData); goto cleanup; }
+    bool accepted = mmc_start_format_bd_r(config->drive,&config->expected);
+    result->commandAttempted = config->drive->lastCommand.attempted;
+    if (!accepted) { burn_device_failure(config->drive,&stats,"BD-R format submission failed; the disc may have changed. No retry or fallback was sent.",callback,userData); goto cleanup; }
+    result->commandAccepted = true; ULONGLONG start = GetTickCount64();
+    for (;;) {
+        result->cancelRequested = result->cancelRequested || bd_r_format_cancelled(config);
+        memset(&config->drive->lastSense,0,sizeof(config->drive->lastSense)); bool ready = mmc_test_unit_ready(config->drive);
+        if (!ready && !(config->drive->lastSense.senseKey == 2 && config->drive->lastSense.asc == 4 && config->drive->lastSense.ascq == 4)) { pipeline_failure(&stats,"Device status failed while formatting BD-R; its operation may continue.",callback,userData); goto cleanup; }
+        MmcFormatProgress progress;
+        if (!mmc_read_format_progress(config->drive,&progress)) { pipeline_failure(&stats,"Cannot read BD-R format progress; its operation may continue.",callback,userData); goto cleanup; }
+        stats.elapsedTimeSec = (uint32_t)((GetTickCount64() - start) / 1000);
+        if (ready && !progress.active) {
+            BdRFormatSnapshot formatted = {0}; MmcBdSpareArea spare = {0};
+            if (!bd_r_format_inspect(config->drive,&formatted) || !mmc_read_bd_spare_area(config->drive,&spare)) { pipeline_failure(&stats,"Format ended without confirmed BD-R user blocks and spare allocation.",callback,userData); goto cleanup; }
+            if (!formatted.features.defectManagementCurrent || formatted.features.pseudoOverwriteCurrent || formatted.track.trackSize != formatted.track.freeBlocks || formatted.track.freeBlocks % 32 || formatted.track.freeBlocks < config->expected.blockCount || !spare.allocatedBlocks) { burn_failure(&stats,ERROR_INVALID_DATA,"BD-R format result does not confirm SRM without POW, minimum user blocks and nonzero spares.",callback,userData); goto cleanup; }
+            result->formattedSectors = formatted.track.freeBlocks; result->allocatedSpareBlocks = spare.allocatedBlocks; result->freeSpareBlocks = spare.freeBlocks; result->completed = true;
+            if (result->cancelRequested || bd_r_format_cancelled(config)) { result->cancelRequested = true; bd_r_format_abort(&stats,true,callback,userData); goto cleanup; }
+            success = true; break;
+        }
+        if (progress.valid) { int percent = (int)((uint32_t)progress.value * 100 / 65536); if (percent > stats.progressPercent) stats.progressPercent = percent; }
+        snprintf(stats.statusMessage,sizeof(stats.statusMessage),result->cancelRequested ? "Cancellation requested; waiting for the BD-R format to finish..." : "BD-R spare-area format in progress..."); if (callback) callback(&stats,userData);
+        if (stats.elapsedTimeSec >= 21600) { burn_failure(&stats,ERROR_TIMEOUT,"BD-R format timed out; its operation may continue. Do not retry automatically.",callback,userData); goto cleanup; }
+        Sleep(1000);
+    }
+cleanup:
+    error = GetLastError(); result->cancelRequested = result->cancelRequested || bd_r_format_cancelled(config);
+    if (prevented && !mmc_prevent_removal(config->drive,false) && success) { error = GetLastError(); success = burn_failure(&stats,error,"Cannot restore removal after BD-R format.",callback,userData); }
+    if (ownedLock && !spti_lock_drive(config->drive,false) && success) { error = GetLastError(); success = burn_failure(&stats,error,"Cannot unlock the BD-R volume after format.",callback,userData); }
+    if (success) { stats.state = PIPELINE_STATE_COMPLETED; stats.progressPercent = 100; snprintf(stats.statusMessage,sizeof(stats.statusMessage),"BD-R spare-area format completed; user blocks and allocated spares checked."); if (callback) callback(&stats,userData); }
+    SetLastError(success ? ERROR_SUCCESS : error); return success;
 }
 
 static bool bd_re_format_cancelled(const BdReFormatConfig* config) { return config->cancelEvent && WaitForSingleObject(config->cancelEvent,0) == WAIT_OBJECT_0; }

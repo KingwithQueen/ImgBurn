@@ -59,6 +59,7 @@ static void print_usage(void) {
     printf("  info <drive>                   Detailed drive & loaded media inspection\n");
     printf("  bdre-write <drive> <image> --overwrite [--verify]  Explicit BD-RE overwrite\n");
     printf("  bdre-format <drive> --list | --index N --certification 0..3 --confirm-erase\n");
+    printf("  bdr-format <drive> --list | --index N --confirm-format  New blank BD-R with spares\n");
     printf("  bdre-erase <drive> --quick|--full --confirm-erase  Zero formatted BD-RE\n");
     printf("  bd-info <drive>                Read-only BD physical identity and capacity\n");
     printf("  booktype <drive> [query|set <dvd_rom|default> [dvd+r|dvd+r_dl]]\n");
@@ -90,8 +91,10 @@ static void print_usage(void) {
     printf("                                 Read data ISO or raw CD BIN/CUE with Q indexes\n");
     printf("                                 MDS destination saves MODE1 CD or single/dual-layer DVD data files\n");
     printf("                                 --split sets a per-file MiB limit for MDS; auto follows the target volume file limit\n");
-    printf("  burn <drive> <image> [--speed <Nx|MAX|KEEP>] [--test] [--verify] [--reserve|--bd-no-reserve] [--no-cycle] [--opc]\n");
+    printf("  burn <drive> <image> [--speed <Nx|MAX|KEEP>] [--test] [--verify] [--reserve|--bd-no-reserve] [--bd-write-type INCREMENTAL|SAO] [--bd-vnr-off] [--no-cycle] [--opc]\n");
     printf("                                 Burn ISO/BIN, data MDS or supported CD CUE images\n");
+    printf("                                 Explicit BD-R type sets the MMC parameter page only: no change to BD physical recording, no append/multisession.\n");
+    printf("                                 --bd-vnr-off applies only to this BD-R write and does not create spare areas; reservation is independent.\n");
     printf("                                 DVD+R DL uses MDS/automatic L0; --layer-break <sectors> overrides it\n"
            "                                 DVD-R DL DAO uses the fixed medium layer boundary\n");
     printf("  append-iso <drive> <file.iso> [--write] [--allow-blank] [--finalize]\n");
@@ -646,6 +649,39 @@ static int cmd_erase(int argc, char** argv) {
     printf(ok ? "\nDisc erase completed.\n" : "\nDisc erase failed or was cancelled (error %lu).\n",error); return ok ? 0 : 1;
 }
 
+/* BD-R只接受明确选择的FT32带备用区格式；不请求认证、快速格式或自动写入。 */
+static int cmd_bdr_format(int argc, char** argv) {
+    int index = -1; bool confirm = false, list = false;
+    for (int i = 3; i < argc; i++) {
+        if (!_stricmp(argv[i],"--confirm-format") && !confirm) confirm = true;
+        else if (!_stricmp(argv[i],"--list") && !list) list = true;
+        else if (!_stricmp(argv[i],"--index") && i + 1 < argc && index < 0) {
+            const char* value = argv[++i]; char* end; unsigned long n = strtoul(value,&end,10);
+            if (!value[0] || *end || value[0] == '-' || n >= MMC_MAX_FORMAT_CAPACITIES) goto usage;
+            index = (int)n;
+        } else goto usage;
+    }
+    if (argc < 3 || (list ? confirm || index >= 0 : !confirm || index < 0)) goto usage;
+    wchar_t path[MAX_PATH]; if (!parse_drive_path(argv[2],path,MAX_PATH)) return 1;
+    OpticalDrive drive; if (!spti_open_drive_passive(&drive,path)) return 1;
+    MmcFormatCapacities capacity = {0};
+    bool ok = mmc_get_current_profile(&drive) == MMC_PROFILE_BD_R_SRM && mmc_read_format_capacities(&drive,&capacity);
+    if (!ok) { printf("Error: A BD-R SRM format-capacity list is required.\n"); spti_close_drive(&drive); return 1; }
+    if (list) {
+        for (unsigned i = 0; i < capacity.formatCount; i++) { const MmcFormattableCapacity* f = &capacity.formats[i]; printf("Index %u: FT=0x%02X Blocks=%u Raw TDP=0x%06X%s\n",i,f->formatType,f->blockCount,f->typeDependentParameter,f->formatType == 0x32 ? " (BD-R with-spares candidate)" : " (not selectable)"); }
+        printf("Select an original FT32 index explicitly. Only a new, blank, never-formatted write-once BD-R is eligible; no existing formatted medium, RRM or subsequent write is requested.\n"); spti_close_drive(&drive); return 0;
+    }
+    if ((unsigned)index >= capacity.formatCount || capacity.formats[index].formatType != 0x32) { printf("Error: Select a returned FT32 descriptor by its original index.\n"); spti_close_drive(&drive); return 1; }
+    HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; }
+    BdRFormatConfig config = {0}; config.drive = &drive; config.cancelEvent = cancel; config.formatIndex = (uint8_t)index; config.expected = capacity.formats[index]; config.confirmFormat = true; BdRFormatResult result = {0};
+    printf("--confirm-format declares a new, blank, never-formatted write-once BD-R. Format with spares: index=%d FT=0x%02X Blocks=%u Raw TDP=0x%06X. Once attempted, this cannot be rolled back. No automatic write, fallback or retry.\n",index,config.expected.formatType,config.expected.blockCount,config.expected.typeDependentParameter);
+    AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock); bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
+    ok = pipeline_format_bd_r(&config,&result,on_cli_burn_progress,NULL); DWORD error = GetLastError();
+    if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock); spti_close_drive(&drive);
+    printf("BD-R format %s: attempted=%u accepted=%u completed=%u cancel-requested=%u sectors=%u allocated-spare-blocks=%u free-spare-blocks=%u (error %lu).\n",ok ? "completed" : "stopped",result.commandAttempted,result.commandAccepted,result.completed,result.cancelRequested,result.formattedSectors,result.allocatedSpareBlocks,result.freeSpareBlocks,error); return ok ? 0 : 1;
+usage: printf("Usage: imgburn bdr-format <drive> --list | --index N --confirm-format\nIndex: 0..%u from the current returned list. Only a new, blank, never-formatted BD-R and FT32 with spares; no quick format, RRM, automatic write or retry.\n",(unsigned)MMC_MAX_FORMAT_CAPACITIES - 1); return 1;
+}
+
 /* BDRE必须明确选择操作；先绑定设备当前描述符，再交由管线重新核对。 */
 static int cmd_bdre_format(int argc, char** argv) {
     int index = -1, certification = -1; bool confirm = false, list = false;
@@ -654,7 +690,7 @@ static int cmd_bdre_format(int argc, char** argv) {
         else if (!_stricmp(argv[i],"--list")) list = true;
         else if ((!_stricmp(argv[i],"--index") || !_stricmp(argv[i],"--certification")) && i + 1 < argc) {
             bool item = !_stricmp(argv[i],"--index"); const char* value = argv[++i]; char* end; unsigned long n = strtoul(value,&end,10);
-            if (!value[0] || *end || value[0] == '-' || n > (item ? 29u : 3u) || (item ? index >= 0 : certification >= 0)) goto usage;
+            if (!value[0] || *end || value[0] == '-' || n > (item ? (unsigned long)MMC_MAX_FORMAT_CAPACITIES - 1 : 3u) || (item ? index >= 0 : certification >= 0)) goto usage;
             if (item) index = (int)n; else certification = (int)n;
         } else goto usage;
     }
@@ -695,7 +731,7 @@ usage: printf("Usage: imgburn bdre-erase <drive> --quick|--full --confirm-erase\
 
 static int cmd_burn(int argc, char **argv, bool bdReOnly) {
     if (argc < 4) {
-        printf(bdReOnly ? "Usage: imgburn bdre-write <drive> <image> --overwrite [--verify]\n" : "Usage: imgburn burn <drive> <image> [--speed <Nx|MAX|KEEP>] [--test] [--verify] [--reserve|--bd-no-reserve] [--no-cycle] [--opc]\n");
+        printf(bdReOnly ? "Usage: imgburn bdre-write <drive> <image> --overwrite [--verify]\n" : "Usage: imgburn burn <drive> <image> [--speed <Nx|MAX|KEEP>] [--test] [--verify] [--reserve|--bd-no-reserve] [--bd-write-type INCREMENTAL|SAO] [--bd-vnr-off] [--no-cycle] [--opc]\n");
         return 1;
     }
 
@@ -703,7 +739,7 @@ static int cmd_burn(int argc, char **argv, bool bdReOnly) {
     const char *imageArg = argv[3];
     bool testMode = false, overwrite = false;
     bool verifyAfter = false;
-    double speed = 0; bool reserve = false, cycle = true, opc = false, bdNoReserve = false, keepSpeed = false; uint32_t layerBreak = 0;
+    double speed = 0; bool reserve = false, cycle = true, opc = false, bdNoReserve = false, keepSpeed = false; uint32_t layerBreak = 0; BdWriteType bdWriteType = BD_WRITE_TYPE_CURRENT; bool bdDisableVnr = false;
 
     for (int i = 4; i < argc; i++) {
         if (bdReOnly) { if (!_stricmp(argv[i],"--overwrite")) overwrite = true; else if (!_stricmp(argv[i],"--verify")) verifyAfter = true; else { printf("Usage: imgburn bdre-write <drive> <image> --overwrite [--verify]\n"); return 1; } continue; }
@@ -711,6 +747,10 @@ static int cmd_burn(int argc, char **argv, bool bdReOnly) {
         else if (_stricmp(argv[i], "--verify") == 0) verifyAfter = true;
         else if (_stricmp(argv[i], "--reserve") == 0) reserve = true;
         else if (_stricmp(argv[i], "--bd-no-reserve") == 0) bdNoReserve = true;
+        else if (!_stricmp(argv[i],"--bd-write-type") && i + 1 < argc && bdWriteType == BD_WRITE_TYPE_CURRENT) {
+            const char* value = argv[++i]; if (!_stricmp(value,"INCREMENTAL")) bdWriteType = BD_WRITE_TYPE_INCREMENTAL; else if (!_stricmp(value,"SAO")) bdWriteType = BD_WRITE_TYPE_SAO; else { printf("Error: BD write type must be INCREMENTAL or SAO.\n"); return 1; }
+        }
+        else if (!_stricmp(argv[i],"--bd-vnr-off") && !bdDisableVnr) bdDisableVnr = true;
         else if (_stricmp(argv[i], "--no-cycle") == 0) cycle = false;
         else if (_stricmp(argv[i], "--opc") == 0) opc = true;
         else if (!_stricmp(argv[i],"--layer-break") && i + 1 < argc) { const char* value = argv[++i]; char* end; uint64_t amount = _strtoui64(value,&end,10); if (!value[0] || *end || value[0] == '-' || !amount || amount > UINT32_MAX || amount % 16) { printf("Error: Layer capacity must be a nonzero multiple of 16 sectors.\n"); return 1; } layerBreak = (uint32_t)amount; }
@@ -733,6 +773,7 @@ static int cmd_burn(int argc, char **argv, bool bdReOnly) {
     else printf("Options: TestMode=%s, VerifyAfterBurn=%s, Speed=%.2fx (0=MAX)\n\n",testMode ? "YES" : "NO",verifyAfter && !testMode ? "YES" : "NO",speed);
     if (bdReOnly) printf("BD-RE overwrite: existing content in the image range will be replaced; remaining sectors are not erased.\n");
     if (bdNoReserve) printf("BD-R SRM: no new track reservation; any existing empty reserved track must match this image.\n");
+    if (bdWriteType != BD_WRITE_TYPE_CURRENT || bdDisableVnr) printf("Explicit BD-R options for this write: type=%s VNR-off=%s. The MMC write-type page does not change BD physical recording or enable append/multisession; track reservation remains independent. Disabling VNR does not create spare areas.\n",bdWriteType == BD_WRITE_TYPE_INCREMENTAL ? "INCREMENTAL" : bdWriteType == BD_WRITE_TYPE_SAO ? "SAO" : "CURRENT",bdDisableVnr ? "YES" : "NO");
 
     OpticalDrive drive;
     if (!(bdNoReserve || bdReOnly ? spti_open_drive_passive(&drive,drivePath) : spti_open_drive(&drive, drivePath, true))) {
@@ -750,7 +791,7 @@ static int cmd_burn(int argc, char **argv, bool bdReOnly) {
     if (speed > 0 && speedProfile == MMC_PROFILE_UNKNOWN) { printf("Error: Cannot identify media for write speed.\n"); spti_close_drive(&drive); return 1; }
     config.writeSpeedKbps = speed > 0 ? (uint32_t)(speed * (speedProfile == MMC_PROFILE_BD_R_SRM ? 4495.5 : speedProfile == MMC_PROFILE_CD_R ? 176.4 : 1385.0) + 0.5) : UINT32_MAX;
     config.ringBufferBytes = 32 * 1024 * 1024;
-    config.reserveTrack = reserve; config.cycleTrayBeforeVerify = cycle; config.performOpc = opc; config.layerBreakLba = layerBreak; config.bdNoReserve = bdNoReserve; config.keepCurrentWriteSpeed = keepSpeed; config.bdReOverwrite = bdReOnly;
+    config.reserveTrack = reserve; config.cycleTrayBeforeVerify = cycle; config.performOpc = opc; config.layerBreakLba = layerBreak; config.bdNoReserve = bdNoReserve; config.keepCurrentWriteSpeed = keepSpeed; config.bdReOverwrite = bdReOnly; config.bdWriteType = bdWriteType; config.bdDisableVnr = bdDisableVnr;
     HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; } config.cancelEvent = cancel;
     AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock); bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
 
@@ -1188,6 +1229,8 @@ static int run_cli(int argc, char **argv) {
         return cmd_burn(argc, argv, false);
     } else if (_stricmp(cmd,"bdre-write") == 0) {
         return cmd_burn(argc,argv,true);
+    } else if (_stricmp(cmd,"bdr-format") == 0) {
+        return cmd_bdr_format(argc,argv);
     } else if (_stricmp(cmd,"bdre-format") == 0) {
         return cmd_bdre_format(argc,argv);
     } else if (_stricmp(cmd,"bdre-erase") == 0) {

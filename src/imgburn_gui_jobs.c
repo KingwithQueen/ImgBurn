@@ -361,7 +361,8 @@ static bool job_drive(GuiJob* job) {
         else if (job->error == ERROR_DISK_FULL) job_text(job,L"所选扇区数超过光盘可写容量。\r\n");
     }
     else if (job->operation == GUI_WRITE_DISC) {
-        BurnConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.writeSpeedKbps = job->speed; config.verifyAfterWrite = job->verify; config.ringBufferBytes = 32 * 1024 * 1024; config.cancelEvent = job->cancel; config.cycleTrayBeforeVerify = true; config.testMode = job->testMode; config.layerBreakLba = job->writeLayerBreak; config.bdReOverwrite = job->bdReOverwrite; if (job->bdReOverwrite) { config.keepCurrentWriteSpeed = true; config.cycleTrayBeforeVerify = false; }
+        BurnConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.writeSpeedKbps = job->speed; config.verifyAfterWrite = job->verify; config.ringBufferBytes = 32 * 1024 * 1024; config.cancelEvent = job->cancel; config.cycleTrayBeforeVerify = true; config.testMode = job->testMode; config.layerBreakLba = job->writeLayerBreak; config.bdReOverwrite = job->bdReOverwrite; config.bdWriteType = job->bdWriteType; config.bdDisableVnr = job->bdDisableVnr; if (job->bdReOverwrite) { config.keepCurrentWriteSpeed = true; config.cycleTrayBeforeVerify = false; }
+        if (job->bdWriteType != BD_WRITE_TYPE_CURRENT || job->bdDisableVnr) job_text(job,L"本次BD-R选项：写类型%ls，VNR关闭%u；MODE页不改变BD物理写法，也不提供追加或多会话。备用区资格仍须单独复核。\r\n",job->bdWriteType == BD_WRITE_TYPE_INCREMENTAL ? L"Incremental" : job->bdWriteType == BD_WRITE_TYPE_SAO ? L"SAO" : L"保持当前",job->bdDisableVnr);
         ok = pipeline_burn_image(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
         if (ok && job->testMode) job_text(job,L"设备测试写入完成；未执行记录数据的回读校验。\r\n");
         else if (ok && job->bdReOverwrite) job_text(job,L"BD-RE镜像覆写完成%ls；来源范围外旧数据未作清除承诺。\r\n",job->verify ? L"并通过回读校验" : L"");
@@ -377,11 +378,17 @@ static bool job_drive(GuiJob* job) {
 /* 格式化列表查询与执行均在worker；窗口只携带明确选中的原索引及描述符。 */
 static bool job_bd_re_format(GuiJob* job) {
     OpticalDrive drive; if (!spti_open_drive_passive(&drive,job->drive)) return false; bool ok;
-    if (job->operation == GUI_BD_RE_FORMAT_LIST) {
-        ok = mmc_get_current_profile(&drive) == MMC_PROFILE_BD_RE;
+    bool bdr = job->operation == GUI_BD_R_FORMAT_LIST || job->operation == GUI_BD_R_FORMAT;
+    if (job->operation == GUI_BD_RE_FORMAT_LIST || job->operation == GUI_BD_R_FORMAT_LIST) {
+        ok = mmc_get_current_profile(&drive) == (bdr ? MMC_PROFILE_BD_R_SRM : MMC_PROFILE_BD_RE);
         if (!ok) SetLastError(ERROR_NOT_SUPPORTED);
         if (ok) ok = mmc_read_format_capacities(&drive,&job->bdReCapacities);
-        if (ok) job_text(job,L"只读格式列表已取得。请选择FT30/31原描述符与认证方式，提交前会再次核对。\r\n");
+        if (ok) job_text(job,bdr ? L"只读格式列表已取得。请选择FT32带备用区原描述符；只允许新的空白、从未格式化一次写BD-R，提交前会再次核对。\r\n" : L"只读格式列表已取得。请选择FT30/31原描述符与认证方式，提交前会再次核对。\r\n");
+    } else if (bdr) {
+        BdRFormatConfig config = job->bdRFormat; config.drive = &drive; config.cancelEvent = job->cancel;
+        ok = pipeline_format_bd_r(&config,&job->bdRFormatResult,job_pipeline_progress,job);
+        job_text(job,L"BD-R格式命令：尝试%u，接受%u，完成%u，取消请求%u；已格式化扇区%u，已分配备用块%u，可用备用块%u。\r\n",job->bdRFormatResult.commandAttempted,job->bdRFormatResult.commandAccepted,job->bdRFormatResult.completed,job->bdRFormatResult.cancelRequested,job->bdRFormatResult.formattedSectors,job->bdRFormatResult.allocatedSpareBlocks,job->bdRFormatResult.freeSpareBlocks);
+        if (job->bdRFormatResult.commandAttempted) job_text(job,L"一次写BD格式化尝试不可回滚；请重新查询介质，本任务不会自动写入、回退或重试。\r\n");
     } else {
         BdReFormatConfig config = job->bdReFormat; config.drive = &drive; config.cancelEvent = job->cancel;
         ok = pipeline_format_bd_re(&config,&job->bdReFormatResult,job_pipeline_progress,job);
@@ -399,7 +406,7 @@ DWORD WINAPI imgburn_gui_job_run(void* context) {
         case GUI_CALCULATE: job->succeeded = job_prepare(job); break;
         case GUI_BUILD_IMAGE: job->succeeded = job_build(job); break;
         case GUI_INSPECT: job->succeeded = job_inspect(job); break;
-        case GUI_BD_RE_FORMAT_LIST: case GUI_BD_RE_FORMAT: job->succeeded = job_bd_re_format(job); break;
+        case GUI_BD_RE_FORMAT_LIST: case GUI_BD_RE_FORMAT: case GUI_BD_R_FORMAT_LIST: case GUI_BD_R_FORMAT: job->succeeded = job_bd_re_format(job); break;
         case GUI_READ_DEST_INFO: job->succeeded = job_read_destination_info(job); break;
         case GUI_CREATE_CUE: job->succeeded = job_cue(job); break;
         case GUI_CREATE_MDS: job->succeeded = job_mds(job); break;
@@ -409,7 +416,7 @@ DWORD WINAPI imgburn_gui_job_run(void* context) {
         case GUI_DVD_CANDIDATES: job->succeeded = job_dvd_candidates(job); break;
         case GUI_CD_ISO_PLAN: case GUI_CD_ISO_WRITE: job->succeeded = job_cd_iso(job); break;
     }
-    if (!job->succeeded && job_cancelled(job) && (!job->error || (job->operation != GUI_ERASE_QUICK && job->operation != GUI_ERASE_FULL && job->operation != GUI_BD_RE_FORMAT))) job->error = ERROR_CANCELLED;
+    if (!job->succeeded && job_cancelled(job) && (!job->error || (job->operation != GUI_ERASE_QUICK && job->operation != GUI_ERASE_FULL && job->operation != GUI_BD_RE_FORMAT && job->operation != GUI_BD_R_FORMAT))) job->error = ERROR_CANCELLED;
     if (!job->succeeded) { if (!job->error) job->error = GetLastError(); if (!job->error) job->error = ERROR_INVALID_DATA; job_text(job, job->error == ERROR_CANCELLED ? L"操作已取消。\r\n" : L"操作失败（错误 %lu）。\r\n", job->error); }
     if (job->owner) PostMessageW(job->owner, GUI_JOB_DONE, 0, (LPARAM)job); return job->succeeded ? 0 : 1;
 }

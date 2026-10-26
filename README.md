@@ -73,6 +73,16 @@ ImgBurn.exe bdre-erase <drive> --quick|--full --confirm-erase
 
 快速清零按原版说明处理前800扇区（更小用户区则到其末尾），完整清零覆盖全部逻辑用户区，均同步并逐扇区回读零值；只针对已格式化BD-RE，不自动格式化，不承诺清除备用区或重映射旧内容。清零取消在命令边界停止，已发出的写入不能撤销；它与FORMAT UNIT的取消等待语义分开。所有新流程已通过模拟设备/完整数据核对，尚无BD-RE实盘验收。
 
+BD-R新增明确选择的带备用区格式化入口，仅接受声明为新的空白SRM盘。先保留设备FT32列表原索引，再选择具体描述符；核心在锁前后核对空白轨、能力与整份容量列表，只提交一次原版FT32/FST1请求，不自动回退FT00、重试或写入数据。接受命令后等待设备结束；取消只记录请求，超时也不代表物理操作已停止。完成后以实际空白轨用户块、缺陷管理状态和备用区块数核对，不套用BD-RE的READ CAPACITY或RFC DT2要求。已格式化、已有数据、预留轨、POW或其它不满足新盘条件的介质不进入本入口。
+
+```text
+ImgBurn.exe bdr-format <drive> --list
+ImgBurn.exe bdr-format <drive> --index N --confirm-format
+ImgBurn.exe burn <drive> <image> --bd-write-type INCREMENTAL --bd-vnr-off --verify
+```
+
+Write可显式选择原版Incremental或SAO的MODE页参数；依据MMC，BD介质可忽略该页，不能据此推断物理写法、免预留、追加或留盘开放。未选择时保留既有入口行为，`--bd-no-reserve`仍是独立选项。`--bd-vnr-off`关闭BD-R的VNR并使用普通WRITE10；这不自动建立备用区，没有备用区也不承诺缺陷替换。GUI“本次BD-R写入 / DVD双层L0”窗口仅把选项交给本次写入，任务创建或上下文变化即清除；BD-R格式化有独立菜单，无默认索引及BD-RE认证选项。上述路径已有离线模型和完整数据核对，尚无新的实盘及可见GUI交互验收。
+
 ## 当前功能状态
 
 程序目前覆盖设备访问、MMC、缓冲区、镜像构建、视频布局、单元预览、UDF、音频、镜像解析、桌面主界面和部分厂商控制。四种构建配置已验证可以生成，但构建成功不代表功能与原版一致。

@@ -156,6 +156,13 @@ typedef struct {
     uint16_t blocking;
 } MmcBdReFeatures;
 bool mmc_get_bd_re_features(OpticalDrive* drive, MmcBdReFeatures* features);
+
+/* BD-R SRM格式能力只读快照；无备区空白盘允许缺陷管理不Current，由调用方区分前/后置条件。 */
+typedef struct { bool formattableCurrent, defectManagementCurrent, pseudoOverwriteCurrent, bdReadCurrent; } MmcBdRFormatFeatures;
+bool mmc_get_bd_r_format_features(OpticalDrive* drive, MmcBdRFormatFeatures* features);
+/* 备区块数不包含BD-R中作为TDMA使用的部分，不能用来推算全部用户容量。 */
+typedef struct { uint32_t freeBlocks, allocatedBlocks; } MmcBdSpareArea;
+bool mmc_read_bd_spare_area(OpticalDrive* drive, MmcBdSpareArea* area);
 typedef struct { bool active, valid; uint16_t value; } MmcFormatProgress;
 bool mmc_read_format_progress(OpticalDrive* drive, MmcFormatProgress* progress);
 
@@ -192,6 +199,9 @@ bool mmc_read_format_capacities(OpticalDrive* drive, MmcFormatCapacities* capaci
 /* 仅发送一次IMMED格式化命令，调用方须先核介质、能力、描述符及用户授权；失败不重试。
  * certification：0快速重建、1不认证、2完整认证、3快速认证；接受不等于已完成。 */
 bool mmc_start_bd_re_format(OpticalDrive* drive, const MmcFormattableCapacity* format, uint8_t certification);
+/* 原版BD-R有备区受限切片：固定FT32/FST1、IMMED1、TDP0；NB是最小用户块数。
+ * 单次提交，调用方须先核Profile41、空白轨道、能力、锁前后描述符及确认；失败不重试或切换FT00。 */
+bool mmc_start_format_bd_r(OpticalDrive* drive, const MmcFormattableCapacity* format);
 
 /**
  * @brief Synchronize Cache / Flush FIFO (SCSI 0x35)
@@ -248,6 +258,9 @@ bool mmc_write_cd_mode1_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t 
 bool mmc_finish_cd_sao(OpticalDrive* drive);
 bool mmc_get_write_parameters(OpticalDrive* drive, MmcWriteParameters* parameters);
 bool mmc_set_write_parameters(OpticalDrive* drive, const MmcWriteParameters* parameters);
+/* 仅构建原版BD的2048字节数据页：Write Type0/2、FP1、Track4、Data8、Session0、Packet16、Pause150。
+ * BUFE/TestWrite/多会话/LinkSize及MCN/ISRC保留输入，调用方另核策略；MMC规定page05不影响BD介质操作。 */
+bool mmc_build_bd_write_parameters(const MmcWriteParameters* current, uint8_t writeType, MmcWriteParameters* parameters);
 bool mmc_perform_opc(OpticalDrive* drive);
 
 /**
