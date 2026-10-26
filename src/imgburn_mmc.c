@@ -447,6 +447,85 @@ bool mmc_get_bd_write_features(OpticalDrive* drive, bool* verifyNotRequired) {
     if (!writable) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED); *verifyNotRequired = (data[12] & 1) != 0; return true;
 }
 
+/* RT2只取指定功能；未声明的可选功能作为不Current快照保留，不推测无备区盘的缺陷管理。 */
+static bool mmc_get_bd_re_feature(OpticalDrive* drive, uint16_t feature, uint8_t size, uint8_t* data, bool* present) {
+    uint8_t cdb[10] = {0x46,2}; write_be16(cdb + 2,feature); cdb[8] = size; memset(data,0,size); *present = false;
+    if (!spti_send_cdb(drive,cdb,10,data,size,true,10)) return false;
+    if (drive->lastTransferBytes < 8 || drive->lastTransferBytes > size) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
+    if (read_be16(data + 6) != MMC_PROFILE_BD_RE) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    if (drive->lastTransferBytes == 8 && read_be32(data) == 4) return true;
+    if (drive->lastTransferBytes != size || read_be32(data) < (uint32_t)size - 4) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
+    if (read_be16(data + 8) != feature || data[11] != size - 12) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    *present = true; return true;
+}
+bool mmc_get_bd_re_features(OpticalDrive* drive, MmcBdReFeatures* features) {
+    if (features) memset(features,0,sizeof(*features));
+    if (!drive || !features) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    MmcBdReFeatures parsed = {0}; uint8_t data[32]; bool present;
+    if (!mmc_get_bd_re_feature(drive,0x41,32,data,&present)) return false;
+    /* 0041的前8位图字节属于BD-RE；只接受本批已解析的Class0/Version2确切位。 */
+    if (!present || !(read_be16(data + 16) & 4)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    parsed.bdWriteCurrent = (data[10] & 1) != 0; parsed.verifyNotRequired = (data[12] & 1) != 0;
+    if (!mmc_get_bd_re_feature(drive,0x23,20,data,&present)) return false;
+    if (present) {
+        parsed.formattableCurrent = (data[10] & 1) != 0; parsed.fullCertification = (data[12] & 1) != 0;
+        parsed.quickCertification = (data[12] & 2) != 0; parsed.noSpareAreas = (data[12] & 8) != 0;
+    }
+    if (!mmc_get_bd_re_feature(drive,0x20,24,data,&present)) return false;
+    if (present) {
+        parsed.randomWritableCurrent = (data[10] & 1) != 0; parsed.lastLba = read_be32(data + 12);
+        parsed.blockSize = read_be32(data + 16); parsed.blocking = read_be16(data + 20);
+    }
+    if (!mmc_get_bd_re_feature(drive,0x24,16,data,&present)) return false;
+    if (present) parsed.defectManagementCurrent = (data[10] & 1) != 0;
+    *features = parsed; return true;
+}
+
+bool mmc_start_bd_re_format(OpticalDrive* drive, const MmcFormattableCapacity* format, uint8_t certification) {
+    /* 参数失败没有新04h请求，不能让上次查询的attempted冒充本次格式化已提交。 */
+    if (drive) { memset(&drive->lastCommand,0,sizeof(drive->lastCommand)); memset(&drive->lastSense,0,sizeof(drive->lastSense)); drive->lastTransferBytes = 0; }
+    if (!drive || !format || certification > 3 || !format->blockCount || (format->formatType != 0x30 && format->formatType != 0x31) || format->typeDependentParameter > 0xFFFFFF || (format->formatType == 0x31 && format->typeDependentParameter != 2048)) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    uint8_t cdb[6] = {4,0x11}, data[12] = {0,0x82,0,8};
+    write_be32(data + 4,format->blockCount); data[8] = (uint8_t)((format->formatType << 2) | certification);
+    data[9] = (uint8_t)(format->typeDependentParameter >> 16); data[10] = (uint8_t)(format->typeDependentParameter >> 8); data[11] = (uint8_t)format->typeDependentParameter;
+    if (!spti_send_cdb(drive,cdb,6,data,sizeof(data),false,30)) return false;
+    if (drive->lastTransferBytes != sizeof(data)) return mmc_write_parameter_error(drive,ERROR_WRITE_FAULT); return true;
+}
+
+bool mmc_read_format_progress(OpticalDrive* drive, MmcFormatProgress* progress) {
+    if (progress) memset(progress,0,sizeof(*progress));
+    if (!drive || !progress) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    uint8_t cdb[6] = {3,0,0,0,252}, data[252] = {0};
+    if (!spti_send_cdb(drive,cdb,6,data,sizeof(data),true,10)) return false;
+    DWORD error = ERROR_INVALID_DATA; uint32_t size = drive->lastTransferBytes; uint8_t key = 0, asc = 0, ascq = 0; MmcFormatProgress parsed = {0};
+    if (size < 8 || size > sizeof(data)) { error = ERROR_READ_FAULT; goto invalid; }
+    uint32_t declared = (uint32_t)data[7] + 8; if (declared > size) { error = ERROR_READ_FAULT; goto invalid; }
+    uint8_t format = data[0] & 0x7F;
+    if (format == 0x70 || format == 0x71) {
+        if (declared < 18) { error = ERROR_READ_FAULT; goto invalid; } key = data[2] & 15; asc = data[12]; ascq = data[13];
+        if (data[15] & 0x80) { parsed.valid = true; parsed.value = read_be16(data + 16); }
+    } else if (format == 0x72 || format == 0x73) {
+        key = data[1] & 15; asc = data[2]; ascq = data[3];
+        for (uint32_t offset = 8; offset < declared;) {
+            if (declared - offset < 2 || (uint32_t)data[offset + 1] + 2 > declared - offset) goto invalid;
+            if (data[offset] == 2) {
+                if (data[offset + 1] != 6 || parsed.valid || !(data[offset + 4] & 0x80)) goto invalid;
+                parsed.valid = true; parsed.value = read_be16(data + offset + 5);
+            } else if (data[offset] == 0x0A) {
+                if (data[offset + 1] != 6) goto invalid;
+                if ((data[offset + 2] & 15) == 2 && data[offset + 3] == 4 && data[offset + 4] == 4) { if (parsed.valid) goto invalid; parsed.active = parsed.valid = true; parsed.value = read_be16(data + offset + 6); }
+                else if ((data[offset + 2] & 15) || data[offset + 3] || data[offset + 4]) { error = (data[offset + 2] & 15) == 7 ? ERROR_WRITE_PROTECT : (data[offset + 2] & 15) == 2 ? ERROR_NOT_READY : ERROR_IO_DEVICE; goto invalid; }
+            }
+            offset += (uint32_t)data[offset + 1] + 2;
+        }
+    } else goto invalid;
+    if (!key && !asc && !ascq) { parsed.active = parsed.valid; *progress = parsed; return true; }
+    if (key == 2 && asc == 4 && ascq == 4) { parsed.active = true; *progress = parsed; return true; }
+    error = key == 7 ? ERROR_WRITE_PROTECT : key == 2 ? ERROR_NOT_READY : ERROR_IO_DEVICE;
+invalid:
+    return mmc_write_parameter_error(drive,error);
+}
+
 const char* mmc_get_bd_physical_type_name(MmcBdPhysicalType type) {
     switch (type) { case MMC_BD_PHYSICAL_ROM: return "BD-ROM"; case MMC_BD_PHYSICAL_R: return "BD-R"; case MMC_BD_PHYSICAL_RE: return "BD-RE"; default: return "Unknown"; }
 }

@@ -31,7 +31,8 @@ typedef enum {
     PIPELINE_STATE_ABORTED,
     PIPELINE_STATE_FAILED,
     PIPELINE_STATE_READING,
-    PIPELINE_STATE_ERASING
+    PIPELINE_STATE_ERASING,
+    PIPELINE_STATE_FORMATTING
 } PipelineState;
 
 /**
@@ -72,12 +73,13 @@ typedef struct {
     bool ejectWhenDone;
     size_t ringBufferBytes;         /* e.g. 32 MB or 64 MB */
     HANDLE cancelEvent;             /* 借用的取消事件；不打断设备正在执行的命令。 */
-    bool reserveTrack;              /* DVD+R（含双层）可选；当前 DVD-R DAO/BD-R SRM 路径总是预留。 */
+    bool reserveTrack;              /* DVD+R（含双层）可选；DVD-R DAO及默认BD-R SRM预留，bdNoReserve显式例外。 */
     bool cycleTrayBeforeVerify;     /* 写后校验前按原版默认流程重新装载介质。 */
     bool performOpc;                /* 显式请求写入前功率校准，默认关闭。 */
     uint32_t layerBreakLba;          /* DVD+R DL用户指定L0容量，覆盖MDS；0采用MDS或按ECC块平衡。 */
     bool keepCurrentWriteSpeed;     /* 显式沿用设备当前速度，不发送速度设置；默认false保留原有速度请求。 */
     bool bdNoReserve;               /* 显式BD-R SRM不再预留，可用完整核对的已有空预留轨；不自动回退，不能与reserveTrack合用。 */
+    bool bdReOverwrite;             /* 仅本次明确允许覆写已格式化BD-RE；不追加、不自动格式化，默认false保留旧介质范围。 */
 } BurnConfig;
 
 /**
@@ -126,9 +128,26 @@ typedef struct {
 bool pipeline_discovery_capacity(OpticalDrive* drive, uint32_t* sectors);
 bool pipeline_discover_disc(const DiscoveryConfig* config, PipelineProgressCallback callback, void* userData);
 
-/* CD-RW/DVD-RW 的整盘擦除。命令开始后的取消须等待设备结束，不能中断物理擦除。 */
-typedef struct { OpticalDrive* drive; HANDLE cancelEvent; bool full; } EraseConfig;
+/* CD-RW/DVD-RW按设备BLANK擦除；BD-RE须显式bdReErase且已格式化，快速清零前800扇区/完整清零用户区并校验。
+ * BLANK启动后取消等待设备结束；BD-RE清零在命令边界停止，不自动格式化，也不承诺清除备区旧数据。 */
+typedef struct { OpticalDrive* drive; HANDLE cancelEvent; bool full, bdReErase; } EraseConfig;
 bool pipeline_erase_disc(const EraseConfig* config, PipelineProgressCallback callback, void* userData);
+
+/* BD-RE必须明确选择设备RFC列表中的原索引/描述符及认证方式，confirmErase仅代表本次调用授权。
+ * 认证0快速重建、1不认证、2完整认证、3快速认证；格式化不等于清零或安全擦除。
+ * 启动后取消仅记请求并等待结束；失败不重试，commandAttempted但未accepted仍可能已改盘。 */
+typedef struct {
+    OpticalDrive* drive; HANDLE cancelEvent;
+    uint8_t formatIndex, certification;
+    MmcFormattableCapacity expected;
+    bool confirmErase;
+} BdReFormatConfig;
+typedef struct {
+    MmcFormattableCapacity selected;
+    bool commandAttempted, commandAccepted, completed, cancelRequested;
+    uint32_t formattedSectors, spareClusters;
+} BdReFormatResult;
+bool pipeline_format_bd_re(const BdReFormatConfig* config, BdReFormatResult* result, PipelineProgressCallback callback, void* userData);
 
 /**
  * @brief Execute Verify Mode: verify optical disc against an image file

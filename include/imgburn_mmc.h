@@ -146,6 +146,19 @@ bool mmc_set_burn_speed(OpticalDrive* drive, MmcProfile profile, uint32_t writeS
 bool mmc_get_bd_write_features(OpticalDrive* drive, bool* verifyNotRequired);
 bool mmc_write_bd_blocks(OpticalDrive* drive, uint32_t startLba, uint16_t blockCount, const void* buffer, bool verifyNotRequired);
 
+/* BD-RE Class0/Version2能力快照；无备区格式允许Defect Management不Current，写入另核随机写资格。 */
+typedef struct {
+    bool formattableCurrent, bdWriteCurrent;
+    bool verifyNotRequired; /* 共享BD Write的原始SVNR位，仅BD-R适用；不能用于BD-RE FastWrite。 */
+    bool fullCertification, quickCertification, noSpareAreas;
+    bool randomWritableCurrent, defectManagementCurrent;
+    uint32_t lastLba, blockSize;
+    uint16_t blocking;
+} MmcBdReFeatures;
+bool mmc_get_bd_re_features(OpticalDrive* drive, MmcBdReFeatures* features);
+typedef struct { bool active, valid; uint16_t value; } MmcFormatProgress;
+bool mmc_read_format_progress(OpticalDrive* drive, MmcFormatProgress* progress);
+
 /* 只读PIC中的物理介质摘要，与当前逻辑Profile及可写能力分别报告。 */
 typedef enum { MMC_BD_PHYSICAL_UNKNOWN, MMC_BD_PHYSICAL_ROM, MMC_BD_PHYSICAL_R, MMC_BD_PHYSICAL_RE } MmcBdPhysicalType;
 typedef struct {
@@ -173,9 +186,12 @@ typedef struct {
     uint8_t descriptorCode, formatCount;
     MmcFormattableCapacity formats[MMC_MAX_FORMAT_CAPACITIES];
 } MmcFormatCapacities;
-/* 原始24位参数依介质/类型解释，BD-RE当前参数为备区簇数，不能一律当扇区字节数。
+/* 原始24位参数依介质/类型解释，BD-RE的DT1/2参数为备区簇数，不能一律当扇区字节数。
  * 单次23h只读查询，不选择或执行格式化；未知/重复格式及设备顺序保留，失败输出清零。 */
 bool mmc_read_format_capacities(OpticalDrive* drive, MmcFormatCapacities* capacities);
+/* 仅发送一次IMMED格式化命令，调用方须先核介质、能力、描述符及用户授权；失败不重试。
+ * certification：0快速重建、1不认证、2完整认证、3快速认证；接受不等于已完成。 */
+bool mmc_start_bd_re_format(OpticalDrive* drive, const MmcFormattableCapacity* format, uint8_t certification);
 
 /**
  * @brief Synchronize Cache / Flush FIFO (SCSI 0x35)

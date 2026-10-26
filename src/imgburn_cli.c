@@ -57,6 +57,9 @@ static void print_usage(void) {
     printf("Device & Information Commands:\n");
     printf("  devices                        List all optical drives on system\n");
     printf("  info <drive>                   Detailed drive & loaded media inspection\n");
+    printf("  bdre-write <drive> <image> --overwrite [--verify]  Explicit BD-RE overwrite\n");
+    printf("  bdre-format <drive> --list | --index N --certification 0..3 --confirm-erase\n");
+    printf("  bdre-erase <drive> --quick|--full --confirm-erase  Zero formatted BD-RE\n");
     printf("  bd-info <drive>                Read-only BD physical identity and capacity\n");
     printf("  booktype <drive> [query|set <dvd_rom|default> [dvd+r|dvd+r_dl]]\n");
     printf("                                 Query or set drive BookType / Bitsetting\n");
@@ -636,26 +639,74 @@ static int cmd_erase(int argc, char** argv) {
     wchar_t path[MAX_PATH]; if (!parse_drive_path(argv[2],path,MAX_PATH)) return 1;
     OpticalDrive drive; if (!spti_open_drive(&drive,path,false)) { printf("Error: Failed to open drive (error %lu).\n",GetLastError()); return 1; }
     HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; }
-    EraseConfig config = {&drive,cancel,argc == 4 && !_stricmp(argv[3],"--full")};
+    EraseConfig config = {0}; config.drive = &drive; config.cancelEvent = cancel; config.full = argc == 4 && !_stricmp(argv[3],"--full");
     AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock); bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
     bool ok = pipeline_erase_disc(&config,on_cli_burn_progress,NULL); DWORD error = GetLastError();
     if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock); spti_close_drive(&drive);
     printf(ok ? "\nDisc erase completed.\n" : "\nDisc erase failed or was cancelled (error %lu).\n",error); return ok ? 0 : 1;
 }
 
-static int cmd_burn(int argc, char **argv) {
+/* BDRE必须明确选择操作；先绑定设备当前描述符，再交由管线重新核对。 */
+static int cmd_bdre_format(int argc, char** argv) {
+    int index = -1, certification = -1; bool confirm = false, list = false;
+    for (int i = 3; i < argc; i++) {
+        if (!_stricmp(argv[i],"--confirm-erase")) confirm = true;
+        else if (!_stricmp(argv[i],"--list")) list = true;
+        else if ((!_stricmp(argv[i],"--index") || !_stricmp(argv[i],"--certification")) && i + 1 < argc) {
+            bool item = !_stricmp(argv[i],"--index"); const char* value = argv[++i]; char* end; unsigned long n = strtoul(value,&end,10);
+            if (!value[0] || *end || value[0] == '-' || n > (item ? 29u : 3u) || (item ? index >= 0 : certification >= 0)) goto usage;
+            if (item) index = (int)n; else certification = (int)n;
+        } else goto usage;
+    }
+    if (argc < 3 || (list ? confirm || index >= 0 || certification >= 0 : !confirm || index < 0 || certification < 0)) goto usage;
+    wchar_t path[MAX_PATH]; if (!parse_drive_path(argv[2],path,MAX_PATH)) return 1;
+    OpticalDrive drive; if (!spti_open_drive_passive(&drive,path)) return 1;
+    MmcFormatCapacities capacity = {0};
+    bool ok = mmc_get_current_profile(&drive) == MMC_PROFILE_BD_RE && mmc_read_format_capacities(&drive,&capacity);
+    if (!ok) { printf("Error: A supported BD-RE format-capacity list is required.\n"); spti_close_drive(&drive); return 1; }
+    if (list) {
+        for (unsigned i = 0; i < capacity.formatCount; i++) { const MmcFormattableCapacity* f = &capacity.formats[i]; printf("Index %u: FT=0x%02X Blocks=%u Raw TDP=0x%06X%s\n",i,f->formatType,f->blockCount,f->typeDependentParameter,f->formatType == 0x30 || f->formatType == 0x31 ? " (BD-RE format candidate)" : " (not selectable)"); }
+        spti_close_drive(&drive); return 0;
+    }
+    if ((unsigned)index >= capacity.formatCount || (capacity.formats[index].formatType != 0x30 && capacity.formats[index].formatType != 0x31)) { printf("Error: Select a returned FT30/31 descriptor by its original index.\n"); spti_close_drive(&drive); return 1; }
+    HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; }
+    BdReFormatConfig config = {0}; config.drive = &drive; config.cancelEvent = cancel; config.formatIndex = (uint8_t)index; config.certification = (uint8_t)certification; config.expected = capacity.formats[index]; config.confirmErase = true; BdReFormatResult result = {0};
+    printf("BD-RE format destroys the existing file layout. Selected index=%d FT=0x%02X Blocks=%u Raw TDP=0x%06X Certification=%d. This is not a secure erase.\n",index,config.expected.formatType,config.expected.blockCount,config.expected.typeDependentParameter,certification);
+    AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock); bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
+    ok = pipeline_format_bd_re(&config,&result,on_cli_burn_progress,NULL); DWORD error = GetLastError();
+    if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock); spti_close_drive(&drive);
+    printf("BD-RE format %s: attempted=%u accepted=%u completed=%u cancel-requested=%u sectors=%u spare-clusters=%u (error %lu).\n",ok ? "completed" : "stopped",result.commandAttempted,result.commandAccepted,result.completed,result.cancelRequested,result.formattedSectors,result.spareClusters,error); return ok ? 0 : 1;
+usage: printf("Usage: imgburn bdre-format <drive> --list | --index N --certification 0..3 --confirm-erase\nCertification: 0=quick reformat, 1=none, 2=full, 3=quick. No automatic write or retry.\n"); return 1;
+}
+static int cmd_bdre_erase(int argc, char** argv) {
+    bool full = false, mode = false, confirm = false;
+    for (int i = 3; i < argc; i++) { if (!_stricmp(argv[i],"--confirm-erase")) confirm = true; else if ((!_stricmp(argv[i],"--quick") || !_stricmp(argv[i],"--full")) && !mode) { full = !_stricmp(argv[i],"--full"); mode = true; } else goto usage; }
+    if (argc < 3 || !mode || !confirm) goto usage;
+    wchar_t path[MAX_PATH]; if (!parse_drive_path(argv[2],path,MAX_PATH)) return 1;
+    OpticalDrive drive; if (!spti_open_drive_passive(&drive,path)) return 1; HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; }
+    EraseConfig config = {0}; config.drive = &drive; config.cancelEvent = cancel; config.full = full; config.bdReErase = true;
+    printf(full ? "BD-RE full zero: all logical user sectors; this is not a secure erase.\n" : "BD-RE quick zero: first 800 logical sectors; remaining data may persist.\n");
+    AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock); bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
+    bool ok = pipeline_erase_disc(&config,on_cli_burn_progress,NULL); DWORD error = GetLastError();
+    if (control) SetConsoleCtrlHandler(cli_read_control,FALSE); AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = NULL; CloseHandle(cancel); ReleaseSRWLockExclusive(&cliReadLock); spti_close_drive(&drive);
+    printf("BD-RE zero operation %s (error %lu); formatting was not requested.\n",ok ? "completed" : "stopped",error); return ok ? 0 : 1;
+usage: printf("Usage: imgburn bdre-erase <drive> --quick|--full --confirm-erase\n"); return 1;
+}
+
+static int cmd_burn(int argc, char **argv, bool bdReOnly) {
     if (argc < 4) {
-        printf("Usage: imgburn burn <drive> <image> [--speed <Nx|MAX|KEEP>] [--test] [--verify] [--reserve|--bd-no-reserve] [--no-cycle] [--opc]\n");
+        printf(bdReOnly ? "Usage: imgburn bdre-write <drive> <image> --overwrite [--verify]\n" : "Usage: imgburn burn <drive> <image> [--speed <Nx|MAX|KEEP>] [--test] [--verify] [--reserve|--bd-no-reserve] [--no-cycle] [--opc]\n");
         return 1;
     }
 
     const char *driveArg = argv[2];
     const char *imageArg = argv[3];
-    bool testMode = false;
+    bool testMode = false, overwrite = false;
     bool verifyAfter = false;
     double speed = 0; bool reserve = false, cycle = true, opc = false, bdNoReserve = false, keepSpeed = false; uint32_t layerBreak = 0;
 
     for (int i = 4; i < argc; i++) {
+        if (bdReOnly) { if (!_stricmp(argv[i],"--overwrite")) overwrite = true; else if (!_stricmp(argv[i],"--verify")) verifyAfter = true; else { printf("Usage: imgburn bdre-write <drive> <image> --overwrite [--verify]\n"); return 1; } continue; }
         if (_stricmp(argv[i], "--test") == 0) testMode = true;
         else if (_stricmp(argv[i], "--verify") == 0) verifyAfter = true;
         else if (_stricmp(argv[i], "--reserve") == 0) reserve = true;
@@ -669,6 +720,8 @@ static int cmd_burn(int argc, char **argv) {
         } else { printf("Error: Unknown or incomplete burn option.\n"); return 1; }
     }
 
+    if (bdReOnly && !overwrite) { printf("Error: BD-RE overwrite requires --overwrite; existing content will be replaced, not appended.\n"); return 1; }
+    if (bdReOnly) { cycle = false; keepSpeed = true; }
     if (bdNoReserve && reserve) { printf("Error: --bd-no-reserve conflicts with --reserve.\n"); return 1; }
 
     wchar_t drivePath[MAX_PATH], imagePath[MAX_PATH];
@@ -678,10 +731,11 @@ static int cmd_burn(int argc, char **argv) {
     wprintf(L"Source Image: %ls\n", imagePath);
     if (keepSpeed) printf("Options: TestMode=%s, VerifyAfterBurn=%s, Speed=KEEP (current drive speed)\n\n",testMode ? "YES" : "NO",verifyAfter && !testMode ? "YES" : "NO");
     else printf("Options: TestMode=%s, VerifyAfterBurn=%s, Speed=%.2fx (0=MAX)\n\n",testMode ? "YES" : "NO",verifyAfter && !testMode ? "YES" : "NO",speed);
+    if (bdReOnly) printf("BD-RE overwrite: existing content in the image range will be replaced; remaining sectors are not erased.\n");
     if (bdNoReserve) printf("BD-R SRM: no new track reservation; any existing empty reserved track must match this image.\n");
 
     OpticalDrive drive;
-    if (!(bdNoReserve ? spti_open_drive_passive(&drive,drivePath) : spti_open_drive(&drive, drivePath, true))) {
+    if (!(bdNoReserve || bdReOnly ? spti_open_drive_passive(&drive,drivePath) : spti_open_drive(&drive, drivePath, true))) {
         printf("Error: Cannot open target drive (error %lu).\n",GetLastError());
         return 1;
     }
@@ -696,7 +750,7 @@ static int cmd_burn(int argc, char **argv) {
     if (speed > 0 && speedProfile == MMC_PROFILE_UNKNOWN) { printf("Error: Cannot identify media for write speed.\n"); spti_close_drive(&drive); return 1; }
     config.writeSpeedKbps = speed > 0 ? (uint32_t)(speed * (speedProfile == MMC_PROFILE_BD_R_SRM ? 4495.5 : speedProfile == MMC_PROFILE_CD_R ? 176.4 : 1385.0) + 0.5) : UINT32_MAX;
     config.ringBufferBytes = 32 * 1024 * 1024;
-    config.reserveTrack = reserve; config.cycleTrayBeforeVerify = cycle; config.performOpc = opc; config.layerBreakLba = layerBreak; config.bdNoReserve = bdNoReserve; config.keepCurrentWriteSpeed = keepSpeed;
+    config.reserveTrack = reserve; config.cycleTrayBeforeVerify = cycle; config.performOpc = opc; config.layerBreakLba = layerBreak; config.bdNoReserve = bdNoReserve; config.keepCurrentWriteSpeed = keepSpeed; config.bdReOverwrite = bdReOnly;
     HANDLE cancel = CreateEventW(NULL,TRUE,FALSE,NULL); if (!cancel) { spti_close_drive(&drive); return 1; } config.cancelEvent = cancel;
     AcquireSRWLockExclusive(&cliReadLock); cliReadCancel = cancel; ReleaseSRWLockExclusive(&cliReadLock); bool control = SetConsoleCtrlHandler(cli_read_control,TRUE) != FALSE;
 
@@ -1131,7 +1185,13 @@ static int run_cli(int argc, char **argv) {
     } else if (_stricmp(cmd, "build") == 0) {
         return cmd_build(argc, argv);
     } else if (_stricmp(cmd, "burn") == 0) {
-        return cmd_burn(argc, argv);
+        return cmd_burn(argc, argv, false);
+    } else if (_stricmp(cmd,"bdre-write") == 0) {
+        return cmd_burn(argc,argv,true);
+    } else if (_stricmp(cmd,"bdre-format") == 0) {
+        return cmd_bdre_format(argc,argv);
+    } else if (_stricmp(cmd,"bdre-erase") == 0) {
+        return cmd_bdre_erase(argc,argv);
     } else if (_stricmp(cmd, "append-iso") == 0) {
         return cmd_append_iso(argc,argv);
     } else if (_stricmp(cmd, "erase") == 0) {

@@ -279,7 +279,7 @@ static void job_bd_capacity(GuiJob* job, OpticalDrive* drive, const MmcDiscInfo*
     }
 }
 
-/* 格式能力只追加只读说明，不选择FT、不更新任何写入或擦除资格。 */
+/* 格式描述符仍原序显示；单独的BDRE候选不代替核心写入资格复核。 */
 static void job_bd_format_capacities(GuiJob* job, OpticalDrive* drive) {
     MmcFormatCapacities capacity;
     if (!mmc_read_format_capacities(drive,&capacity)) { job_text(job,L"BD-RE格式状态：未知（错误 %lu）\r\n",GetLastError()); return; }
@@ -288,12 +288,13 @@ static void job_bd_format_capacities(GuiJob* job, OpticalDrive* drive) {
     if (capacity.descriptorCode == 1) job_text(job,L"最大备用区簇数：%u\r\n",capacity.typeDependentParameter);
     else if (capacity.descriptorCode == 2) job_text(job,L"已分配备用区簇数：%u\r\n",capacity.typeDependentParameter);
     else job_text(job,L"描述符数值不代表已确认的当前介质容量。\r\n");
+    if (job->bdReMedia && capacity.descriptorCode == 2) { uint32_t last, bytes; if (mmc_read_capacity(drive,&last,&bytes) && last < UINT32_MAX && bytes == 2048 && capacity.blockCount == last + 1) job->bdReWritable = true; }
     if (!capacity.formatCount) job_text(job,L"可格式化描述符：设备未返回。\r\n");
     for (unsigned i = 0; i < capacity.formatCount; i++) { const MmcFormattableCapacity* format = &capacity.formats[i]; job_text(job,L"可格式化 [%u]：FT=0x%02X，块数=%u，原始TDP=0x%06X\r\n",i,format->formatType,format->blockCount,format->typeDependentParameter); }
 }
 
 static bool job_drive(GuiJob* job) {
-    OpticalDrive drive; bool opened = job->operation == GUI_DRIVE_INFO ? spti_open_drive_passive(&drive,job->drive) : spti_open_drive(&drive,job->drive,job->operation == GUI_WRITE_DISC || job->operation == GUI_DISCOVERY_DISC); if (!opened) return false;
+    OpticalDrive drive; bool opened = job->operation == GUI_DRIVE_INFO || job->bdReOverwrite || job->bdReErase ? spti_open_drive_passive(&drive,job->drive) : spti_open_drive(&drive,job->drive,job->operation == GUI_WRITE_DISC || job->operation == GUI_DISCOVERY_DISC); if (!opened) return false;
     bool ok = false; uint32_t last = 0, bytes = 0; bool ready = mmc_test_unit_ready(&drive);
     job->mediaReady = ready;
     if (job->operation == GUI_DRIVE_INFO) {
@@ -304,8 +305,9 @@ static bool job_drive(GuiJob* job) {
         if (ready && !bd && mmc_read_capacity(&drive, &last, &bytes)) job_text(job, L"容量：%llu 扇区，每扇区 %u 字节\r\n", (uint64_t)last + 1, bytes);
         if (ready && (mmc_get_current_profile(&drive) == MMC_PROFILE_DVD_R_SEQ || mmc_get_current_profile(&drive) == MMC_PROFILE_DVD_R_DL_SEQ)) { MmcDvdWriteFeatures features; if (mmc_get_dvd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
         if (ready && mmc_get_current_profile(&drive) == MMC_PROFILE_CD_R) { MmcCdWriteFeatures features; if (mmc_get_cd_write_features(&drive,&features)) job->testWriteSupported = features.testWrite; }
-        bool bdCapacityShown = false;
+        bool bdCapacityShown = false, bdReErasable = false;
         if (ready) { MmcDiscInfo disc; if (mmc_read_disc_information(&drive,&disc)) {
+            bdReErasable = disc.currentProfile == MMC_PROFILE_BD_RE && disc.isErasable;
             if (bd) { job_bd_capacity(job,&drive,&disc); bdCapacityShown = true; }
             /* 只供原Write按钮显示空白介质候选；完整能力/布局仍由既有写入worker检查。 */
             job->writeMediaReady = disc.discStatus == DISC_STATUS_EMPTY && !disc.isErasable && !disc.lastSessionStatus && disc.numSessions == 1 && disc.firstTrack == 1 && disc.lastTrack == 1 && (disc.currentProfile == MMC_PROFILE_CD_R || disc.currentProfile == MMC_PROFILE_DVD_R_SEQ || disc.currentProfile == MMC_PROFILE_DVD_R_DL_SEQ || disc.currentProfile == MMC_PROFILE_DVD_PLUS_R || disc.currentProfile == MMC_PROFILE_DVD_PLUS_R_DL || disc.currentProfile == MMC_PROFILE_BD_R_SRM);
@@ -317,7 +319,9 @@ static bool job_drive(GuiJob* job) {
             }
         } }
         if (ready && bd && !bdCapacityShown) job_bd_capacity(job,&drive,NULL);
+        job->bdReMedia = ready && bdReErasable && infoProfile == MMC_PROFILE_BD_RE;
         if (ready && bd && (infoProfile == MMC_PROFILE_BD_RE || physicalRE)) job_bd_format_capacities(job,&drive);
+        if (job->bdReWritable) job->eraseSupported = true;
         if (ready) pipeline_discovery_capacity(&drive,&job->discoveryCapacity);
     } else if (!ready) SetLastError(ERROR_NOT_READY);
     else if (job->operation == GUI_READ_DISC) {
@@ -340,10 +344,11 @@ static bool job_drive(GuiJob* job) {
         else if (job->miscompares) job_text(job,L"发现 %u 个内容不一致的扇区。\r\n",job->miscompares);
     }
     else if (job->operation == GUI_ERASE_QUICK || job->operation == GUI_ERASE_FULL) {
-        EraseConfig config = {&drive,job->cancel,job->operation == GUI_ERASE_FULL}; ok = pipeline_erase_disc(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
-        if (ok) job_text(job,config.full ? L"完整擦除完成，设备已报告空白介质。\r\n" : L"快速擦除完成，设备已报告空白介质。\r\n");
-        else if (job->error == ERROR_CANCELLED) job_text(job,L"取消不会中断已经开始的物理擦除；若已开始，已等待设备结束。\r\n");
-        else if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前擦除流程支持 CD-RW 和单层 DVD-RW。\r\n");
+        EraseConfig config = {0}; config.drive = &drive; config.cancelEvent = job->cancel; config.full = job->operation == GUI_ERASE_FULL; config.bdReErase = job->bdReErase; ok = pipeline_erase_disc(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
+        if (ok && job->bdReErase) job_text(job,config.full ? L"BD-RE全部逻辑用户区已写零；这不是安全擦除。\r\n" : L"BD-RE前800个逻辑扇区已写零，其余数据可能保留。\r\n");
+        else if (ok) job_text(job,config.full ? L"完整擦除完成，设备已报告空白介质。\r\n" : L"快速擦除完成，设备已报告空白介质。\r\n");
+        else if (job->error == ERROR_CANCELLED) job_text(job,job->bdReErase ? L"已停止清零，已发出写入无法撤销。\r\n" : L"取消不会中断已经开始的物理擦除；若已开始，已等待设备结束。\r\n");
+        else if (job->error == ERROR_NOT_SUPPORTED) job_text(job,job->bdReErase ? L"BD-RE清零仅支持已格式化、具备2048字节逻辑用户区的受支持BD-RE；不会自动格式化。\r\n" : L"当前擦除流程支持 CD-RW 和单层 DVD-RW。\r\n");
     }
     else if (job->operation == GUI_DISCOVERY_DISC) {
         DiscoveryConfig config = {0}; config.drive = &drive; config.sectors = job->discoverySectors; config.writeSpeedKbps = job->speed; config.testMode = job->testMode; config.verifyAfterWrite = job->verify; config.ringBufferBytes = 32 * 1024 * 1024; config.cancelEvent = job->cancel; config.cycleTrayBeforeVerify = true;
@@ -356,16 +361,34 @@ static bool job_drive(GuiJob* job) {
         else if (job->error == ERROR_DISK_FULL) job_text(job,L"所选扇区数超过光盘可写容量。\r\n");
     }
     else if (job->operation == GUI_WRITE_DISC) {
-        BurnConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.writeSpeedKbps = job->speed; config.verifyAfterWrite = job->verify; config.ringBufferBytes = 32 * 1024 * 1024; config.cancelEvent = job->cancel; config.cycleTrayBeforeVerify = true; config.testMode = job->testMode; config.layerBreakLba = job->writeLayerBreak;
+        BurnConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.writeSpeedKbps = job->speed; config.verifyAfterWrite = job->verify; config.ringBufferBytes = 32 * 1024 * 1024; config.cancelEvent = job->cancel; config.cycleTrayBeforeVerify = true; config.testMode = job->testMode; config.layerBreakLba = job->writeLayerBreak; config.bdReOverwrite = job->bdReOverwrite; if (job->bdReOverwrite) { config.keepCurrentWriteSpeed = true; config.cycleTrayBeforeVerify = false; }
         ok = pipeline_burn_image(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
         if (ok && job->testMode) job_text(job,L"设备测试写入完成；未执行记录数据的回读校验。\r\n");
+        else if (ok && job->bdReOverwrite) job_text(job,L"BD-RE镜像覆写完成%ls；来源范围外旧数据未作清除承诺。\r\n",job->verify ? L"并通过回读校验" : L"");
         else if (ok) job_text(job,L"光盘镜像写入完成%ls。\r\n",job->verify ? L"并通过回读校验" : L"");
-        else if (job->error == ERROR_NOT_SUPPORTED) job_text(job,L"当前支持空白 CD-R SAO、DVD-R（含固定层 DL）DAO、DVD+R（含自动或指定层 DL）与 BD-R SRM；CD-TEXT 还要求光驱支持 R-W 写入。\r\n");
+        else if (job->error == ERROR_NOT_SUPPORTED) job_text(job,job->bdReOverwrite ? L"BD-RE覆写需要受支持且已格式化的2048字节数据介质；不支持测试模式、预留或L0设置。\r\n" : L"当前支持空白 CD-R SAO、DVD-R（含固定层 DL）DAO、DVD+R（含自动或指定层 DL）与 BD-R SRM；CD-TEXT 还要求光驱支持 R-W 写入。\r\n");
         else if (job->error == ERROR_DISK_FULL) job_text(job,L"光盘的可写扇区不足。\r\n");
     }
     if (!ok && !job->error) job->error = drive.lastError ? drive.lastError : GetLastError();
     if (!ok && job->error == ERROR_ACCESS_DENIED && drive.lastError == ERROR_ACCESS_DENIED) job_text(job,drive.accessKnown && (drive.deviceAccess & (GENERIC_READ | GENERIC_WRITE)) != (GENERIC_READ | GENERIC_WRITE) ? L"未取得 SPTI 所需的设备读写访问权，请尝试以管理员身份运行。\r\n" : L"光驱或驱动程序拒绝了设备命令。\r\n");
     spti_close_drive(&drive); return ok;
+}
+
+/* 格式化列表查询与执行均在worker；窗口只携带明确选中的原索引及描述符。 */
+static bool job_bd_re_format(GuiJob* job) {
+    OpticalDrive drive; if (!spti_open_drive_passive(&drive,job->drive)) return false; bool ok;
+    if (job->operation == GUI_BD_RE_FORMAT_LIST) {
+        ok = mmc_get_current_profile(&drive) == MMC_PROFILE_BD_RE;
+        if (!ok) SetLastError(ERROR_NOT_SUPPORTED);
+        if (ok) ok = mmc_read_format_capacities(&drive,&job->bdReCapacities);
+        if (ok) job_text(job,L"只读格式列表已取得。请选择FT30/31原描述符与认证方式，提交前会再次核对。\r\n");
+    } else {
+        BdReFormatConfig config = job->bdReFormat; config.drive = &drive; config.cancelEvent = job->cancel;
+        ok = pipeline_format_bd_re(&config,&job->bdReFormatResult,job_pipeline_progress,job);
+        job_text(job,L"格式命令：尝试%u，接受%u，完成%u，取消请求%u；已格式化扇区%u，备用簇%u。\r\n",job->bdReFormatResult.commandAttempted,job->bdReFormatResult.commandAccepted,job->bdReFormatResult.completed,job->bdReFormatResult.cancelRequested,job->bdReFormatResult.formattedSectors,job->bdReFormatResult.spareClusters);
+        if (job->bdReFormatResult.commandAttempted) job_text(job,L"格式化后请重新查询介质；本任务不会自动覆写或重试。\r\n");
+    }
+    DWORD error = GetLastError(); spti_close_drive(&drive); if (!ok) job->error = error; SetLastError(error); return ok;
 }
 
 DWORD WINAPI imgburn_gui_job_run(void* context) {
@@ -376,6 +399,7 @@ DWORD WINAPI imgburn_gui_job_run(void* context) {
         case GUI_CALCULATE: job->succeeded = job_prepare(job); break;
         case GUI_BUILD_IMAGE: job->succeeded = job_build(job); break;
         case GUI_INSPECT: job->succeeded = job_inspect(job); break;
+        case GUI_BD_RE_FORMAT_LIST: case GUI_BD_RE_FORMAT: job->succeeded = job_bd_re_format(job); break;
         case GUI_READ_DEST_INFO: job->succeeded = job_read_destination_info(job); break;
         case GUI_CREATE_CUE: job->succeeded = job_cue(job); break;
         case GUI_CREATE_MDS: job->succeeded = job_mds(job); break;
@@ -385,7 +409,7 @@ DWORD WINAPI imgburn_gui_job_run(void* context) {
         case GUI_DVD_CANDIDATES: job->succeeded = job_dvd_candidates(job); break;
         case GUI_CD_ISO_PLAN: case GUI_CD_ISO_WRITE: job->succeeded = job_cd_iso(job); break;
     }
-    if (!job->succeeded && job_cancelled(job) && (!job->error || (job->operation != GUI_ERASE_QUICK && job->operation != GUI_ERASE_FULL))) job->error = ERROR_CANCELLED;
+    if (!job->succeeded && job_cancelled(job) && (!job->error || (job->operation != GUI_ERASE_QUICK && job->operation != GUI_ERASE_FULL && job->operation != GUI_BD_RE_FORMAT))) job->error = ERROR_CANCELLED;
     if (!job->succeeded) { if (!job->error) job->error = GetLastError(); if (!job->error) job->error = ERROR_INVALID_DATA; job_text(job, job->error == ERROR_CANCELLED ? L"操作已取消。\r\n" : L"操作失败（错误 %lu）。\r\n", job->error); }
     if (job->owner) PostMessageW(job->owner, GUI_JOB_DONE, 0, (LPARAM)job); return job->succeeded ? 0 : 1;
 }
