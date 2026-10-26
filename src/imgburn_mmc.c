@@ -463,19 +463,23 @@ bool mmc_read_bd_disc_structure(OpticalDrive* drive, MmcBdDiscStructure* structu
     if (drive->lastTransferBytes != sizeof(data) || read_be16(data) != 4098) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
     const uint8_t* first = data + 4;
     if (first[0] != 'D' || first[1] != 'I') return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
-    /* 本批只解释已核对的BD-R格式1/3；BD-ROM Profile可能是封盘BD-R，不能用Profile猜物理盘型。 */
-    if (memcmp(first + 8,"BDR",3) || profile == MMC_PROFILE_BD_RE) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
-    MmcBdDiscStructure parsed = {0}; parsed.currentProfile = profile; parsed.physicalType = MMC_BD_PHYSICAL_R;
+    /* 逻辑BD-ROM也可来自只读访问的可记录盘；物理类型必须由DI标签确认。 */
+    bool rewritable = !memcmp(first + 8,"BDW",3);
+    if (rewritable ? (profile != MMC_PROFILE_BD_ROM && profile != MMC_PROFILE_BD_RE) : (memcmp(first + 8,"BDR",3) || profile == MMC_PROFILE_BD_RE)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    MmcBdDiscStructure parsed = {0}; parsed.currentProfile = profile; parsed.physicalType = rewritable ? MMC_BD_PHYSICAL_RE : MMC_BD_PHYSICAL_R;
     parsed.diUnitCount = first[3] >> 3;
     if (!parsed.diUnitCount || parsed.diUnitCount > 31) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
     for (unsigned i = 0; i < parsed.diUnitCount; i++) {
         const uint8_t* unit = first + i * 112; unsigned format = unit[2] & 0x7F, used = unit[6] & 0x7F, layer = unit[3] & 7;
-        if (unit[0] != 'D' || unit[1] != 'I' || (unit[3] >> 3) != parsed.diUnitCount || unit[5] != i || unit[4] || unit[7] || used < 14 || used > 100) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
-        if ((unit[6] & 0x80) || (format != 1 && format != 3)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
-        if (memcmp(unit + 8,"BDR",3)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+        if (unit[0] != 'D' || unit[1] != 'I' || (unit[3] >> 3) != parsed.diUnitCount || unit[5] != i || (!rewritable && unit[4]) || unit[7] || used < 14 || used > 100) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+        if ((unit[6] & 0x80) || (format != 1 && format != 3 && !(rewritable && format == 2))) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+        if (memcmp(unit + 8,rewritable ? "BDW" : "BDR",3)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
         uint8_t layers = unit[12] >> 4, type = unit[12] & 15, size = unit[11] >> 6, discClass = (unit[11] >> 4) & 3, version = unit[11] & 15, channel = unit[13] & 15;
         if (!layers || layer >= layers) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
-        if (layers > 2 || type != 2) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+        if (layers > 2 || type != (rewritable ? 4 : 2)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+        /* BDW的byte4是旧版层标记，不能按BDR保留字节处理；本批只支持Class0/Version2。 */
+        if (rewritable && (discClass || version != 2)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+        if (rewritable && unit[4] != layers) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
         char manufacturer[7] = {0}, media[4] = {0};
         if (!bd_media_id(manufacturer,unit + 100,6) || !bd_media_id(media,unit + 106,3)) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
         if (!i) {

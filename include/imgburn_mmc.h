@@ -158,7 +158,7 @@ typedef struct {
     char manufacturerId[7], mediaTypeId[4];
     uint8_t productRevision;
 } MmcBdDiscStructure;
-/* 未识别的物理格式不猜字段，失败输出清零；不改变原有ISO Read/Verify资格。 */
+/* 支持SL/DL的BDR格式1/3及Class0/Version2的BDW格式1/2/3；未知格式失败清零，不改变ISO Read/Verify资格。 */
 bool mmc_read_bd_disc_structure(OpticalDrive* drive, MmcBdDiscStructure* structure);
 const char* mmc_get_bd_physical_type_name(MmcBdPhysicalType type);
 
