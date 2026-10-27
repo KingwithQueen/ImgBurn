@@ -334,7 +334,7 @@ static bool job_drive(GuiJob* job) {
         const wchar_t* extension = wcsrchr(job->destination,L'.'); ok = extension && !_wcsicmp(extension,L".cue") ? pipeline_read_cd(&config,job_pipeline_progress,job) : pipeline_read_disc(&config,job_pipeline_progress,job);
         bool mds = extension && !_wcsicmp(extension,L".mds");
         if (ok) job_text(job,job->readAutoSplit ? L"光盘镜像已读取：%ls\r\n如受文件系统上限而分卷，请使用同名 MDS 载入整组数据。\r\n" : mds ? L"光盘镜像和 MDS 描述已读取：%ls\r\n配套数据文件按顺序记录在 MDS 中。\r\n" : L"光盘镜像已读取：%ls\r\n",job->destination);
-        else { job->error = GetLastError(); if (job->error == ERROR_NOT_SUPPORTED) job_text(job,mds ? L"MDS 支持单轨 MODE1 数据 CD，显式原始读取支持 MODE1/MODE2 的2352字节主通道，以及单层和已结束的单会话双层 DVD；音频及混合轨 CD 请选择 CUE。\r\n" : L"当前光盘布局或光驱能力不支持所选镜像格式。\r\n"); else if (job->error == ERROR_DISK_FULL) job_text(job,L"目标位置的可用空间不足。\r\n"); }
+        else { job->error = GetLastError(); if (job->error == ERROR_NOT_SUPPORTED) job_text(job,mds ? L"MDS 支持单轨 MODE1 数据 CD，显式原始读取支持 MODE1/MODE2 的2352字节主通道，以及单层、已结束的单会话双层 DVD 和已识别的单层 BD-R/BD-RE；未知物理格式或多层 BD 暂不支持 MDS，音频及混合轨 CD 请选择 CUE。\r\n" : L"当前光盘布局或光驱能力不支持所选镜像格式。\r\n"); else if (job->error == ERROR_DISK_FULL) job_text(job,L"目标位置的可用空间不足。\r\n"); }
     }
     else if (job->operation == GUI_VERIFY_DISC) {
         VerifyConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.cancelEvent = job->cancel;

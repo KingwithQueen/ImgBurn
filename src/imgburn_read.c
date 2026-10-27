@@ -5,6 +5,7 @@
 #include "imgburn_data_source.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <wchar.h>
 
 static bool read_cancelled(const ReadConfig* config) { return config->cancelEvent && WaitForSingleObject(config->cancelEvent,0) == WAIT_OBJECT_0; }
@@ -22,6 +23,9 @@ static bool read_profile(MmcProfile profile) {
         case MMC_PROFILE_DVD_PLUS_RW_DL: case MMC_PROFILE_DVD_PLUS_R_DL: case MMC_PROFILE_BD_ROM: case MMC_PROFILE_BD_R_SRM: case MMC_PROFILE_BD_R_RRM: case MMC_PROFILE_BD_RE: return true;
         default: return false;
     }
+}
+static bool read_bd_structure_matches(const MmcBdDiscStructure* first, const MmcBdDiscStructure* last) {
+    return first->currentProfile == last->currentProfile && first->physicalType == last->physicalType && first->layerCount == last->layerCount && first->layerType == last->layerType && first->discSizeCode == last->discSizeCode && first->discClass == last->discClass && first->discVersion == last->discVersion && first->channelBitCode == last->channelBitCode && first->diUnitCount == last->diUnitCount && first->layerMask == last->layerMask && first->diFormatMask == last->diFormatMask && first->hasMediaId == last->hasMediaId && first->productRevision == last->productRevision && !memcmp(first->manufacturerId,last->manufacturerId,sizeof(first->manufacturerId)) && !memcmp(first->mediaTypeId,last->mediaTypeId,sizeof(first->mediaTypeId));
 }
 static bool read_target(const wchar_t* input, wchar_t* full, bool replace) {
     DWORD length = GetFullPathNameW(input,MAX_PATH,full,NULL);
@@ -117,9 +121,19 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
         wcscpy(wcsrchr(destination,L'.'),L".mds"); wchar_t checked[MAX_PATH]; if (!read_target(destination,checked,config->replaceExisting)) return read_failure(&stats,GetLastError(),"Cannot publish automatic split descriptor",callback,context); mdsOutput = true;
     }
     bool cdMds = mdsOutput && profile <= MMC_PROFILE_CD_RW;
-    if (mdsOutput && !cdMds && (profile < MMC_PROFILE_DVD_ROM || profile > MMC_PROFILE_DVD_PLUS_R_DL)) return read_failure(&stats,ERROR_NOT_SUPPORTED,"MDS Read requires supported DVD or MODE1 CD media",callback,context);
+    bool bdMds = mdsOutput && profile >= MMC_PROFILE_BD_ROM && profile <= MMC_PROFILE_BD_RE;
+    bool dvdMds = mdsOutput && !cdMds && !bdMds;
+    if (dvdMds && (profile < MMC_PROFILE_DVD_ROM || profile > MMC_PROFILE_DVD_PLUS_R_DL)) return read_failure(&stats,ERROR_NOT_SUPPORTED,"MDS Read requires supported DVD, BD or MODE1 CD media",callback,context);
+    if (bdMds && stats.totalSectors > INT32_MAX) return read_failure(&stats,ERROR_NOT_SUPPORTED,"BD MDS exceeds the supported signed session address range",callback,context);
+    MmcBdDiscStructure bdStructure = {0};
+    if (bdMds) {
+        if (!mmc_read_bd_disc_structure(drive,&bdStructure)) return read_failure(&stats,read_device_error(drive),"Cannot inspect BD MDS physical source",callback,context);
+        if (bdStructure.currentProfile != profile) return read_failure(&stats,ERROR_MEDIA_CHANGED,"BD profile changed during inspection",callback,context);
+        /* 原版多层BD另有层缓存；本入口只复刻已确认的单层数据描述。 */
+        if (bdStructure.layerCount != 1) return read_failure(&stats,ERROR_NOT_SUPPORTED,"BD MDS Read currently requires a recognized single-layer BD",callback,context);
+    }
     MmcDvdLayout dvdLayout = {0};
-    if (mdsOutput && !cdMds) {
+    if (dvdMds) {
         if (!mmc_read_dvd_layout(drive,stats.totalSectors,&dvdLayout)) return read_failure(&stats,read_device_error(drive),"Cannot read matching DVD physical layout",callback,context);
         if (dvdLayout.layerCount == 2) {
             MmcDiscInfo disc; if (!mmc_read_disc_information(drive,&disc)) return read_failure(&stats,read_device_error(drive),"Cannot inspect dual-layer DVD session",callback,context);
@@ -174,10 +188,15 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     if (read_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
     if (!mmc_test_unit_ready(drive) || !mmc_read_capacity(drive,&last,&bytes)) { error = read_device_error(drive); goto done; }
     if (last != stats.totalSectors - 1 || bytes != 2048 || mmc_get_current_profile(drive) != profile) { error = ERROR_MEDIA_CHANGED; goto done; }
-    if (mdsOutput && !cdMds) {
+    if (dvdMds) {
         MmcDvdLayout finalLayout;
         if (!mmc_read_dvd_layout(drive,stats.totalSectors,&finalLayout)) { error = read_device_error(drive); goto done; }
         if (finalLayout.layerCount != dvdLayout.layerCount || finalLayout.oppositeTrackPath != dvdLayout.oppositeTrackPath || finalLayout.layerBreakLba != dvdLayout.layerBreakLba) { error = ERROR_MEDIA_CHANGED; goto done; }
+    }
+    if (bdMds) {
+        MmcBdDiscStructure finalStructure;
+        if (!mmc_read_bd_disc_structure(drive,&finalStructure)) { error = read_device_error(drive); goto done; }
+        if (!read_bd_structure_matches(&bdStructure,&finalStructure)) { error = ERROR_MEDIA_CHANGED; goto done; }
     }
     if (cdMds && !mmc_check_iso_cd(drive,stats.totalSectors)) { error = read_device_error(drive); goto done; }
     if (mdsOutput) {
@@ -201,7 +220,8 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
         }
         if (!descriptorCreated) goto done;
         const wchar_t* names[MAX_MDS_FILES]; for (unsigned i = 0; i < partCount; i++) names[i] = wcsrchr(parts[i].path,L'\\') + 1;
-        bool created = cdMds ? imgburn_mds_create_cd_read_files(descriptor,names,partCount,stats.totalSectors) : imgburn_mds_create_dvd_read_files(descriptor,names,partCount,stats.totalSectors,dvdLayout.layerBreakLba,dvdLayout.oppositeTrackPath);
+        /* BD沿用原版虚拟DVD-R描述，不把物理BD层数变成DVD换层地址。 */
+        bool created = cdMds ? imgburn_mds_create_cd_read_files(descriptor,names,partCount,stats.totalSectors) : bdMds ? imgburn_mds_create_bd_read_files(descriptor,names,partCount,stats.totalSectors) : imgburn_mds_create_dvd_read_files(descriptor,names,partCount,stats.totalSectors,dvdLayout.layerBreakLba,dvdLayout.oppositeTrackPath);
         if (!created) { error = GetLastError(); goto done; }
         if (read_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
     }

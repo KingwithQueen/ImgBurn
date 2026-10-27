@@ -192,6 +192,8 @@ bool imgburn_mds_create_files_ex(const wchar_t* mdsPath, const wchar_t* const* d
 /* Read 保存已由源盘 PFI 核对的布局，保留原层位置，不套用新刻录镜像的对齐与介质容量限制。 */
 bool imgburn_mds_create_dvd_read(const wchar_t* mdsPath, const wchar_t* dataFile, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath);
 bool imgburn_mds_create_dvd_read_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath);
+/* BD读取使用原版虚拟单层DVD-R描述；物理层资格由读取管线确认。 */
+bool imgburn_mds_create_bd_read_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors);
 /* 原版可载入的精简单会话、单轨 MODE1/2048 CD 描述，不生成原始音频或子通道布局。 */
 bool imgburn_mds_create_cd_read_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors);
 /* 原版可载入的精简单轨 MODE1/2352 CD 描述；主通道文件从 LBA 0 开始。 */

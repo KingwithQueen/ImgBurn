@@ -89,7 +89,7 @@ static void print_usage(void) {
     printf("  cd-toc <drive>                Display complete CD sessions, tracks and lead-outs\n");
     printf("  read <drive> <out.iso|out.mds|out.cue> [--retries <0..20>] [--replace] [--cdtext] [--split <MiB|auto>] [--raw-cd] [--session-pregaps] [--speed <Nx|MAX>] [--audio-speed <Nx|MAX>] [--eject]\n");
     printf("                                 Read data ISO or raw CD BIN/CUE with Q indexes\n");
-    printf("                                 MDS destination saves MODE1 CD or single/dual-layer DVD data files\n");
+    printf("                                 MDS destination saves MODE1 CD, single/dual-layer DVD or recognized single-layer BD data files\n");
     printf("                                 --split sets a per-file MiB limit for MDS; auto follows the target volume file limit\n");
     printf("  burn <drive> <image> [--speed <Nx|MAX|KEEP>] [--test] [--verify] [--reserve|--bd-no-reserve] [--bd-write-type INCREMENTAL|SAO] [--bd-vnr-off] [--no-cycle] [--opc]\n");
     printf("                                 Burn ISO/BIN, data MDS or supported CD CUE images\n");
