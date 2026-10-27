@@ -585,15 +585,15 @@ static bool bd_media_id(char* output, const uint8_t* input, unsigned bytes) {
     for (unsigned i = 0; i < length; i++) if (input[i] < 0x20 || input[i] > 0x7E) return false;
     memcpy(output,input,length); output[length] = 0; return true;
 }
-bool mmc_read_bd_disc_structure(OpticalDrive* drive, MmcBdDiscStructure* structure) {
+static bool bd_read_disc_structure(OpticalDrive* drive, MmcBdDiscStructure* structure, uint8_t data[4100]) {
     if (structure) memset(structure,0,sizeof(*structure));
     if (!drive || !structure) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
     MmcProfile profile = mmc_get_current_profile(drive);
     if (profile == MMC_PROFILE_UNKNOWN) { if (drive->lastError) return false; return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED); }
     if (profile < MMC_PROFILE_BD_ROM || profile > MMC_PROFILE_BD_RE) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
-    uint8_t cdb[12] = {0xAD,1}, data[4100] = {0}; cdb[8] = 0x10; cdb[9] = 4;
-    if (!spti_send_cdb(drive,cdb,12,data,sizeof(data),true,10)) return false;
-    if (drive->lastTransferBytes != sizeof(data) || read_be16(data) != 4098) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
+    uint8_t cdb[12] = {0xAD,1}; cdb[8] = 0x10; cdb[9] = 4;
+    if (!spti_send_cdb(drive,cdb,12,data,4100,true,10)) return false;
+    if (drive->lastTransferBytes != 4100 || read_be16(data) != 4098) return mmc_write_parameter_error(drive,ERROR_READ_FAULT);
     const uint8_t* first = data + 4;
     if (first[0] != 'D' || first[1] != 'I') return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
     /* 逻辑BD-ROM也可来自只读访问的可记录盘；物理类型必须由DI标签确认。 */
@@ -628,6 +628,39 @@ bool mmc_read_bd_disc_structure(OpticalDrive* drive, MmcBdDiscStructure* structu
     /* 仅检查3584字节DI区的未用槽；最后512字节为EB信息，不要求全零。 */
     for (unsigned i = (unsigned)parsed.diUnitCount * 112; i < 3584; i++) if (first[i]) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
     *structure = parsed; return true;
+}
+bool mmc_read_bd_disc_structure(OpticalDrive* drive, MmcBdDiscStructure* structure) {
+    uint8_t data[4100] = {0}; return bd_read_disc_structure(drive,structure,data);
+}
+bool mmc_read_bd_mds_layout(OpticalDrive* drive, MmcBdMdsLayout* layout) {
+    if (layout) memset(layout,0,sizeof(*layout));
+    if (!drive || !layout) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    uint8_t data[4100] = {0}; MmcBdMdsLayout parsed = {0};
+    if (!bd_read_disc_structure(drive,&parsed.structure,data)) return false;
+    if (parsed.structure.layerCount == 1) { *layout = parsed; return true; }
+    bool rewritable = parsed.structure.physicalType == MMC_BD_PHYSICAL_RE;
+    uint32_t knownFormats = (1u << 1) | (1u << 3) | (rewritable ? 1u << 2 : 0);
+    /* BDXL4/5的PAA字段已移位，不能把旧原版偏移静默解释为真实首层容量。 */
+    if (parsed.structure.layerCount != 2 || parsed.structure.diFormatMask & ~knownFormats ||
+        parsed.structure.discSizeCode || parsed.structure.discClass || parsed.structure.discVersion != (rewritable ? 2 : 1) || parsed.structure.channelBitCode != 1)
+        return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    const uint8_t* first = data + 4;
+    if (first[3] & 7) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    bool found = false;
+    for (unsigned i = 0; i < parsed.structure.diUnitCount; i++) {
+        const uint8_t* unit = first + i * 112;
+        if (unit[3] & 7) continue;
+        if ((unit[6] & 0x7F) < 32) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+        uint32_t start = read_be32(unit + 24), end = read_be32(unit + 28);
+        /* L0的PSN层号为0，首地址固定；末PAA末两位10对应完整32扇区簇。 */
+        if (start != 0x20000 || end < start || end >= 0x200000 || (end & 3) != 2) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+        if (found && (parsed.firstPaa != start || parsed.lastPaa != end)) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+        parsed.firstPaa = start; parsed.lastPaa = end; found = true;
+    }
+    if (!found) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    uint64_t physical = ((uint64_t)parsed.lastPaa - parsed.firstPaa) * 8 + 16;
+    if (!physical || physical > UINT32_MAX || physical % 32) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+    parsed.physicalLayer0Sectors = (uint32_t)physical; *layout = parsed; return true;
 }
 /* 仅解码声明的描述符范围；返回的额外分配区字节不当作新格式，原始参数不推算容量。 */
 bool mmc_read_format_capacities(OpticalDrive* drive, MmcFormatCapacities* capacities) {

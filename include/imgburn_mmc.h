@@ -180,6 +180,14 @@ typedef struct {
 } MmcBdDiscStructure;
 /* 支持SL/DL的BDR格式1/3、Class1/Version2的BDR TL/QL格式4/5及Class0/Version2的BDW格式1/2/3；仅公共摘要，未知格式失败清零，不改变ISO Read/Verify资格。 */
 bool mmc_read_bd_disc_structure(OpticalDrive* drive, MmcBdDiscStructure* structure);
+/* BD MDS的物理首层跨度；不是扣除备用区后的用户LBA换层地址。单层额外字段为0。 */
+typedef struct {
+    MmcBdDiscStructure structure;
+    uint32_t physicalLayer0Sectors;
+    uint32_t firstPaa, lastPaa;
+} MmcBdMdsLayout;
+/* 只读Profile和DI。双层仅支持已知常规BDR/BDW的PAA布局，未知/BDXL仍不推算。 */
+bool mmc_read_bd_mds_layout(OpticalDrive* drive, MmcBdMdsLayout* layout);
 const char* mmc_get_bd_physical_type_name(MmcBdPhysicalType type);
 
 /* READ FORMAT CAPACITIES最多31个描述符：首个当前/最大描述符及30个设备格式描述符。 */
