@@ -777,34 +777,99 @@ static bool mds_tools_layer_hint(const wchar_t* text, uint32_t* hint) {
     *hint = (uint32_t)value; return true;
 }
 
+static unsigned mds_tools_dvd_line_count(const wchar_t* text) {
+    unsigned count = 0;
+    while (*text) {
+        const wchar_t* start = text; while (*text && *text != L'\r' && *text != L'\n') text++;
+        while (start < text && *start <= 0x20) start++;
+        if (start < text) count++;
+        if (*text) { wchar_t ending = *text++; if (ending == L'\r' && *text == L'\n') text++; }
+    }
+    return count;
+}
+
+/* 原版ChangeExt的保留大小写模式，针对最后基本名的扩展名。 */
+static bool mds_tools_dvd_change_ext(const wchar_t* name, const wchar_t* extension, wchar_t* result) {
+    const wchar_t* old = wcsrchr(name,L'.'); size_t stem = old ? (size_t)(old - name) : wcslen(name);
+    if (!old) old = L"";
+    size_t oldLength = wcslen(old), newLength = wcslen(extension);
+    if (oldLength >= MAX_PATH || stem + newLength >= MAX_PATH) return false;
+    wchar_t lower[MAX_PATH], upper[MAX_PATH], changed[MAX_PATH];
+    wcscpy(lower,old); wcscpy(upper,old); wcscpy(changed,extension);
+    if (oldLength) { CharLowerBuffW(lower,(DWORD)oldLength); CharUpperBuffW(upper,(DWORD)oldLength); }
+    if (newLength && (!oldLength || CompareStringW(LOCALE_USER_DEFAULT,0,old,(int)oldLength,lower,(int)oldLength) == CSTR_EQUAL)) CharLowerBuffW(changed,(DWORD)newLength);
+    else if (newLength && CompareStringW(LOCALE_USER_DEFAULT,0,old,(int)oldLength,upper,(int)oldLength) == CSTR_EQUAL) CharUpperBuffW(changed,(DWORD)newLength);
+    else if (newLength) {
+        CharLowerBuffW(changed,(DWORD)newLength); bool makeUpper = false;
+        for (size_t i = 0; i < newLength; i++) {
+            if (i < oldLength) makeUpper = old[i] == upper[i];
+            if (makeUpper) CharUpperBuffW(changed + i,1);
+        }
+    }
+    wmemcpy(result,name,stem); wcscpy(result + stem,changed); return true;
+}
+
+static bool mds_tools_dvd_candidate(const wchar_t* directory, const wchar_t* name, wchar_t* path, WIN32_FILE_ATTRIBUTE_DATA* attributes) {
+    wchar_t combined[MAX_PATH], full[MAX_PATH]; WIN32_FILE_ATTRIBUTE_DATA found;
+    if (swprintf(combined,MAX_PATH,L"%ls%ls",directory,name) < 0) return false;
+    DWORD length = GetFullPathNameW(combined,MAX_PATH,full,NULL);
+    if (!length || length >= MAX_PATH || !GetFileAttributesExW(full,GetFileExInfoStandard,&found) || (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return false;
+    wcscpy(path,full); *attributes = found; return true;
+}
+
+/* 仅自动试原记录目录的三个序列，不猜目录搜索或交互替代文件。 */
+static bool mds_tools_dvd_recover(const wchar_t* descriptor, const wchar_t* line, wchar_t* path, WIN32_FILE_ATTRIBUTE_DATA* attributes) {
+    wchar_t directory[MAX_PATH], description[MAX_PATH], candidate[MAX_PATH], appended[MAX_PATH];
+    wcscpy(directory,path); wchar_t* slash = wcsrchr(directory,L'\\'); if (!slash) return false; slash[1] = 0;
+    DWORD length = GetFullPathNameW(descriptor,MAX_PATH,description,NULL); if (!length || length >= MAX_PATH) return false;
+    const wchar_t* descriptionName = wcsrchr(description,L'\\'); if (!descriptionName) return false; descriptionName++;
+    const wchar_t* lineName = line; for (const wchar_t* p = line; *p; p++) if (*p == L'\\' || *p == L':') lineName = p + 1;
+    const wchar_t* extension = wcsrchr(lineName,L'.'); if (!extension) extension = L"";
+    if (mds_tools_dvd_change_ext(descriptionName,extension,candidate) && mds_tools_dvd_candidate(directory,candidate,path,attributes)) return true;
+    static const wchar_t* extensions[] = {L".ISO",L".IMG",L".000",L".001"};
+    for (unsigned i = 0; i < ARRAYSIZE(extensions); i++) {
+        if (!mds_tools_dvd_change_ext(lineName,extensions[i],candidate)) continue;
+        if (CompareStringW(LOCALE_USER_DEFAULT,NORM_IGNORECASE,lineName,-1,candidate,-1) != CSTR_EQUAL && mds_tools_dvd_candidate(directory,candidate,path,attributes)) return true;
+    }
+    if (swprintf(appended,MAX_PATH,L"%ls.",lineName) < 0) return false;
+    for (unsigned i = 0; i < ARRAYSIZE(extensions); i++) if (mds_tools_dvd_change_ext(appended,extensions[i],candidate) && mds_tools_dvd_candidate(directory,candidate,path,attributes)) return true;
+    return false;
+}
+
 bool imgburn_mds_load_tools_dvd(const wchar_t* descriptionPath, MdsToolsInput* outInput) {
     if (outInput) memset(outInput,0,sizeof(*outInput));
     if (!descriptionPath || !descriptionPath[0] || wcslen(descriptionPath) >= MAX_PATH || !outInput) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
     wchar_t* text = mds_tools_dvd_text(descriptionPath); if (!text) return false;
     MdsToolsInput* parsed = calloc(1,sizeof(*parsed)); DWORD error = ERROR_INVALID_DATA; uint64_t total = 0; bool ok = false;
+    unsigned lineCount = mds_tools_dvd_line_count(text), metadataCount = 0;
     if (!parsed) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
     for (wchar_t* cursor = text; *cursor;) {
         wchar_t* line = cursor; while (*cursor && *cursor != L'\r' && *cursor != L'\n') cursor++;
         if (*cursor) { wchar_t ending = *cursor; *cursor++ = 0; if (ending == L'\r' && *cursor == L'\n') cursor++; }
         line = mds_tools_trim(line); if (!*line) continue;
-        wchar_t path[MAX_PATH] = {0}; DWORD fileError = ERROR_INVALID_NAME; WIN32_FILE_ATTRIBUTE_DATA attributes; bool resolved = false;
+        wchar_t path[MAX_PATH] = {0}; DWORD fileError = ERROR_INVALID_NAME; WIN32_FILE_ATTRIBUTE_DATA attributes = {0}; bool resolved = false;
         /* 原版简单文件名按描述目录，带目录相对路径按当前目录；本批不猜后缀恢复。 */
         if (wcschr(line,L'/') || (line[0] && line[1] == L':' && line[2] != L'\\')) fileError = ERROR_NOT_SUPPORTED;
         else if (wcschr(line,L'\\') || wcschr(line,L':')) { DWORD length = GetFullPathNameW(line,MAX_PATH,path,NULL); resolved = length && length < MAX_PATH; }
         else resolved = mds_resolve(descriptionPath,line,path);
-        if (resolved && GetFileAttributesExW(path,GetFileExInfoStandard,&attributes)) {
-            if (!(attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                uint64_t bytes = (uint64_t)attributes.nFileSizeHigh << 32 | attributes.nFileSizeLow;
-                if (!bytes || bytes % 2048) { error = ERROR_INVALID_DATA; goto done; }
-                if (parsed->fileCount == MAX_MDS_FILES || bytes / 2048 > (uint64_t)INT32_MAX - total) { error = ERROR_NOT_SUPPORTED; goto done; }
-                MdsDataFile* part = &parsed->files[parsed->fileCount++]; wcscpy(part->path,path); part->bytes = bytes; total += bytes / 2048; continue;
-            }
-            fileError = ERROR_INVALID_DATA;
-        } else if (resolved) fileError = GetLastError();
+        bool exists = false;
+        if (resolved) {
+            if (GetFileAttributesExW(path,GetFileExInfoStandard,&attributes)) { exists = !(attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY); if (!exists) fileError = ERROR_INVALID_DATA; }
+            else fileError = GetLastError();
+        }
+        /* 元信息只计已经处理的行，后面的key=value不能提前放宽此门槛。 */
+        if (!exists && resolved && (lineCount == 1 || lineCount == metadataCount + 1)) exists = mds_tools_dvd_recover(descriptionPath,line,path,&attributes);
+        if (exists) {
+            uint64_t bytes = (uint64_t)attributes.nFileSizeHigh << 32 | attributes.nFileSizeLow;
+            if (!bytes || bytes % 2048) { error = ERROR_INVALID_DATA; goto done; }
+            if (parsed->fileCount == MAX_MDS_FILES || bytes / 2048 > (uint64_t)INT32_MAX - total) { error = ERROR_NOT_SUPPORTED; goto done; }
+            MdsDataFile* part = &parsed->files[parsed->fileCount++]; wcscpy(part->path,path); part->bytes = bytes; total += bytes / 2048; continue;
+        }
         wchar_t* equals = wcschr(line,L'=');
         if (!equals) { error = fileError; goto done; }
         *equals++ = 0; wchar_t* key = mds_tools_trim(line); wchar_t* value = mds_tools_trim(equals);
         if (CompareStringW(LOCALE_USER_DEFAULT,NORM_IGNORECASE,key,(int)wcslen(key),L"LayerBreak",10) == CSTR_EQUAL) mds_tools_layer_hint(value,&parsed->layerBreakLba);
+        metadataCount++;
     }
     if (!parsed->fileCount) goto done;
     parsed->totalSectors = (uint32_t)total; *outInput = *parsed; ok = true; error = ERROR_SUCCESS;

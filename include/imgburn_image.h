@@ -203,7 +203,7 @@ typedef struct {
     unsigned fileCount;
     uint32_t totalSectors, layerBreakLba;
 } MdsToolsInput;
-/* Tools的单独.DVD文本描述：仅整卷2048字节数据，不作为普通DataSource的新格式。 */
+/* Tools单独.DVD描述及原版单文件门槛下的同目录后缀恢复；仅整卷2048数据，不扩普通DataSource格式。 */
 bool imgburn_mds_load_tools_dvd(const wchar_t* descriptionPath, MdsToolsInput* outInput);
 /* 输入卷须为绝对路径；显式0清除继承值，仅显式非零值要求16对齐；继承值仍须小于N，OTP/PTP取本次选项。 */
 bool imgburn_mds_create_tools_input(const wchar_t* mdsPath, const MdsToolsInput* input, bool overrideLayerBreak, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames);
