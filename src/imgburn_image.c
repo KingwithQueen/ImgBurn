@@ -944,6 +944,73 @@ done:
     free(parsed); free(text); SetLastError(error); return ok;
 }
 
+bool imgburn_mds_load_tools_gi(const wchar_t* descriptionPath, MdsToolsInput* outInput) {
+    if (outInput) memset(outInput,0,sizeof(*outInput));
+    if (!descriptionPath || !descriptionPath[0] || wcslen(descriptionPath) >= MAX_PATH || !outInput) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    HANDLE file = CreateFileW(descriptionPath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    uint8_t probe[0xB0] = {0}, *raw = NULL; MdsToolsInput* parsed = NULL;
+    LARGE_INTEGER size = {0}, beginning = {0}; DWORD error = ERROR_INVALID_DATA, got = 0; bool ok = false;
+    if (!GetFileSizeEx(file,&size)) { error = GetLastError(); goto done; }
+    if (size.QuadPart < (LONGLONG)sizeof(probe)) { error = ERROR_BAD_FORMAT; goto done; }
+    if (!ReadFile(file,probe,sizeof(probe),&got,NULL)) { error = GetLastError(); goto done; }
+    if (got != sizeof(probe)) { error = ERROR_READ_FAULT; goto done; }
+    unsigned position = probe[0x28] + 0x28; if (position + 4 > sizeof(probe)) position = 0x62;
+    uint32_t type = cue_le32(probe + position);
+    /* 原版probe只检查这两个签名、两个字节标记和22/88类型，邻接保留字节不加限制。 */
+    if (memcmp(probe,"\xDA\xDA\xFE\xFE",4) || cue_le32(probe + 0x14) != 0x11111111 || probe[0x44] != 1 || probe[0x48] != 1 || (type != 0x22222222 && type != 0x88888888)) { error = ERROR_BAD_FORMAT; goto done; }
+    DWORD bytes = size.QuadPart > 1024 * 1024 ? 1024 * 1024 : (DWORD)size.QuadPart;
+    raw = malloc(bytes); if (!raw) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
+    if (!SetFilePointerEx(file,beginning,NULL,FILE_BEGIN) || !ReadFile(file,raw,bytes,&got,NULL)) { error = GetLastError(); goto done; }
+    if (got != bytes) { error = ERROR_READ_FAULT; goto done; }
+    /* loader按实际有界读取长度重新选位置，不能复用probe固定B0的回退结果。 */
+    position = raw[0x28] + 0x28; if (position + 4 > bytes) position = 0x62;
+    if (cue_le32(raw + position) != 0x88888888) { error = ERROR_NOT_SUPPORTED; goto done; }
+    if (position + 0x36 >= bytes) goto done;
+    unsigned count = raw[position + 0x36], table = position + 0x4E;
+    if (!count || (uint64_t)table + (uint64_t)count * 260 > bytes) goto done;
+    parsed = calloc(1,sizeof(*parsed)); if (!parsed) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
+    for (unsigned i = 0; i < count; i++) {
+        const char* slot = (const char*)raw + table + i * 260; const char* end = memchr(slot,0,260);
+        if (!end) goto done;
+        if (end == slot) continue;
+        wchar_t stored[MAX_PATH]; int length = MultiByteToWideChar(CP_ACP,0,slot,(int)(end - slot),stored,MAX_PATH - 1);
+        if (!length) goto done;
+        stored[length] = 0;
+        /* 原版先剥反斜杠和冒号之前的目录，不Trim；空尾名直接跳过。 */
+        const wchar_t* name = stored; for (const wchar_t* p = stored; *p; p++) if (*p == L'\\' || *p == L':') name = p + 1;
+        if (!*name) continue;
+        if (wcschr(name,L'/')) { error = ERROR_NOT_SUPPORTED; goto done; }
+        wcscpy(parsed->files[parsed->fileCount++].path,name);
+    }
+    if (!parsed->fileCount) goto done;
+    wchar_t description[MAX_PATH]; DWORD length = GetFullPathNameW(descriptionPath,MAX_PATH,description,NULL);
+    if (!length || length >= MAX_PATH) { error = ERROR_INVALID_NAME; goto done; }
+    uint64_t total = 0;
+    for (unsigned i = 0; i < parsed->fileCount; i++) {
+        MdsDataFile* part = &parsed->files[i]; wchar_t path[MAX_PATH]; WIN32_FILE_ATTRIBUTE_DATA attributes = {0};
+        if (!mds_resolve(description,part->path,path)) { error = ERROR_INVALID_NAME; goto done; }
+        bool exists = GetFileAttributesExW(path,GetFileExInfoStandard,&attributes) != 0;
+        DWORD fileError = exists ? ERROR_INVALID_DATA : GetLastError(); exists = exists && !(attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+        if (!exists && parsed->fileCount == 1) {
+            const wchar_t* extension = wcsrchr(part->path,L'.'); if (!extension) extension = L"";
+            const wchar_t* descriptionName = wcsrchr(description,L'\\'); wchar_t changed[MAX_PATH], candidate[MAX_PATH];
+            if (descriptionName && mds_tools_dvd_change_ext(descriptionName + 1,extension,changed) && mds_resolve(description,changed,candidate) && !mds_tools_equal(description,wcslen(description),candidate,wcslen(candidate))) {
+                WIN32_FILE_ATTRIBUTE_DATA found = {0};
+                if (GetFileAttributesExW(candidate,GetFileExInfoStandard,&found) && !(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) { wcscpy(path,candidate); attributes = found; exists = true; }
+            }
+        }
+        if (!exists) { error = fileError; goto done; }
+        uint64_t partBytes = (uint64_t)attributes.nFileSizeHigh << 32 | attributes.nFileSizeLow;
+        if (!partBytes || partBytes % 2048) goto done;
+        if (partBytes / 2048 > (uint64_t)INT32_MAX - total) { error = ERROR_NOT_SUPPORTED; goto done; }
+        wcscpy(part->path,path); part->bytes = partBytes; total += partBytes / 2048;
+    }
+    parsed->totalSectors = (uint32_t)total; *outInput = *parsed; error = ERROR_SUCCESS; ok = true;
+done:
+    CloseHandle(file); free(parsed); free(raw); SetLastError(error); return ok;
+}
+
 /* Tools直接描述逻辑文件列表；它与Read的虚拟布局及普通DVD刻录生成规则分别保留。 */
 static bool mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames, bool explicitLayerBreak, bool ansiFilenames) {
     if (!mdsFilePath || !mdsFilePath[0] || !dataFiles || !fileCount || fileCount > MAX_MDS_FILES || wcslen(mdsFilePath) >= MAX_PATH || !totalSectors || totalSectors > INT32_MAX || (unsigned)medium > MDS_TOOLS_DVD_PLUS_RW) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
