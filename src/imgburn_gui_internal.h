@@ -29,6 +29,8 @@ typedef struct {
     double readSpeedMultiplier, audioReadSpeedMultiplier;
     double discoverySpeedMultiplier;
     uint32_t layerBreak, writeLayerBreak;
+    MdsToolsMedium mdsMedium;
+    bool mdsPreservePaths;
     uint32_t comparedSectors, readableOnlySectors, miscompares;
     bool succeeded, builderReady, mediaReady, writeMediaReady, eraseSupported;
     DWORD error;

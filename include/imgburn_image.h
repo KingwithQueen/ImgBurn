@@ -189,6 +189,13 @@ typedef struct {
 /* 分卷DVD的所有数据文件均按逻辑顺序列出；原单文件入口由此实现。 */
 bool imgburn_mds_create_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba);
 bool imgburn_mds_create_files_ex(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath);
+/* Tools的明确DVD描述类型，不根据来源大小推断BD或实际目标介质。 */
+typedef enum {
+    MDS_TOOLS_DVD_ROM = 0, MDS_TOOLS_DVD_R, MDS_TOOLS_DVD_RW,
+    MDS_TOOLS_DVD_PLUS_R, MDS_TOOLS_DVD_PLUS_RW
+} MdsToolsMedium;
+/* Tools的整扇区2048字节文件列表；默认相对名/基本名可同主干通配，保留完整路径时不通配。 */
+bool imgburn_mds_create_tools_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames);
 /* Read 保存已由源盘 PFI 核对的布局，保留原层位置，不套用新刻录镜像的对齐与介质容量限制。 */
 bool imgburn_mds_create_dvd_read(const wchar_t* mdsPath, const wchar_t* dataFile, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath);
 bool imgburn_mds_create_dvd_read_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath);
@@ -300,7 +307,7 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
  */
 /* 严格解析保留既有DVD层布局接受域。 */
 bool imgburn_mds_parse(const wchar_t *mdsFilePath, MdsSheet *outMds);
-/* 来源OTP保留原版DWORD层提示（端点0保持0），不套几何half；严格/PTP/文件范围不放宽。 */
+/* 来源另接受Tools已证DVD-RW/+R/+RW类型；OTP保留原版DWORD提示（端点0保持0），不套half；严格/PTP/文件范围不放宽。 */
 bool imgburn_mds_parse_source(const wchar_t *mdsFilePath, MdsSheet *outMds);
 
 /**

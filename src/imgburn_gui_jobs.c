@@ -241,15 +241,18 @@ static bool job_cue(GuiJob* job) {
 }
 
 static bool job_mds(GuiJob* job) {
-    if (job->sourceCount > MAX_MDS_FILES) return false;
-    const wchar_t** paths = (const wchar_t**)calloc(job->sourceCount, sizeof(*paths)); if (!paths) return false; uint64_t bytes = 0; bool ok = true;
+    if (!job->sources || !job->sourceCount || job->sourceCount > MAX_MDS_FILES) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    const wchar_t** paths = (const wchar_t**)calloc(job->sourceCount, sizeof(*paths)); if (!paths) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; } uint64_t bytes = 0; bool ok = true;
     for (size_t i = 0; i < job->sourceCount; i++) {
+        if (job_cancelled(job)) { SetLastError(ERROR_CANCELLED); ok = false; break; }
         paths[i] = job->sources[i].path; WIN32_FILE_ATTRIBUTE_DATA data;
-        if (!GetFileAttributesExW(paths[i], GetFileExInfoStandard, &data) || (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) { ok = false; break; }
+        if (!GetFileAttributesExW(paths[i], GetFileExInfoStandard, &data)) { ok = false; break; }
         uint64_t part = (uint64_t)data.nFileSizeHigh << 32 | data.nFileSizeLow;
-        if (!part || part % 2048 || bytes > UINT64_MAX - part) { ok = false; break; } bytes += part;
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !part || part % 2048 || bytes > UINT64_MAX - part) { SetLastError(ERROR_INVALID_DATA); ok = false; break; } bytes += part;
     }
-    if (ok) ok = !job_cancelled(job) && bytes / 2048 <= UINT32_MAX && imgburn_mds_create_files_ex(job->destination, paths, job->sourceCount, (uint32_t)(bytes / 2048), job->layerBreak, job->oppositeTrackPath);
+    if (ok && job_cancelled(job)) { SetLastError(ERROR_CANCELLED); ok = false; }
+    if (ok && bytes / 2048 > INT32_MAX) { SetLastError(ERROR_NOT_SUPPORTED); ok = false; }
+    if (ok) ok = imgburn_mds_create_tools_files(job->destination,paths,job->sourceCount,(uint32_t)(bytes / 2048),job->layerBreak,job->oppositeTrackPath,job->mdsMedium,job->mdsPreservePaths);
     free(paths); if (ok) job_text(job, L"MDS 已生成：%ls\r\n扇区：%llu，分卷：%zu\r\n", job->destination, bytes / 2048, job->sourceCount); return ok;
 }
 

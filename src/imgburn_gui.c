@@ -40,7 +40,8 @@ enum {
     UI_WRITE_SECTORS, UI_WRITE_SIZE, UI_WRITE_TIME, UI_WRITE_OPTIONS,
     UI_READ_SOURCE_GROUP = 1300, UI_READ_DEST_GROUP, UI_READ_SETTINGS_GROUP, UI_READ_INFO, UI_READ_SECTOR_VIEWER,
     UI_READ_IMAGE_INFO, UI_READ_OPEN, UI_READ_LABEL, UI_READ_IMPLEMENTATION, UI_READ_FILESYSTEM, UI_READ_CAPACITY,
-    UI_READ_FREE_SPACE, UI_READ_ADD_QUEUE, UI_READ_BATCH, UI_READ_OPTIONS, UI_READ_DEST_LABEL, UI_READ_EDIT_OK, UI_READ_EDIT_CANCEL
+    UI_READ_FREE_SPACE, UI_READ_ADD_QUEUE, UI_READ_BATCH, UI_READ_OPTIONS, UI_READ_DEST_LABEL, UI_READ_EDIT_OK, UI_READ_EDIT_CANCEL,
+    UI_TOOL_MEDIA = 1500, UI_TOOL_PRESERVE
 };
 enum { GUI_MAIN_CONTENT_WIDTH = 665, GUI_MAIN_CONTENT_HEIGHT = 385, GUI_LOG_CLIENT_WIDTH = 633, GUI_LOG_CLIENT_HEIGHT = 180 };
 
@@ -55,6 +56,7 @@ typedef struct {
     HWND cdAllowBlank, cdFinalize, cdPlanButton, cdSelect, cdWrite;
     bool cdClosing, bdReLoaded, bdReClosing;
     HWND bdReFormats, bdReCertification, bdWriteType, bdVnrOff;
+    HWND mdsMedia, mdsPreservePaths;
     MmcFormatCapacities bdReCapacities;
     wchar_t bdReDrive[MAX_PATH];
 } GuiTool;
@@ -830,9 +832,12 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
         const wchar_t* labels[] = {L"+",L"−",L"↑",L"↓"}; const int ids[] = {UI_TOOL_ADD,UI_TOOL_REMOVE,UI_TOOL_UP,UI_TOOL_DOWN}; for (int i = 0; i < 4; i++) ctl(ui, window, L"BUTTON", labels[i], WS_TABSTOP, ids[i], 482, 12 + i * 32, 28, 27);
         if (tool->operation == GUI_CREATE_MDS) {
             tool->layer = ctl(ui, window, L"BUTTON", L"换层点 LBA：", BS_AUTOCHECKBOX | WS_TABSTOP, UI_TOOL_LAYER, 10, 246, 110, 23);
-            tool->lba = ctl(ui, window, L"EDIT", L"0", WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, UI_TOOL_LBA, 126, 244, 130, 25); SendMessageW(tool->lba, EM_SETLIMITTEXT, 7, 0);
+            tool->lba = ctl(ui, window, L"EDIT", L"0", WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, UI_TOOL_LBA, 126, 244, 130, 25); SendMessageW(tool->lba, EM_SETLIMITTEXT, 10, 0);
             tool->ptp = ctl(ui, window, L"BUTTON", L"PTP", WS_TABSTOP | BS_AUTORADIOBUTTON | WS_GROUP, UI_TOOL_PTP, 280, 246, 64, 23); tool->otp = ctl(ui, window, L"BUTTON", L"OTP", WS_TABSTOP | BS_AUTORADIOBUTTON, UI_TOOL_OTP, 352, 246, 64, 23); SendMessageW(tool->otp, BM_SETCHECK, BST_CHECKED, 0);
-            EnableWindow(tool->lba, FALSE); EnableWindow(tool->ptp, FALSE); EnableWindow(tool->otp, FALSE); ctl(ui, window, L"STATIC", L"光盘类型：DVD-ROM", 0, 0, 10, 286, 360, 23);
+            EnableWindow(tool->lba, FALSE); EnableWindow(tool->ptp, FALSE); EnableWindow(tool->otp, FALSE); ctl(ui, window, L"STATIC", L"光盘类型：", 0, 0, 10, 286, 110, 23);
+            tool->mdsMedia = ctl(ui,window,L"COMBOBOX",L"",WS_TABSTOP | CBS_DROPDOWNLIST,UI_TOOL_MEDIA,126,282,170,140);
+            const wchar_t* media[] = {L"DVD-ROM",L"DVD-R",L"DVD-RW",L"DVD+R",L"DVD+RW"}; for (unsigned i = 0; i < 5; i++) SendMessageW(tool->mdsMedia,CB_ADDSTRING,0,(LPARAM)media[i]); SendMessageW(tool->mdsMedia,CB_SETCURSEL,0,0);
+            tool->mdsPreservePaths = ctl(ui,window,L"BUTTON",L"保留完整路径",WS_TABSTOP | BS_AUTOCHECKBOX,UI_TOOL_PRESERVE,320,286,180,23);
         } else ctl(ui, window, L"STATIC", L"按解码后的音频长度生成轨道。\r\n标准音频为 44.1 kHz、16 位双声道。", 0, 0, 10, 246, 480, 52);
         tool->ok = ctl(ui, window, L"BUTTON", L"确定", WS_TABSTOP | BS_DEFPUSHBUTTON, UI_TOOL_OK, 356, 332, 72, 28); EnableWindow(tool->ok, FALSE); ctl(ui, window, L"BUTTON", L"取消", WS_TABSTOP, UI_TOOL_CLOSE, 436, 332, 72, 28); return 0;
     }
@@ -883,9 +888,18 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
             case UI_TOOL_UP: case UI_TOOL_DOWN: { LRESULT at = SendMessageW(tool->list, LB_GETCURSEL, 0, 0), next = at + (LOWORD(wp) == UI_TOOL_UP ? -1 : 1); if (at >= 0 && next >= 0 && (size_t)next < tool->count) { GuiPath tmp = tool->sources[at]; tool->sources[at] = tool->sources[next]; tool->sources[next] = tmp; gui_tool_fill(tool); SendMessageW(tool->list, LB_SETCURSEL, next, 0); } break; }
             case UI_TOOL_LAYER: { bool checked = SendMessageW(tool->layer, BM_GETCHECK, 0, 0) == BST_CHECKED; EnableWindow(tool->lba, checked); EnableWindow(tool->otp, checked); EnableWindow(tool->ptp, checked); break; }
             case UI_TOOL_OK: {
-                wchar_t output[MAX_PATH] = L""; bool cue = tool->operation == GUI_CREATE_CUE; if (!gui_file(window, output, true, cue ? L"CUE 文件\0*.cue\0\0" : L"MDS 文件\0*.mds\0\0", cue ? L"cue" : L"mds")) break;
+                wchar_t output[MAX_PATH] = L""; bool cue = tool->operation == GUI_CREATE_CUE; uint32_t layerBreak = 0; LRESULT medium = 0;
+                if (!cue) {
+                    medium = SendMessageW(tool->mdsMedia,CB_GETCURSEL,0,0); if (medium < MDS_TOOLS_DVD_ROM || medium > MDS_TOOLS_DVD_PLUS_RW) { MessageBoxW(window,L"请选择光盘描述类型。",L"ImgBurn",MB_OK | MB_ICONERROR); break; }
+                    if (SendMessageW(tool->layer,BM_GETCHECK,0,0) == BST_CHECKED) {
+                        wchar_t number[16]; int length = GetWindowTextW(tool->lba,number,16); uint64_t value = 0; bool valid = length > 0 && length <= 10 && GetWindowTextLengthW(tool->lba) == length;
+                        for (int i = 0; valid && i < length; i++) { if (number[i] < L'0' || number[i] > L'9') valid = false; else value = value * 10 + number[i] - L'0'; }
+                        if (!valid || value > UINT32_MAX || value % 16) { MessageBoxW(window,L"换层扇区数应在0至4294967295之间，并为16的倍数。",L"ImgBurn",MB_OK | MB_ICONERROR); break; } layerBreak = (uint32_t)value;
+                    }
+                }
+                if (!gui_file(window, output, true, cue ? L"CUE 文件\0*.cue\0\0" : L"MDS 文件\0*.mds\0\0", cue ? L"cue" : L"mds")) break;
                 GuiJob* job = gui_job(ui, tool->operation, tool->sources, tool->count); if (!job) break; wcscpy(job->destination, output);
-                if (!cue && SendMessageW(tool->layer, BM_GETCHECK, 0, 0) == BST_CHECKED) { wchar_t number[16]; GetWindowTextW(tool->lba, number, 16); job->layerBreak = wcstoul(number, NULL, 10); if (!job->layerBreak) { MessageBoxW(window, L"请输入有效的换层扇区数。", L"ImgBurn", MB_OK | MB_ICONERROR); imgburn_gui_job_free(job); break; } job->oppositeTrackPath = SendMessageW(tool->otp, BM_GETCHECK, 0, 0) == BST_CHECKED; }
+                if (!cue) { job->layerBreak = layerBreak; job->oppositeTrackPath = layerBreak && SendMessageW(tool->otp,BM_GETCHECK,0,0) == BST_CHECKED; job->mdsMedium = (MdsToolsMedium)medium; job->mdsPreservePaths = SendMessageW(tool->mdsPreservePaths,BM_GETCHECK,0,0) == BST_CHECKED; }
                 if (gui_launch(ui, job)) for (HWND child = GetWindow(window,GW_CHILD); child; child = GetWindow(child,GW_HWNDNEXT)) if (GetDlgCtrlID(child) != UI_TOOL_CLOSE) EnableWindow(child,FALSE); break;
             }
             case UI_TOOL_CLOSE: SendMessageW(window, WM_CLOSE, 0, 0); break;
