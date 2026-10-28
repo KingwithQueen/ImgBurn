@@ -130,9 +130,9 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
         if (!mmc_read_bd_mds_layout(drive,&bdLayout)) return read_failure(&stats,read_device_error(drive),"Cannot inspect supported BD MDS physical layout",callback,context);
         if (bdLayout.structure.currentProfile != profile) return read_failure(&stats,ERROR_MEDIA_CHANGED,"BD profile changed during inspection",callback,context);
         if (bdLayout.structure.layerCount == 2) {
-            /* 原版使用物理DataZone跨度作虚拟L0；仅接通当前MDS可无歧义往返的子集。 */
+            /* 原版保存物理DataZone跨度作虚拟L0，来源数据不必已经越过首层。 */
             bdVirtualL0 = bdLayout.physicalLayer0Sectors;
-            if (bdVirtualL0 > 0xFD0000 || bdVirtualL0 >= stats.totalSectors || bdVirtualL0 < (stats.totalSectors + 1) / 2) return read_failure(&stats,ERROR_NOT_SUPPORTED,"BD MDS layer position is outside the supported virtual OTP range",callback,context);
+            if (bdVirtualL0 > 0xFD0000 || bdVirtualL0 < (stats.totalSectors + 1) / 2) return read_failure(&stats,ERROR_NOT_SUPPORTED,"BD MDS layer position is outside the supported virtual OTP range",callback,context);
         } else if (bdLayout.structure.layerCount != 1) return read_failure(&stats,ERROR_NOT_SUPPORTED,"BD MDS Read requires a supported single or dual-layer BD",callback,context);
     }
     MmcDvdLayout dvdLayout = {0};
@@ -251,7 +251,7 @@ bool pipeline_verify_disc_ex(const VerifyConfig* config, PipelineProgressCallbac
         if (extension && !_wcsicmp(extension,L".cue")) return pipeline_verify_cd(config,callback,context);
         if (extension && !_wcsicmp(extension,L".mds")) {
             MdsSheet* metadata = calloc(1,sizeof(*metadata)); if (!metadata) return read_failure(&stats,ERROR_NOT_ENOUGH_MEMORY,"Cannot prepare comparison image",callback,context);
-            bool parsed = imgburn_mds_parse(config->imagePath,metadata), raw = parsed && metadata->trackCount && metadata->tracks[0].sectorSize == 2352; free(metadata);
+            bool parsed = imgburn_mds_parse_source(config->imagePath,metadata), raw = parsed && metadata->trackCount && metadata->tracks[0].sectorSize == 2352; free(metadata);
             if (raw) return pipeline_verify_cd(config,callback,context);
         }
         if (!imgburn_data_source_open(&image,config->imagePath)) return read_failure(&stats,GetLastError(),"Cannot open comparison image",callback,context);

@@ -571,7 +571,8 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
     bool dualLayer = profile == MMC_PROFILE_DVD_PLUS_R_DL || profile == MMC_PROFILE_DVD_R_DL_SEQ; uint32_t layerBreak = 0;
     /* MDS的DVD层信息属于来源；BD目标按逻辑数据流写入，不用它设置目标层界。 */
     bool bdDataTarget = profile == MMC_PROFILE_BD_R_SRM || profile == MMC_PROFILE_BD_RE;
-    if (!bdDataTarget && (dataSource.layerBreakLba || dataSource.layerCount > 1) && (dataSource.layerCount != 2 || !dataSource.oppositeTrackPath || !dataSource.layerBreakLba || dataSource.layerBreakLba % 16)) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"Dual-layer MDS sources require supported OTP and an aligned source layer layout for this target.",callback,userData); goto cleanup; }
+    /* 连续数据来源可保留超出数据长度的层提示；DVD目标仍要求两层均有实际数据。 */
+    if (!bdDataTarget && (dataSource.layerBreakLba || dataSource.layerCount > 1) && (dataSource.layerCount != 2 || !dataSource.oppositeTrackPath || !dataSource.layerBreakLba || dataSource.layerBreakLba >= stats.totalSectors || dataSource.layerBreakLba < ((uint64_t)stats.totalSectors + 1) / 2 || dataSource.layerBreakLba % 16)) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"Dual-layer MDS sources require supported OTP and an aligned source layer layout for this target.",callback,userData); goto cleanup; }
     if ((!dualLayer && (config->layerBreakLba || (!bdDataTarget && dataSource.layerBreakLba))) || (dualLayer && discovery)) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"Layer capacity selection requires supported DVD dual-layer recording.",callback,userData); goto cleanup; }
     MmcDvdLayerCapacity layerCapacity = {0};
     if (dualLayer) {

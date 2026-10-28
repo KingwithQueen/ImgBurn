@@ -25,7 +25,7 @@ bool imgburn_data_source_open(DataImageSource* source, const wchar_t* path) {
         source->descriptor = CreateFileW(path,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,NULL);
         if (source->descriptor == INVALID_HANDLE_VALUE) return false;
         sheet = calloc(1,sizeof(*sheet)); if (!sheet) { error = ERROR_NOT_ENOUGH_MEMORY; goto failed; }
-        if (!imgburn_mds_parse(path,sheet)) { error = ERROR_INVALID_DATA; goto failed; }
+        if (!imgburn_mds_parse_source(path,sheet)) { error = ERROR_INVALID_DATA; goto failed; }
         const MdsTrack* track = &sheet->tracks[0];
         if (sheet->sessionCount != 1 || sheet->trackCount != 1 || track->startLba || track->trackNumber != 1 || track->sectorSize != 2048 || track->subChannel || (track->mode != 0x02 && track->mode != 0xAA) || (track->control & 15) != 4 || track->sectorCount != sheet->totalSectors) { error = ERROR_NOT_SUPPORTED; goto failed; }
         source->sectors = track->sectorCount; source->layerBreakLba = sheet->layerBreakLba; source->layerCount = sheet->layerCount; source->oppositeTrackPath = sheet->oppositeTrackPath; source->partCount = track->fileCount;

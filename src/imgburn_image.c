@@ -455,7 +455,7 @@ static bool mds_track_mode(uint8_t mode, uint8_t sub, uint16_t bytes, bool dvd) 
     return false;
 }
 
-bool imgburn_mds_parse(const wchar_t* mdsFilePath, MdsSheet* outMds) {
+static bool mds_parse(const wchar_t* mdsFilePath, MdsSheet* outMds, bool sourceLayout) {
     if (!outMds) return false;
     memset(outMds, 0, sizeof(*outMds));
     if (!mdsFilePath || wcslen(mdsFilePath) >= MAX_PATH) return false;
@@ -528,7 +528,8 @@ bool imgburn_mds_parse(const wchar_t* mdsFilePath, MdsSheet* outMds) {
             uint32_t start = mds_be32(pfi + 4) & 0xFFFFFF, end = mds_be32(pfi + (result->oppositeTrackPath ? 12 : 8)) & 0xFFFFFF;
             if (start != 0x30000 || end < start) goto done;
             result->layerBreakLba = end - start + 1;
-            if (result->layerBreakLba >= result->totalSectors) goto done;
+            /* 来源OTP只保留已解码的层提示；不由此判断物理介质或DVD目标资格。 */
+            if (result->layerBreakLba >= result->totalSectors && (!sourceLayout || !result->oppositeTrackPath)) goto done;
             if (result->oppositeTrackPath) { if (result->layerBreakLba < ((uint64_t)result->totalSectors + 1) / 2) goto done; }
             else {
                 /* PTP每层均从内圈开始，L0长度来自第一层的数据区末尾。 */
@@ -542,6 +543,9 @@ bool imgburn_mds_parse(const wchar_t* mdsFilePath, MdsSheet* outMds) {
 done:
     free(result); free(data); fclose(file); return ok;
 }
+
+bool imgburn_mds_parse(const wchar_t* mdsFilePath, MdsSheet* outMds) { return mds_parse(mdsFilePath,outMds,false); }
+bool imgburn_mds_parse_source(const wchar_t* mdsFilePath, MdsSheet* outMds) { return mds_parse(mdsFilePath,outMds,true); }
 
 bool imgburn_mds_create(const wchar_t* mdsFilePath, const wchar_t* dataFileName, uint32_t totalSectors, uint32_t layerBreakLba) {
     const wchar_t* files[] = {dataFileName};
@@ -619,8 +623,8 @@ static bool mds_create_data(const wchar_t* mdsFilePath, const wchar_t* const* da
 /* BD的逻辑数据长度独立于虚拟DVD的24位PFI；不改变既有CD/DVD生成规则。 */
 bool imgburn_mds_create_bd_read_files_ex(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t virtualL0) {
     if (!mdsFilePath || !mdsFilePath[0] || !dataFiles || !fileCount || fileCount > MAX_MDS_FILES || wcslen(mdsFilePath) >= MAX_PATH || !totalSectors || totalSectors > INT32_MAX) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
-    /* 此处保留当前解析器可往返的OTP子集；原版缓存超出逻辑N时不擅自改成单层。 */
-    if (virtualL0 && (virtualL0 >= totalSectors || virtualL0 > 0xFD0000 || virtualL0 < ((uint64_t)totalSectors + 1) / 2)) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    /* 原版保留可能超过逻辑N的来源L0；仍拒绝未闭合的24位回绕和不足半程布局。 */
+    if (virtualL0 && (virtualL0 > 0xFD0000 || virtualL0 < ((uint64_t)totalSectors + 1) / 2)) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
     wchar_t source[MAX_PATH], destination[MAX_PATH], temporary[MAX_PATH];
     DWORD length = GetFullPathNameW(mdsFilePath, MAX_PATH, destination, NULL);
     if (!length || length >= MAX_PATH) { SetLastError(ERROR_INVALID_NAME); return false; }

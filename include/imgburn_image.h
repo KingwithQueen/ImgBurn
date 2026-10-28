@@ -175,7 +175,7 @@ typedef struct {
     wchar_t dataFilePath[MAX_PATH]; /* Path to .mdf or .iso */
     uint16_t mediumType;
     uint32_t totalSectors;
-    uint32_t layerBreakLba;  /* L0 sector count for dual-layer DVD, 0 if single layer */
+    uint32_t layerBreakLba;  /* 来源PFI的L0提示；source解析允许其超出逻辑N，不代表目标层资格。 */
     unsigned layerCount;
     bool oppositeTrackPath; /* 两层PTP允许L1大于L0；不可据此直接按OTP刻录。 */
     int trackCount;
@@ -296,7 +296,10 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
  * @param outMds Pointer to MdsSheet structure to fill
  * @return true on success, false on format error
  */
+/* 严格解析保留既有DVD层布局接受域。 */
 bool imgburn_mds_parse(const wchar_t *mdsFilePath, MdsSheet *outMds);
+/* 来源流仅额外接受已解码OTP的L0>=N；不猜BD、不放宽PTP/半程/回绕或文件范围。 */
+bool imgburn_mds_parse_source(const wchar_t *mdsFilePath, MdsSheet *outMds);
 
 /**
  * @brief Create a valid .MDS file for a single-layer or dual-layer ISO/BIN image

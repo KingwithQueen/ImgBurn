@@ -1191,7 +1191,7 @@ static int cmd_mds(const char* mdsFile) {
     if (!utf8_path(mdsFile, path, MAX_PATH)) return 1;
     MdsSheet* mds = (MdsSheet*)calloc(1, sizeof(*mds));
     if (!mds) return 1;
-    if (!imgburn_mds_parse(path, mds)) { printf("Error: Failed to parse MDS file '%s'\n", mdsFile); free(mds); return 1; }
+    if (!imgburn_mds_parse_source(path, mds)) { printf("Error: Failed to parse MDS file '%s'\n", mdsFile); free(mds); return 1; }
     const char* medium = mds->mediumType >= 0x10 ? (mds->layerBreakLba ? "DVD-DL" : "DVD") : mds->mediumType == 2 ? "CD-RW" : mds->mediumType == 1 ? "CD-R" : "CD-ROM";
     printf("MDS Source Metadata:\n  Source Medium Type: %s (%u)\n  Total Sectors: %u\n  Sessions: %u\n  Tracks: %d\n  Data File References: %u\n  Source Layer Break: %u\n", medium, mds->mediumType, mds->totalSectors, mds->sessionCount, mds->trackCount, mds->dataFileCount, mds->layerBreakLba);
     if (mds->layerCount) printf("  Source Layers: %u | Source Track Path: %s\n", mds->layerCount, mds->oppositeTrackPath ? "OTP" : "PTP");
