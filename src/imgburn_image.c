@@ -813,7 +813,7 @@ done:
 }
 
 /* Tools直接描述逻辑文件列表；它与Read的虚拟布局及普通DVD刻录生成规则分别保留。 */
-static bool mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames, bool explicitLayerBreak) {
+static bool mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames, bool explicitLayerBreak, bool ansiFilenames) {
     if (!mdsFilePath || !mdsFilePath[0] || !dataFiles || !fileCount || fileCount > MAX_MDS_FILES || wcslen(mdsFilePath) >= MAX_PATH || !totalSectors || totalSectors > INT32_MAX || (unsigned)medium > MDS_TOOLS_DVD_PLUS_RW) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
     /* Tools显式层位置须在逻辑长度内并按16对齐；不套用新刻录DVD的容量或half限制。 */
     if (layerBreakLba && (layerBreakLba >= totalSectors || (explicitLayerBreak && layerBreakLba % 16))) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
@@ -848,7 +848,8 @@ static bool mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* co
         /* 默认子目录保留相对路径，别处只写基本名；完整路径选项绕过同主干通配。 */
         if (!preserveFullPathnames && mds_tools_equal(name,stem,destinationName,destinationStem)) swprintf(names[i],MAX_PATH,L"*%ls",dot ? dot : L"");
         else wcscpy(names[i],name);
-        bytes += (uint32_t)(wcslen(names[i]) + 1) * 2;
+        /* 原版ANSI请求长度仍按UTF16码元数加1，并非转换后的字节数。 */
+        bytes += (uint32_t)(wcslen(names[i]) + 1) * (ansiFilenames ? 1 : 2);
     }
     if (!error && sourceBytes != (uint64_t)totalSectors * 2048) error = ERROR_INVALID_DATA;
     if (error) { free(names); SetLastError(error); return false; }
@@ -873,10 +874,20 @@ static bool mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* co
     }
     uint32_t nameOffset = footerOffset + (uint32_t)fileCount * 16;
     for (size_t i = 0; i < fileCount; i++) {
-        uint32_t footer[4] = {nameOffset,1,parts[i],0}, nameBytes = (uint32_t)(wcslen(names[i]) + 1) * 2;
-        memcpy(data + footerOffset + i * 16,footer,sizeof(footer)); memcpy(data + nameOffset,names[i],nameBytes); nameOffset += nameBytes;
+        uint32_t footer[4] = {nameOffset,ansiFilenames ? 0u : 1u,parts[i],0}, nameBytes = (uint32_t)(wcslen(names[i]) + 1) * (ansiFilenames ? 1 : 2);
+        memcpy(data + footerOffset + i * 16,footer,sizeof(footer));
+        if (ansiFilenames) {
+            char converted[MAX_PATH * 4];
+            int convertedBytes = WideCharToMultiByte(CP_ACP,0,names[i],-1,converted,sizeof(converted),NULL,NULL);
+            if (!convertedBytes) { error = GetLastError(); break; }
+            /* 短于原版请求长度时不读取转换缓冲区之外的未知字节。 */
+            if ((uint32_t)convertedBytes < nameBytes) { error = ERROR_NOT_SUPPORTED; break; }
+            memcpy(data + nameOffset,converted,nameBytes);
+        } else memcpy(data + nameOffset,names[i],nameBytes);
+        nameOffset += nameBytes;
     }
     free(names);
+    if (error) { free(data); SetLastError(error); return false; }
     static volatile LONG sequence = 0; HANDLE output = INVALID_HANDLE_VALUE;
     for (int i = 0; i < 16; i++) {
         if (swprintf(temporary,MAX_PATH,L"%ls.partial.%lu.%ld",destination,GetCurrentProcessId(),InterlockedIncrement(&sequence)) < 0) { error = ERROR_FILENAME_EXCED_RANGE; break; }
@@ -899,10 +910,18 @@ static bool mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* co
 }
 
 bool imgburn_mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames) {
-    return mds_create_tools_files(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,medium,preserveFullPathnames,true);
+    return imgburn_mds_create_tools_files_ex(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,medium,preserveFullPathnames,false);
+}
+
+bool imgburn_mds_create_tools_files_ex(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames, bool ansiFilenames) {
+    return mds_create_tools_files(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,medium,preserveFullPathnames,true,ansiFilenames);
 }
 
 bool imgburn_mds_create_tools_input(const wchar_t* mdsFilePath, const MdsToolsInput* input, bool overrideLayerBreak, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames) {
+    return imgburn_mds_create_tools_input_ex(mdsFilePath,input,overrideLayerBreak,layerBreakLba,oppositeTrackPath,medium,preserveFullPathnames,false);
+}
+
+bool imgburn_mds_create_tools_input_ex(const wchar_t* mdsFilePath, const MdsToolsInput* input, bool overrideLayerBreak, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames, bool ansiFilenames) {
     if (!input || !input->fileCount || input->fileCount > MAX_MDS_FILES || !input->totalSectors || input->totalSectors > INT32_MAX) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
     const wchar_t* paths[MAX_MDS_FILES]; uint64_t bytes = 0;
     for (unsigned i = 0; i < input->fileCount; i++) {
@@ -917,7 +936,7 @@ bool imgburn_mds_create_tools_input(const wchar_t* mdsFilePath, const MdsToolsIn
     }
     if (bytes != (uint64_t)input->totalSectors * 2048) { SetLastError(ERROR_INVALID_DATA); return false; }
     uint32_t chosen = overrideLayerBreak ? layerBreakLba : input->layerBreakLba;
-    return mds_create_tools_files(mdsFilePath,paths,input->fileCount,input->totalSectors,chosen,oppositeTrackPath,medium,preserveFullPathnames,overrideLayerBreak);
+    return mds_create_tools_files(mdsFilePath,paths,input->fileCount,input->totalSectors,chosen,oppositeTrackPath,medium,preserveFullPathnames,overrideLayerBreak,ansiFilenames);
 }
 
 bool imgburn_mds_create_files_ex(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath) {

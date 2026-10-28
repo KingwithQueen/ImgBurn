@@ -253,7 +253,7 @@ static bool job_mds(GuiJob* job) {
         MdsToolsInput* input = calloc(1,sizeof(*input)); if (!input) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; }
         bool ok = imgburn_mds_load_tools_dvd(job->sources[0].path,input);
         if (ok && job_cancelled(job)) { SetLastError(ERROR_CANCELLED); ok = false; }
-        if (ok) ok = imgburn_mds_create_tools_input(job->destination,input,job->mdsLayerBreakOverride,job->layerBreak,job->oppositeTrackPath,job->mdsMedium,job->mdsPreservePaths);
+        if (ok) ok = imgburn_mds_create_tools_input_ex(job->destination,input,job->mdsLayerBreakOverride,job->layerBreak,job->oppositeTrackPath,job->mdsMedium,job->mdsPreservePaths,job->mdsAnsiFilenames);
         DWORD error = GetLastError();
         if (ok) job_text(job,L"MDS 已生成：%ls\r\n扇区：%u，分卷：%u\r\n",job->destination,input->totalSectors,input->fileCount);
         free(input); SetLastError(error); return ok;
@@ -268,7 +268,7 @@ static bool job_mds(GuiJob* job) {
     }
     if (ok && job_cancelled(job)) { SetLastError(ERROR_CANCELLED); ok = false; }
     if (ok && bytes / 2048 > INT32_MAX) { SetLastError(ERROR_NOT_SUPPORTED); ok = false; }
-    if (ok) ok = imgburn_mds_create_tools_files(job->destination,paths,job->sourceCount,(uint32_t)(bytes / 2048),job->layerBreak,job->oppositeTrackPath,job->mdsMedium,job->mdsPreservePaths);
+    if (ok) ok = imgburn_mds_create_tools_files_ex(job->destination,paths,job->sourceCount,(uint32_t)(bytes / 2048),job->layerBreak,job->oppositeTrackPath,job->mdsMedium,job->mdsPreservePaths,job->mdsAnsiFilenames);
     free(paths); if (ok) job_text(job, L"MDS 已生成：%ls\r\n扇区：%llu，分卷：%zu\r\n", job->destination, bytes / 2048, job->sourceCount); return ok;
 }
 

@@ -304,11 +304,17 @@ static UINT_PTR CALLBACK gui_read_file_hook(HWND window, UINT message, WPARAM wp
     if (message == WM_NOTIFY) { const OFNOTIFYW* notice = (const OFNOTIFYW*)lp; if (notice->hdr.code == CDN_TYPECHANGE || notice->hdr.code == CDN_INITDONE) SendMessageW(GetParent(window),CDM_SETDEFEXT,0,(LPARAM)(notice->lpOFN->nFilterIndex == 3 ? L"mds" : notice->lpOFN->nFilterIndex == 2 ? L"cue" : L"iso")); }
     return 0;
 }
-static bool gui_file(HWND owner, wchar_t* result, bool save, const wchar_t* filter, const wchar_t* extension) {
+static bool gui_file_filter(HWND owner, wchar_t* result, bool save, const wchar_t* filter, const wchar_t* extension, DWORD* filterIndex) {
     OPENFILENAMEW file = {0}; file.lStructSize = sizeof(file); file.hwndOwner = owner; file.lpstrFilter = filter; file.lpstrFile = result; file.nMaxFile = MAX_PATH; file.lpstrDefExt = extension;
+    if (filterIndex) file.nFilterIndex = *filterIndex;
     file.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
     if (save && filter == readFilter) { file.Flags |= OFN_ENABLEHOOK; file.lpfnHook = gui_read_file_hook; }
-    return (save ? GetSaveFileNameW(&file) : GetOpenFileNameW(&file)) != FALSE;
+    bool ok = (save ? GetSaveFileNameW(&file) : GetOpenFileNameW(&file)) != FALSE;
+    if (ok && filterIndex) *filterIndex = file.nFilterIndex;
+    return ok;
+}
+static bool gui_file(HWND owner, wchar_t* result, bool save, const wchar_t* filter, const wchar_t* extension) {
+    return gui_file_filter(owner,result,save,filter,extension,NULL);
 }
 static const wchar_t imageFilter[] = L"镜像文件 (*.iso;*.bin;*.cue;*.mds)\0*.iso;*.bin;*.cue;*.mds\0所有文件\0*.*\0\0";
 static void gui_read_controls(GuiWindow* ui) {
@@ -897,9 +903,11 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
                         if (!valid || value > UINT32_MAX || value % 16) { MessageBoxW(window,L"换层扇区数应在0至4294967295之间，并为16的倍数。",L"ImgBurn",MB_OK | MB_ICONERROR); break; } layerBreak = (uint32_t)value;
                     }
                 }
-                if (!gui_file(window, output, true, cue ? L"CUE 文件\0*.cue\0\0" : L"MDS 文件\0*.mds\0\0", cue ? L"cue" : L"mds")) break;
+                DWORD mdsFilter = 2;
+                if (!gui_file_filter(window,output,true,cue ? L"CUE 文件\0*.cue\0\0" : L"MDS 文件 - ANSI\0*.mds\0MDS 文件 - Unicode\0*.mds\0所有文件\0*.*\0\0",cue ? L"cue" : L"mds",cue ? NULL : &mdsFilter)) break;
+                if (!cue && (mdsFilter < 1 || mdsFilter > 3)) { MessageBoxW(window,L"请选择MDS名称编码。",L"ImgBurn",MB_OK | MB_ICONERROR); break; }
                 GuiJob* job = gui_job(ui, tool->operation, tool->sources, tool->count); if (!job) break; wcscpy(job->destination, output);
-                if (!cue) { job->layerBreak = layerBreak; job->mdsLayerBreakOverride = SendMessageW(tool->layer,BM_GETCHECK,0,0) == BST_CHECKED; job->oppositeTrackPath = SendMessageW(tool->otp,BM_GETCHECK,0,0) == BST_CHECKED; job->mdsMedium = (MdsToolsMedium)medium; job->mdsPreservePaths = SendMessageW(tool->mdsPreservePaths,BM_GETCHECK,0,0) == BST_CHECKED; }
+                if (!cue) { job->layerBreak = layerBreak; job->mdsLayerBreakOverride = SendMessageW(tool->layer,BM_GETCHECK,0,0) == BST_CHECKED; job->oppositeTrackPath = SendMessageW(tool->otp,BM_GETCHECK,0,0) == BST_CHECKED; job->mdsMedium = (MdsToolsMedium)medium; job->mdsPreservePaths = SendMessageW(tool->mdsPreservePaths,BM_GETCHECK,0,0) == BST_CHECKED; job->mdsAnsiFilenames = mdsFilter != 2; }
                 if (gui_launch(ui, job)) for (HWND child = GetWindow(window,GW_CHILD); child; child = GetWindow(child,GW_HWNDNEXT)) if (GetDlgCtrlID(child) != UI_TOOL_CLOSE) EnableWindow(child,FALSE); break;
             }
             case UI_TOOL_CLOSE: SendMessageW(window, WM_CLOSE, 0, 0); break;
