@@ -125,7 +125,7 @@ static bool job_inspect(GuiJob* job) {
     if (type == IMAGE_TYPE_MDS) {
         MdsSheet* mds = (MdsSheet*)calloc(1, sizeof(*mds)); if (!mds) return false;
         bool ok = imgburn_mds_parse_source(path, mds);
-        if (ok) { job_text(job, L"MDS来源：%u 会话，%d 轨道，%u 扇区\r\n分卷：%u\r\n来源层切换（仅描述）：%u\r\n来源路径：%ls\r\n", mds->sessionCount, mds->trackCount, mds->totalSectors, mds->dataFileCount, mds->layerBreakLba, mds->oppositeTrackPath ? L"OTP" : L"PTP"); for (unsigned i = 0; i < mds->dataFileCount; i++) job_text(job, L"%ls\r\n", mds->files[i].path); }
+        if (ok) { job_text(job, L"MDS来源：%u 会话，%d 轨道，%u 扇区\r\n分卷：%u\r\n描述层数：%u\r\n来源层提示（仅描述）：%u\r\n来源路径：%ls\r\n", mds->sessionCount, mds->trackCount, mds->totalSectors, mds->dataFileCount, mds->layerCount, mds->layerBreakLba, mds->oppositeTrackPath ? L"OTP" : L"PTP"); for (unsigned i = 0; i < mds->dataFileCount; i++) job_text(job, L"%ls\r\n", mds->files[i].path); }
         if (ok) {
             job->sourceSectors = mds->totalSectors; uint32_t bytes = mds->trackCount ? mds->tracks[0].sectorSize : 0; for (int i = 1; i < mds->trackCount; i++) if (mds->tracks[i].sectorSize != bytes) bytes = 0; job->sourceSectorBytes = bytes; job->sourceBytes = (uint64_t)mds->totalSectors * bytes;
             DataImageSource source = {0}; if (imgburn_data_source_open(&source,path)) { job->sourceSectors = source.sectors; job->sourceSectorBytes = 2048; job->sourceBytes = (uint64_t)source.sectors * 2048; ok = job_source_descriptors(job,NULL,&source,source.sectors,false); imgburn_data_source_close(&source); }
@@ -334,7 +334,7 @@ static bool job_drive(GuiJob* job) {
         const wchar_t* extension = wcsrchr(job->destination,L'.'); ok = extension && !_wcsicmp(extension,L".cue") ? pipeline_read_cd(&config,job_pipeline_progress,job) : pipeline_read_disc(&config,job_pipeline_progress,job);
         bool mds = extension && !_wcsicmp(extension,L".mds");
         if (ok) job_text(job,job->readAutoSplit ? L"光盘镜像已读取：%ls\r\n如受文件系统上限而分卷，请使用同名 MDS 载入整组数据。\r\n" : mds ? L"光盘镜像和 MDS 描述已读取：%ls\r\n配套数据文件按顺序记录在 MDS 中。\r\n" : L"光盘镜像已读取：%ls\r\n",job->destination);
-        else { job->error = GetLastError(); if (job->error == ERROR_NOT_SUPPORTED) job_text(job,mds ? L"MDS 支持单轨 MODE1 数据 CD，显式原始读取支持 MODE1/MODE2 的2352字节主通道，以及单层、已结束的单会话双层 DVD 和受支持的单层/双层 BD-R/BD-RE；未知 BD 格式、BDXL及层位置超出支持范围的双层来源暂不支持 MDS，音频及混合轨 CD 请选择 CUE。\r\n" : L"当前光盘布局或光驱能力不支持所选镜像格式。\r\n"); else if (job->error == ERROR_DISK_FULL) job_text(job,L"目标位置的可用空间不足。\r\n"); }
+        else { job->error = GetLastError(); if (job->error == ERROR_NOT_SUPPORTED) job_text(job,mds ? L"MDS 支持单轨 MODE1 数据 CD，显式原始读取支持 MODE1/MODE2 的2352字节主通道，以及单层、已结束的单会话双层 DVD、受支持的单层/双层 BD-R/BD-RE 和已识别的 BD-R XL 三层/四层来源；未知 BD 格式、BD-ROM及层位置超出支持范围的常规双层来源暂不支持 MDS，音频及混合轨 CD 请选择 CUE。\r\n" : L"当前光盘布局或光驱能力不支持所选镜像格式。\r\n"); else if (job->error == ERROR_DISK_FULL) job_text(job,L"目标位置的可用空间不足。\r\n"); }
     }
     else if (job->operation == GUI_VERIFY_DISC) {
         VerifyConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.cancelEvent = job->cancel;

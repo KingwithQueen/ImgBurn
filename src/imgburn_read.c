@@ -27,6 +27,9 @@ static bool read_profile(MmcProfile profile) {
 static bool read_bd_structure_matches(const MmcBdDiscStructure* first, const MmcBdDiscStructure* last) {
     return first->currentProfile == last->currentProfile && first->physicalType == last->physicalType && first->layerCount == last->layerCount && first->layerType == last->layerType && first->discSizeCode == last->discSizeCode && first->discClass == last->discClass && first->discVersion == last->discVersion && first->channelBitCode == last->channelBitCode && first->diUnitCount == last->diUnitCount && first->layerMask == last->layerMask && first->diFormatMask == last->diFormatMask && first->hasMediaId == last->hasMediaId && first->productRevision == last->productRevision && !memcmp(first->manufacturerId,last->manufacturerId,sizeof(first->manufacturerId)) && !memcmp(first->mediaTypeId,last->mediaTypeId,sizeof(first->mediaTypeId));
 }
+static bool read_bd_layout_matches(const MmcBdReadMdsLayout* first, const MmcBdReadMdsLayout* last) {
+    return read_bd_structure_matches(&first->structure,&last->structure) && first->virtualLayer0Sectors == last->virtualLayer0Sectors && first->firstWord == last->firstWord && first->lastWord == last->lastWord && first->sourceUnitIndex == last->sourceUnitIndex && !memcmp(first->sourceTag,last->sourceTag,sizeof(first->sourceTag)) && first->oppositeTrackPath == last->oppositeTrackPath && first->originalCache == last->originalCache;
+}
 static bool read_target(const wchar_t* input, wchar_t* full, bool replace) {
     DWORD length = GetFullPathNameW(input,MAX_PATH,full,NULL);
     const wchar_t* extension = length && length < MAX_PATH ? wcsrchr(full,L'.') : NULL;
@@ -125,15 +128,12 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
     bool dvdMds = mdsOutput && !cdMds && !bdMds;
     if (dvdMds && (profile < MMC_PROFILE_DVD_ROM || profile > MMC_PROFILE_DVD_PLUS_R_DL)) return read_failure(&stats,ERROR_NOT_SUPPORTED,"MDS Read requires supported DVD, BD or MODE1 CD media",callback,context);
     if (bdMds && stats.totalSectors > INT32_MAX) return read_failure(&stats,ERROR_NOT_SUPPORTED,"BD MDS exceeds the supported signed session address range",callback,context);
-    MmcBdMdsLayout bdLayout = {0}; uint32_t bdVirtualL0 = 0;
+    MmcBdReadMdsLayout bdLayout = {0};
     if (bdMds) {
-        if (!mmc_read_bd_mds_layout(drive,&bdLayout)) return read_failure(&stats,read_device_error(drive),"Cannot inspect supported BD MDS physical layout",callback,context);
+        if (!mmc_read_bd_read_mds_layout(drive,&bdLayout)) return read_failure(&stats,read_device_error(drive),"Cannot inspect supported BD MDS source layout",callback,context);
         if (bdLayout.structure.currentProfile != profile) return read_failure(&stats,ERROR_MEDIA_CHANGED,"BD profile changed during inspection",callback,context);
-        if (bdLayout.structure.layerCount == 2) {
-            /* 原版保存物理DataZone跨度作虚拟L0，来源数据不必已经越过首层。 */
-            bdVirtualL0 = bdLayout.physicalLayer0Sectors;
-            if (bdVirtualL0 > 0xFD0000 || bdVirtualL0 < (stats.totalSectors + 1) / 2) return read_failure(&stats,ERROR_NOT_SUPPORTED,"BD MDS layer position is outside the supported virtual OTP range",callback,context);
-        } else if (bdLayout.structure.layerCount != 1) return read_failure(&stats,ERROR_NOT_SUPPORTED,"BD MDS Read requires a supported single or dual-layer BD",callback,context);
+        /* 常规DL保持已有物理布局边界；XL复刻原版DWORD缓存，不能当作真实首层容量。 */
+        if (!bdLayout.originalCache && bdLayout.structure.layerCount == 2 && (bdLayout.virtualLayer0Sectors > 0xFD0000 || bdLayout.virtualLayer0Sectors < (stats.totalSectors + 1) / 2)) return read_failure(&stats,ERROR_NOT_SUPPORTED,"BD MDS layer position is outside the supported virtual OTP range",callback,context);
     }
     MmcDvdLayout dvdLayout = {0};
     if (dvdMds) {
@@ -197,9 +197,9 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
         if (finalLayout.layerCount != dvdLayout.layerCount || finalLayout.oppositeTrackPath != dvdLayout.oppositeTrackPath || finalLayout.layerBreakLba != dvdLayout.layerBreakLba) { error = ERROR_MEDIA_CHANGED; goto done; }
     }
     if (bdMds) {
-        MmcBdMdsLayout finalLayout;
-        if (!mmc_read_bd_mds_layout(drive,&finalLayout)) { error = read_device_error(drive); goto done; }
-        if (!read_bd_structure_matches(&bdLayout.structure,&finalLayout.structure) || finalLayout.physicalLayer0Sectors != bdLayout.physicalLayer0Sectors || finalLayout.firstPaa != bdLayout.firstPaa || finalLayout.lastPaa != bdLayout.lastPaa) { error = ERROR_MEDIA_CHANGED; goto done; }
+        MmcBdReadMdsLayout finalLayout;
+        if (!mmc_read_bd_read_mds_layout(drive,&finalLayout)) { error = read_device_error(drive); goto done; }
+        if (!read_bd_layout_matches(&bdLayout,&finalLayout)) { error = ERROR_MEDIA_CHANGED; goto done; }
     }
     if (cdMds && !mmc_check_iso_cd(drive,stats.totalSectors)) { error = read_device_error(drive); goto done; }
     if (mdsOutput) {
@@ -224,7 +224,7 @@ bool pipeline_read_disc(const ReadConfig* config, PipelineProgressCallback callb
         if (!descriptorCreated) goto done;
         const wchar_t* names[MAX_MDS_FILES]; for (unsigned i = 0; i < partCount; i++) names[i] = wcsrchr(parts[i].path,L'\\') + 1;
         /* BD虚拟描述的L0仅写入MDS，读取保持完整逻辑数据流。 */
-        bool created = cdMds ? imgburn_mds_create_cd_read_files(descriptor,names,partCount,stats.totalSectors) : bdMds ? imgburn_mds_create_bd_read_files_ex(descriptor,names,partCount,stats.totalSectors,bdVirtualL0) : imgburn_mds_create_dvd_read_files(descriptor,names,partCount,stats.totalSectors,dvdLayout.layerBreakLba,dvdLayout.oppositeTrackPath);
+        bool created = cdMds ? imgburn_mds_create_cd_read_files(descriptor,names,partCount,stats.totalSectors) : bdMds ? imgburn_mds_create_bd_read_layout_files(descriptor,names,partCount,stats.totalSectors,bdLayout.virtualLayer0Sectors,bdLayout.oppositeTrackPath) : imgburn_mds_create_dvd_read_files(descriptor,names,partCount,stats.totalSectors,dvdLayout.layerBreakLba,dvdLayout.oppositeTrackPath);
         if (!created) { error = GetLastError(); goto done; }
         if (read_cancelled(config)) { error = ERROR_CANCELLED; goto done; }
     }

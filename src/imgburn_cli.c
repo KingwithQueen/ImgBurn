@@ -89,7 +89,7 @@ static void print_usage(void) {
     printf("  cd-toc <drive>                Display complete CD sessions, tracks and lead-outs\n");
     printf("  read <drive> <out.iso|out.mds|out.cue> [--retries <0..20>] [--replace] [--cdtext] [--split <MiB|auto>] [--raw-cd] [--session-pregaps] [--speed <Nx|MAX>] [--audio-speed <Nx|MAX>] [--eject]\n");
     printf("                                 Read data ISO or raw CD BIN/CUE with Q indexes\n");
-    printf("                                 MDS destination saves MODE1 CD, single/dual-layer DVD or supported single/dual-layer BD data files\n");
+    printf("                                 MDS destination saves MODE1 CD, single/dual-layer DVD or supported BD including BD-R XL TL/QL data files\n");
     printf("                                 --split sets a per-file MiB limit for MDS; auto follows the target volume file limit\n");
     printf("  burn <drive> <image> [--speed <Nx|MAX|KEEP>] [--test] [--verify] [--reserve|--bd-no-reserve] [--bd-write-type INCREMENTAL|SAO] [--bd-vnr-off] [--no-cycle] [--opc]\n");
     printf("                                 Burn ISO/BIN, data MDS or supported CD CUE images\n");
@@ -1192,7 +1192,7 @@ static int cmd_mds(const char* mdsFile) {
     MdsSheet* mds = (MdsSheet*)calloc(1, sizeof(*mds));
     if (!mds) return 1;
     if (!imgburn_mds_parse_source(path, mds)) { printf("Error: Failed to parse MDS file '%s'\n", mdsFile); free(mds); return 1; }
-    const char* medium = mds->mediumType >= 0x10 ? (mds->layerBreakLba ? "DVD-DL" : "DVD") : mds->mediumType == 2 ? "CD-RW" : mds->mediumType == 1 ? "CD-R" : "CD-ROM";
+    const char* medium = mds->mediumType >= 0x10 ? (mds->layerCount > 1 ? "DVD-DL" : "DVD") : mds->mediumType == 2 ? "CD-RW" : mds->mediumType == 1 ? "CD-R" : "CD-ROM";
     printf("MDS Source Metadata:\n  Source Medium Type: %s (%u)\n  Total Sectors: %u\n  Sessions: %u\n  Tracks: %d\n  Data File References: %u\n  Source Layer Break: %u\n", medium, mds->mediumType, mds->totalSectors, mds->sessionCount, mds->trackCount, mds->dataFileCount, mds->layerBreakLba);
     if (mds->layerCount) printf("  Source Layers: %u | Source Track Path: %s\n", mds->layerCount, mds->oppositeTrackPath ? "OTP" : "PTP");
     for (int i = 0; i < mds->trackCount; i++) {

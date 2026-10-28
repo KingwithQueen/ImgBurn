@@ -632,35 +632,66 @@ static bool bd_read_disc_structure(OpticalDrive* drive, MmcBdDiscStructure* stru
 bool mmc_read_bd_disc_structure(OpticalDrive* drive, MmcBdDiscStructure* structure) {
     uint8_t data[4100] = {0}; return bd_read_disc_structure(drive,structure,data);
 }
-bool mmc_read_bd_mds_layout(OpticalDrive* drive, MmcBdMdsLayout* layout) {
-    if (layout) memset(layout,0,sizeof(*layout));
-    if (!drive || !layout) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
-    uint8_t data[4100] = {0}; MmcBdMdsLayout parsed = {0};
-    if (!bd_read_disc_structure(drive,&parsed.structure,data)) return false;
-    if (parsed.structure.layerCount == 1) { *layout = parsed; return true; }
-    bool rewritable = parsed.structure.physicalType == MMC_BD_PHYSICAL_RE;
+static bool bd_decode_mds_layout(OpticalDrive* drive, MmcBdMdsLayout* parsed, const uint8_t data[4100]) {
+    if (parsed->structure.layerCount == 1) return true;
+    bool rewritable = parsed->structure.physicalType == MMC_BD_PHYSICAL_RE;
     uint32_t knownFormats = (1u << 1) | (1u << 3) | (rewritable ? 1u << 2 : 0);
     /* BDXL4/5的PAA字段已移位，不能把旧原版偏移静默解释为真实首层容量。 */
-    if (parsed.structure.layerCount != 2 || parsed.structure.diFormatMask & ~knownFormats ||
-        parsed.structure.discSizeCode || parsed.structure.discClass || parsed.structure.discVersion != (rewritable ? 2 : 1) || parsed.structure.channelBitCode != 1)
+    if (parsed->structure.layerCount != 2 || parsed->structure.diFormatMask & ~knownFormats ||
+        parsed->structure.discSizeCode || parsed->structure.discClass || parsed->structure.discVersion != (rewritable ? 2 : 1) || parsed->structure.channelBitCode != 1)
         return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
     const uint8_t* first = data + 4;
     if (first[3] & 7) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
     bool found = false;
-    for (unsigned i = 0; i < parsed.structure.diUnitCount; i++) {
+    for (unsigned i = 0; i < parsed->structure.diUnitCount; i++) {
         const uint8_t* unit = first + i * 112;
         if (unit[3] & 7) continue;
         if ((unit[6] & 0x7F) < 32) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
         uint32_t start = read_be32(unit + 24), end = read_be32(unit + 28);
         /* L0的PSN层号为0，首地址固定；末PAA末两位10对应完整32扇区簇。 */
         if (start != 0x20000 || end < start || end >= 0x200000 || (end & 3) != 2) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
-        if (found && (parsed.firstPaa != start || parsed.lastPaa != end)) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
-        parsed.firstPaa = start; parsed.lastPaa = end; found = true;
+        if (found && (parsed->firstPaa != start || parsed->lastPaa != end)) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
+        parsed->firstPaa = start; parsed->lastPaa = end; found = true;
     }
     if (!found) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
-    uint64_t physical = ((uint64_t)parsed.lastPaa - parsed.firstPaa) * 8 + 16;
+    uint64_t physical = ((uint64_t)parsed->lastPaa - parsed->firstPaa) * 8 + 16;
     if (!physical || physical > UINT32_MAX || physical % 32) return mmc_write_parameter_error(drive,ERROR_INVALID_DATA);
-    parsed.physicalLayer0Sectors = (uint32_t)physical; *layout = parsed; return true;
+    parsed->physicalLayer0Sectors = (uint32_t)physical; return true;
+}
+bool mmc_read_bd_mds_layout(OpticalDrive* drive, MmcBdMdsLayout* layout) {
+    if (layout) memset(layout,0,sizeof(*layout));
+    if (!drive || !layout) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    uint8_t data[4100] = {0}; MmcBdMdsLayout parsed = {0};
+    if (!bd_read_disc_structure(drive,&parsed.structure,data) || !bd_decode_mds_layout(drive,&parsed,data)) return false;
+    *layout = parsed; return true;
+}
+bool mmc_read_bd_read_mds_layout(OpticalDrive* drive, MmcBdReadMdsLayout* layout) {
+    if (layout) memset(layout,0,sizeof(*layout));
+    if (!drive || !layout) return mmc_write_parameter_error(drive,ERROR_INVALID_PARAMETER);
+    uint8_t data[4100] = {0}; MmcBdReadMdsLayout parsed = {0};
+    if (!bd_read_disc_structure(drive,&parsed.structure,data)) return false;
+    if (parsed.structure.physicalType == MMC_BD_PHYSICAL_R && parsed.structure.discClass == 1 && parsed.structure.discVersion == 2 &&
+        (parsed.structure.layerCount == 3 || parsed.structure.layerCount == 4) && !(parsed.structure.diFormatMask & ~((1u << 4) | (1u << 5)))) {
+        bool found = false; parsed.originalCache = true; parsed.oppositeTrackPath = true;
+        /* 原版Read按完整AD长度扫描36个112字节槽，包含EB前448字节；最后第0层命中覆盖先前值。 */
+        for (unsigned i = 0; i < 36; i++) {
+            const uint8_t* unit = data + 4 + i * 112;
+            if (unit[0] != 'D' || unit[1] != 'I' || (unit[3] & 7)) continue;
+            parsed.firstWord = read_be32(unit + 24); parsed.lastWord = read_be32(unit + 28);
+            memcpy(parsed.sourceTag,unit + 8,sizeof(parsed.sourceTag)); parsed.sourceUnitIndex = (uint8_t)i;
+            /* 标签只决定原版算式，EB中的其它标签也走delta+2；这些原始字不解释成物理地址。 */
+            bool recorded = !memcmp(parsed.sourceTag,"BDR",3) || !memcmp(parsed.sourceTag,"BDW",3);
+            parsed.virtualLayer0Sectors = recorded ? (parsed.lastWord - parsed.firstWord) * 8u + 16u : parsed.lastWord - parsed.firstWord + 2u;
+            found = true;
+        }
+        if (!found) return mmc_write_parameter_error(drive,ERROR_NOT_SUPPORTED);
+    } else {
+        MmcBdMdsLayout physical = {0}; physical.structure = parsed.structure;
+        if (!bd_decode_mds_layout(drive,&physical,data)) return false;
+        parsed.virtualLayer0Sectors = physical.physicalLayer0Sectors; parsed.firstWord = physical.firstPaa; parsed.lastWord = physical.lastPaa;
+        parsed.oppositeTrackPath = physical.physicalLayer0Sectors != 0; memcpy(parsed.sourceTag,data + 12,sizeof(parsed.sourceTag));
+    }
+    *layout = parsed; return true;
 }
 /* 仅解码声明的描述符范围；返回的额外分配区字节不当作新格式，原始参数不推算容量。 */
 bool mmc_read_format_capacities(OpticalDrive* drive, MmcFormatCapacities* capacities) {

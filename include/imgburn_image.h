@@ -194,8 +194,10 @@ bool imgburn_mds_create_dvd_read(const wchar_t* mdsPath, const wchar_t* dataFile
 bool imgburn_mds_create_dvd_read_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath);
 /* BD读取使用原版虚拟单层DVD-R描述；物理层资格由读取管线确认。 */
 bool imgburn_mds_create_bd_read_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors);
-/* 非零virtualL0仅保存已核常规BD双层的虚拟OTP描述，不据物理层数猜层位置。 */
+/* 兼容入口按virtualL0是否非零选择OTP，保留旧SL/DL字节。 */
 bool imgburn_mds_create_bd_read_files_ex(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t virtualL0);
+/* 原版虚拟缓存提示与OTP独立；非零提示须OTP，零提示OTP仍保存11h单结构，不推算物理L0。 */
+bool imgburn_mds_create_bd_read_layout_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t virtualL0, bool oppositeTrackPath);
 /* 原版可载入的精简单会话、单轨 MODE1/2048 CD 描述，不生成原始音频或子通道布局。 */
 bool imgburn_mds_create_cd_read_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors);
 /* 原版可载入的精简单轨 MODE1/2352 CD 描述；主通道文件从 LBA 0 开始。 */
@@ -298,7 +300,7 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
  */
 /* 严格解析保留既有DVD层布局接受域。 */
 bool imgburn_mds_parse(const wchar_t *mdsFilePath, MdsSheet *outMds);
-/* 来源流仅额外接受已解码OTP的L0>=N；不猜BD、不放宽PTP/半程/回绕或文件范围。 */
+/* 来源OTP保留原版DWORD层提示（端点0保持0），不套几何half；严格/PTP/文件范围不放宽。 */
 bool imgburn_mds_parse_source(const wchar_t *mdsFilePath, MdsSheet *outMds);
 
 /**

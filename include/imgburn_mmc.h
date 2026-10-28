@@ -188,6 +188,16 @@ typedef struct {
 } MmcBdMdsLayout;
 /* 只读Profile和DI。双层仅支持已知常规BDR/BDW的PAA布局，未知/BDXL仍不推算。 */
 bool mmc_read_bd_mds_layout(OpticalDrive* drive, MmcBdMdsLayout* layout);
+/* Read专用虚拟缓存与物理首层跨度分开；XL固定槽原始字并非PAA或真实容量。 */
+typedef struct {
+    MmcBdDiscStructure structure;
+    uint32_t virtualLayer0Sectors, firstWord, lastWord;
+    uint8_t sourceUnitIndex;
+    char sourceTag[3]; /* 原版选中槽的原始标签；包括EB命中，不据此改变物理类型。 */
+    bool oppositeTrackPath, originalCache;
+} MmcBdReadMdsLayout;
+/* 一次Profile及DI查询：常规沿用严格物理布局；BDR XL格式4/5复刻Read的36槽最后命中规则。 */
+bool mmc_read_bd_read_mds_layout(OpticalDrive* drive, MmcBdReadMdsLayout* layout);
 const char* mmc_get_bd_physical_type_name(MmcBdPhysicalType type);
 
 /* READ FORMAT CAPACITIES最多31个描述符：首个当前/最大描述符及30个设备格式描述符。 */

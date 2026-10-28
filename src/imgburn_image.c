@@ -526,11 +526,15 @@ static bool mds_parse(const wchar_t* mdsFilePath, MdsSheet* outMds, bool sourceL
         if (layers) {
             if (!mds_range(size, header->discStructuresOffset, 8200)) goto done;
             uint32_t start = mds_be32(pfi + 4) & 0xFFFFFF, end = mds_be32(pfi + (result->oppositeTrackPath ? 12 : 8)) & 0xFFFFFF;
-            if (start != 0x30000 || end < start) goto done;
-            result->layerBreakLba = end - start + 1;
-            /* 来源OTP只保留已解码的层提示；不由此判断物理介质或DVD目标资格。 */
-            if (result->layerBreakLba >= result->totalSectors && (!sourceLayout || !result->oppositeTrackPath)) goto done;
-            if (result->oppositeTrackPath) { if (result->layerBreakLba < ((uint64_t)result->totalSectors + 1) / 2) goto done; }
+            if (start != 0x30000) goto done;
+            /* 来源OTP复刻原版DWORD提示：零末地址不赋值，下溢不恢复物理层位置。 */
+            if (sourceLayout && result->oppositeTrackPath) result->layerBreakLba = end ? end - start + 1 : 0;
+            else {
+                if (end < start) goto done;
+                result->layerBreakLba = end - start + 1;
+                if (result->layerBreakLba >= result->totalSectors) goto done;
+            }
+            if (result->oppositeTrackPath) { if (!sourceLayout && result->layerBreakLba < ((uint64_t)result->totalSectors + 1) / 2) goto done; }
             else {
                 /* PTP每层均从内圈开始，L0长度来自第一层的数据区末尾。 */
                 const uint8_t* second = pfi + 4100; uint32_t secondStart = mds_be32(second + 4) & 0xFFFFFF, secondEnd = mds_be32(second + 8) & 0xFFFFFF;
@@ -621,10 +625,10 @@ static bool mds_create_data(const wchar_t* mdsFilePath, const wchar_t* const* da
 }
 
 /* BD的逻辑数据长度独立于虚拟DVD的24位PFI；不改变既有CD/DVD生成规则。 */
-bool imgburn_mds_create_bd_read_files_ex(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t virtualL0) {
+bool imgburn_mds_create_bd_read_layout_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t virtualL0, bool oppositeTrackPath) {
     if (!mdsFilePath || !mdsFilePath[0] || !dataFiles || !fileCount || fileCount > MAX_MDS_FILES || wcslen(mdsFilePath) >= MAX_PATH || !totalSectors || totalSectors > INT32_MAX) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
-    /* 原版保留可能超过逻辑N的来源L0；仍拒绝未闭合的24位回绕和不足半程布局。 */
-    if (virtualL0 && (virtualL0 > 0xFD0000 || virtualL0 < ((uint64_t)totalSectors + 1) / 2)) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    /* 原版虚拟缓存是原始DWORD提示；非零提示只接OTP，不据N或物理BD容量重算。 */
+    if (virtualL0 && !oppositeTrackPath) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
     wchar_t source[MAX_PATH], destination[MAX_PATH], temporary[MAX_PATH];
     DWORD length = GetFullPathNameW(mdsFilePath, MAX_PATH, destination, NULL);
     if (!length || length >= MAX_PATH) { SetLastError(ERROR_INVALID_NAME); return false; }
@@ -649,11 +653,12 @@ bool imgburn_mds_create_bd_read_files_ex(const wchar_t* mdsFilePath, const wchar
     MdsTrackBlock* track = (MdsTrackBlock*)(data + 112);
     track->trackMode = 0x02; track->adrControl = 0x14; track->point = 1; track->extraOffset = totalSectors; track->sectorSize = 2048; track->fileCount = (uint32_t)fileCount; track->footerOffset = footerOffset;
     uint8_t* pfi = data + 192 + 2052;
-    pfi[0] = 0x21; pfi[1] = 2; pfi[2] = virtualL0 ? 0x31 : 1; pfi[3] = 0x10;
+    pfi[0] = 0x21; pfi[1] = 2; pfi[2] = (uint8_t)(1 | (virtualL0 ? 0x20 : 0) | (oppositeTrackPath ? 0x10 : 0)); pfi[3] = 0x10;
     mds_set_be32(pfi + 4, 0x30000);
     mds_set_be32(pfi + 8, (virtualL0 ? ((0x30000 + virtualL0) ^ 0xFFFFFF) + (totalSectors - virtualL0) : 0x30000 + totalSectors - 1) & 0xFFFFFF);
+    /* 零提示仍可带OTP位；原版此时只有一份结构，但end8与end12都保存逻辑末端低24位。 */
+    if (oppositeTrackPath) mds_set_be32(pfi + 12, (0x30000 + (virtualL0 ? virtualL0 : totalSectors) - 1) & 0xFFFFFF);
     if (virtualL0) {
-        mds_set_be32(pfi + 12, (0x30000 + virtualL0 - 1) & 0xFFFFFF);
         /* 原版OTP重复同一4100字节结构；它不是BD第二物理层的PIC。 */
         memcpy(data + 4292, data + 192, 4100);
     }
@@ -684,6 +689,10 @@ bool imgburn_mds_create_bd_read_files_ex(const wchar_t* mdsFilePath, const wchar
     if (ok && !MoveFileExW(temporary, destination, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { error = GetLastError(); ok = false; }
     if (!ok && output != INVALID_HANDLE_VALUE) DeleteFileW(temporary);
     free(data); SetLastError(ok ? ERROR_SUCCESS : error); return ok;
+}
+
+bool imgburn_mds_create_bd_read_files_ex(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t virtualL0) {
+    return imgburn_mds_create_bd_read_layout_files(mdsFilePath,dataFiles,fileCount,totalSectors,virtualL0,virtualL0 != 0);
 }
 
 bool imgburn_mds_create_bd_read_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors) {
