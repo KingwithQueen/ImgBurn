@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <wchar.h>
 
 /* -------------------------------------------------------------------------
  * Image Format Detection
@@ -716,11 +717,106 @@ static bool mds_tools_equal(const wchar_t* first, size_t firstLength, const wcha
     return CompareStringW(LOCALE_USER_DEFAULT,NORM_IGNORECASE,first,(int)firstLength,second,(int)secondLength) == CSTR_EQUAL;
 }
 
+/* DVD文本沿原版BOM/系统ANSI选择，不复用CUE的无BOM UTF-8优先规则。 */
+static wchar_t* mds_tools_dvd_text(const wchar_t* path) {
+    HANDLE file = CreateFileW(path,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+    if (file == INVALID_HANDLE_VALUE) return NULL;
+    LARGE_INTEGER size; DWORD error = ERROR_SUCCESS, got = 0; uint8_t* raw = NULL; wchar_t* text = NULL;
+    if (!GetFileSizeEx(file,&size)) { error = GetLastError(); goto done; }
+    if (size.QuadPart <= 0) { error = ERROR_INVALID_DATA; goto done; }
+    if (size.QuadPart > 4 * 1024 * 1024) { error = ERROR_NOT_SUPPORTED; goto done; }
+    raw = malloc((size_t)size.QuadPart);
+    if (!raw) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
+    if (!ReadFile(file,raw,(DWORD)size.QuadPart,&got,NULL)) { error = GetLastError(); goto done; }
+    if (got != (DWORD)size.QuadPart) { error = ERROR_READ_FAULT; goto done; }
+    int count = 0;
+    if (got >= 2 && ((raw[0] == 0xFF && raw[1] == 0xFE) || (raw[0] == 0xFE && raw[1] == 0xFF))) {
+        if ((got - 2) % 2) { error = ERROR_INVALID_DATA; goto done; }
+        count = (int)((got - 2) / 2); text = calloc((size_t)count + 1,sizeof(wchar_t));
+        if (!text) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
+        for (int i = 0; i < count; i++) text[i] = raw[0] == 0xFF ? (wchar_t)(raw[2 + i * 2] | (uint16_t)raw[3 + i * 2] << 8) : (wchar_t)((uint16_t)raw[2 + i * 2] << 8 | raw[3 + i * 2]);
+    } else {
+        int skip = got >= 3 && !memcmp(raw,"\xEF\xBB\xBF",3) ? 3 : 0;
+        UINT page = skip ? CP_UTF8 : CP_ACP; DWORD flags = skip ? MB_ERR_INVALID_CHARS : 0;
+        count = MultiByteToWideChar(page,flags,(const char*)raw + skip,(int)got - skip,NULL,0);
+        if (!count) { error = ERROR_INVALID_DATA; goto done; }
+        text = calloc((size_t)count + 1,sizeof(wchar_t));
+        if (!text) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
+        if (!MultiByteToWideChar(page,flags,(const char*)raw + skip,(int)got - skip,text,count)) { error = ERROR_INVALID_DATA; goto done; }
+    }
+    for (int i = 0; i < count; i++) if (!text[i]) { error = ERROR_INVALID_DATA; goto done; }
+    /* 本批拒绝损坏Unicode，不宣称复制原版替换无效字符的全部容错域。 */
+    if (count && !WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,text,count,NULL,0,NULL,NULL)) error = ERROR_INVALID_DATA;
+done:
+    CloseHandle(file); free(raw);
+    if (error) { free(text); text = NULL; }
+    SetLastError(error); return text;
+}
+
+static wchar_t* mds_tools_trim(wchar_t* text) {
+    while (*text && *text <= 0x20) text++;
+    wchar_t* end = text + wcslen(text); while (end > text && end[-1] <= 0x20) *--end = 0;
+    return text;
+}
+
+/* Delphi正int64才更新低DWORD；十六进制负号按64位补码取负。 */
+static bool mds_tools_layer_hint(const wchar_t* text, uint32_t* hint) {
+    bool negative = *text == L'-'; if (*text == L'-' || *text == L'+') text++;
+    unsigned base = 10;
+    if (*text == L'$' || *text == L'x' || *text == L'X') { base = 16; text++; }
+    else if (text[0] == L'0' && (text[1] == L'x' || text[1] == L'X')) { base = 16; text += 2; }
+    if (!*text) return false;
+    uint64_t value = 0, limit = base == 16 ? UINT64_MAX : (uint64_t)INT64_MAX + (negative ? 1 : 0);
+    for (; *text; text++) {
+        unsigned digit = *text >= L'0' && *text <= L'9' ? (unsigned)(*text - L'0') : *text >= L'a' && *text <= L'f' ? (unsigned)(*text - L'a' + 10) : *text >= L'A' && *text <= L'F' ? (unsigned)(*text - L'A' + 10) : 16;
+        if (digit >= base || value > (limit - digit) / base) return false;
+        value = value * base + digit;
+    }
+    if (negative) value = (uint64_t)0 - value;
+    if (!value || value > INT64_MAX) return false;
+    *hint = (uint32_t)value; return true;
+}
+
+bool imgburn_mds_load_tools_dvd(const wchar_t* descriptionPath, MdsToolsInput* outInput) {
+    if (outInput) memset(outInput,0,sizeof(*outInput));
+    if (!descriptionPath || !descriptionPath[0] || wcslen(descriptionPath) >= MAX_PATH || !outInput) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    wchar_t* text = mds_tools_dvd_text(descriptionPath); if (!text) return false;
+    MdsToolsInput* parsed = calloc(1,sizeof(*parsed)); DWORD error = ERROR_INVALID_DATA; uint64_t total = 0; bool ok = false;
+    if (!parsed) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
+    for (wchar_t* cursor = text; *cursor;) {
+        wchar_t* line = cursor; while (*cursor && *cursor != L'\r' && *cursor != L'\n') cursor++;
+        if (*cursor) { wchar_t ending = *cursor; *cursor++ = 0; if (ending == L'\r' && *cursor == L'\n') cursor++; }
+        line = mds_tools_trim(line); if (!*line) continue;
+        wchar_t path[MAX_PATH] = {0}; DWORD fileError = ERROR_INVALID_NAME; WIN32_FILE_ATTRIBUTE_DATA attributes; bool resolved = false;
+        /* 原版简单文件名按描述目录，带目录相对路径按当前目录；本批不猜后缀恢复。 */
+        if (wcschr(line,L'/') || (line[0] && line[1] == L':' && line[2] != L'\\')) fileError = ERROR_NOT_SUPPORTED;
+        else if (wcschr(line,L'\\') || wcschr(line,L':')) { DWORD length = GetFullPathNameW(line,MAX_PATH,path,NULL); resolved = length && length < MAX_PATH; }
+        else resolved = mds_resolve(descriptionPath,line,path);
+        if (resolved && GetFileAttributesExW(path,GetFileExInfoStandard,&attributes)) {
+            if (!(attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                uint64_t bytes = (uint64_t)attributes.nFileSizeHigh << 32 | attributes.nFileSizeLow;
+                if (!bytes || bytes % 2048) { error = ERROR_INVALID_DATA; goto done; }
+                if (parsed->fileCount == MAX_MDS_FILES || bytes / 2048 > (uint64_t)INT32_MAX - total) { error = ERROR_NOT_SUPPORTED; goto done; }
+                MdsDataFile* part = &parsed->files[parsed->fileCount++]; wcscpy(part->path,path); part->bytes = bytes; total += bytes / 2048; continue;
+            }
+            fileError = ERROR_INVALID_DATA;
+        } else if (resolved) fileError = GetLastError();
+        wchar_t* equals = wcschr(line,L'=');
+        if (!equals) { error = fileError; goto done; }
+        *equals++ = 0; wchar_t* key = mds_tools_trim(line); wchar_t* value = mds_tools_trim(equals);
+        if (CompareStringW(LOCALE_USER_DEFAULT,NORM_IGNORECASE,key,(int)wcslen(key),L"LayerBreak",10) == CSTR_EQUAL) mds_tools_layer_hint(value,&parsed->layerBreakLba);
+    }
+    if (!parsed->fileCount) goto done;
+    parsed->totalSectors = (uint32_t)total; *outInput = *parsed; ok = true; error = ERROR_SUCCESS;
+done:
+    free(parsed); free(text); SetLastError(error); return ok;
+}
+
 /* Tools直接描述逻辑文件列表；它与Read的虚拟布局及普通DVD刻录生成规则分别保留。 */
-bool imgburn_mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames) {
+static bool mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames, bool explicitLayerBreak) {
     if (!mdsFilePath || !mdsFilePath[0] || !dataFiles || !fileCount || fileCount > MAX_MDS_FILES || wcslen(mdsFilePath) >= MAX_PATH || !totalSectors || totalSectors > INT32_MAX || (unsigned)medium > MDS_TOOLS_DVD_PLUS_RW) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
     /* Tools显式层位置须在逻辑长度内并按16对齐；不套用新刻录DVD的容量或half限制。 */
-    if (layerBreakLba && (layerBreakLba >= totalSectors || layerBreakLba % 16)) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    if (layerBreakLba && (layerBreakLba >= totalSectors || (explicitLayerBreak && layerBreakLba % 16))) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
     if (!layerBreakLba) oppositeTrackPath = false;
     wchar_t source[MAX_PATH], destination[MAX_PATH], temporary[MAX_PATH];
     DWORD length = GetFullPathNameW(mdsFilePath,MAX_PATH,destination,NULL);
@@ -800,6 +896,28 @@ bool imgburn_mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* c
     if (ok && !MoveFileExW(temporary,destination,MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { error = GetLastError(); ok = false; }
     if (!ok && output != INVALID_HANDLE_VALUE) DeleteFileW(temporary);
     free(data); SetLastError(ok ? ERROR_SUCCESS : error); return ok;
+}
+
+bool imgburn_mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames) {
+    return mds_create_tools_files(mdsFilePath,dataFiles,fileCount,totalSectors,layerBreakLba,oppositeTrackPath,medium,preserveFullPathnames,true);
+}
+
+bool imgburn_mds_create_tools_input(const wchar_t* mdsFilePath, const MdsToolsInput* input, bool overrideLayerBreak, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames) {
+    if (!input || !input->fileCount || input->fileCount > MAX_MDS_FILES || !input->totalSectors || input->totalSectors > INT32_MAX) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    const wchar_t* paths[MAX_MDS_FILES]; uint64_t bytes = 0;
+    for (unsigned i = 0; i < input->fileCount; i++) {
+        const MdsDataFile* part = &input->files[i]; WIN32_FILE_ATTRIBUTE_DATA attributes;
+        if (!wmemchr(part->path,0,MAX_PATH) || !part->path[0] || !part->bytes || part->bytes % 2048) { SetLastError(ERROR_INVALID_DATA); return false; }
+        /* loader已经展开为绝对路径，避免手工输入在检查与输出时使用不同基目录。 */
+        if (!((part->path[0] == L'\\' && part->path[1] == L'\\') || (wcslen(part->path) > 2 && part->path[1] == L':' && (part->path[2] == L'\\' || part->path[2] == L'/')))) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+        if (!GetFileAttributesExW(part->path,GetFileExInfoStandard,&attributes)) return false;
+        uint64_t actual = (uint64_t)attributes.nFileSizeHigh << 32 | attributes.nFileSizeLow;
+        if ((attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || actual != part->bytes || bytes > UINT64_MAX - actual) { SetLastError(ERROR_INVALID_DATA); return false; }
+        paths[i] = part->path; bytes += actual;
+    }
+    if (bytes != (uint64_t)input->totalSectors * 2048) { SetLastError(ERROR_INVALID_DATA); return false; }
+    uint32_t chosen = overrideLayerBreak ? layerBreakLba : input->layerBreakLba;
+    return mds_create_tools_files(mdsFilePath,paths,input->fileCount,input->totalSectors,chosen,oppositeTrackPath,medium,preserveFullPathnames,overrideLayerBreak);
 }
 
 bool imgburn_mds_create_files_ex(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath) {

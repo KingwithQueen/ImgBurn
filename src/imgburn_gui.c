@@ -883,7 +883,7 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
             return 0;
         }
         switch (LOWORD(wp)) {
-            case UI_TOOL_ADD: { wchar_t path[MAX_PATH] = L""; if (gui_file(window, path, false, tool->operation == GUI_CREATE_CUE ? L"音频文件\0*.wav;*.mp3;*.flac;*.aiff;*.aif;*.ogg;*.ape;*.wv\0所有文件\0*.*\0\0" : L"镜像及分卷\0*.iso;*.bin;*.mdf;*.i00;*.i01;*.i02\0所有文件\0*.*\0\0", NULL) && gui_paths_add(&tool->sources, &tool->count, path)) gui_tool_fill(tool); break; }
+            case UI_TOOL_ADD: { wchar_t path[MAX_PATH] = L""; if (gui_file(window, path, false, tool->operation == GUI_CREATE_CUE ? L"音频文件\0*.wav;*.mp3;*.flac;*.aiff;*.aif;*.ogg;*.ape;*.wv\0所有文件\0*.*\0\0" : L"镜像、分卷及描述列表\0*.iso;*.bin;*.mdf;*.i00;*.i01;*.i02;*.dvd\0所有文件\0*.*\0\0", NULL) && gui_paths_add(&tool->sources, &tool->count, path)) gui_tool_fill(tool); break; }
             case UI_TOOL_REMOVE: { LRESULT at = SendMessageW(tool->list, LB_GETCURSEL, 0, 0); if (at >= 0 && (size_t)at < tool->count) { memmove(tool->sources + at, tool->sources + at + 1, (tool->count - (size_t)at - 1) * sizeof(*tool->sources)); tool->count--; gui_tool_fill(tool); } break; }
             case UI_TOOL_UP: case UI_TOOL_DOWN: { LRESULT at = SendMessageW(tool->list, LB_GETCURSEL, 0, 0), next = at + (LOWORD(wp) == UI_TOOL_UP ? -1 : 1); if (at >= 0 && next >= 0 && (size_t)next < tool->count) { GuiPath tmp = tool->sources[at]; tool->sources[at] = tool->sources[next]; tool->sources[next] = tmp; gui_tool_fill(tool); SendMessageW(tool->list, LB_SETCURSEL, next, 0); } break; }
             case UI_TOOL_LAYER: { bool checked = SendMessageW(tool->layer, BM_GETCHECK, 0, 0) == BST_CHECKED; EnableWindow(tool->lba, checked); EnableWindow(tool->otp, checked); EnableWindow(tool->ptp, checked); break; }
@@ -899,7 +899,7 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
                 }
                 if (!gui_file(window, output, true, cue ? L"CUE 文件\0*.cue\0\0" : L"MDS 文件\0*.mds\0\0", cue ? L"cue" : L"mds")) break;
                 GuiJob* job = gui_job(ui, tool->operation, tool->sources, tool->count); if (!job) break; wcscpy(job->destination, output);
-                if (!cue) { job->layerBreak = layerBreak; job->oppositeTrackPath = layerBreak && SendMessageW(tool->otp,BM_GETCHECK,0,0) == BST_CHECKED; job->mdsMedium = (MdsToolsMedium)medium; job->mdsPreservePaths = SendMessageW(tool->mdsPreservePaths,BM_GETCHECK,0,0) == BST_CHECKED; }
+                if (!cue) { job->layerBreak = layerBreak; job->mdsLayerBreakOverride = SendMessageW(tool->layer,BM_GETCHECK,0,0) == BST_CHECKED; job->oppositeTrackPath = SendMessageW(tool->otp,BM_GETCHECK,0,0) == BST_CHECKED; job->mdsMedium = (MdsToolsMedium)medium; job->mdsPreservePaths = SendMessageW(tool->mdsPreservePaths,BM_GETCHECK,0,0) == BST_CHECKED; }
                 if (gui_launch(ui, job)) for (HWND child = GetWindow(window,GW_CHILD); child; child = GetWindow(child,GW_HWNDNEXT)) if (GetDlgCtrlID(child) != UI_TOOL_CLOSE) EnableWindow(child,FALSE); break;
             }
             case UI_TOOL_CLOSE: SendMessageW(window, WM_CLOSE, 0, 0); break;

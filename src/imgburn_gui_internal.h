@@ -30,7 +30,7 @@ typedef struct {
     double discoverySpeedMultiplier;
     uint32_t layerBreak, writeLayerBreak;
     MdsToolsMedium mdsMedium;
-    bool mdsPreservePaths;
+    bool mdsPreservePaths, mdsLayerBreakOverride;
     uint32_t comparedSectors, readableOnlySectors, miscompares;
     bool succeeded, builderReady, mediaReady, writeMediaReady, eraseSupported;
     DWORD error;

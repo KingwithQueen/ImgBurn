@@ -196,6 +196,15 @@ typedef enum {
 } MdsToolsMedium;
 /* Tools的整扇区2048字节文件列表；默认相对名/基本名可同主干通配，保留完整路径时不通配。 */
 bool imgburn_mds_create_tools_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames);
+typedef struct {
+    MdsDataFile files[MAX_MDS_FILES];
+    unsigned fileCount;
+    uint32_t totalSectors, layerBreakLba;
+} MdsToolsInput;
+/* Tools的单独.DVD文本描述：仅整卷2048字节数据，不作为普通DataSource的新格式。 */
+bool imgburn_mds_load_tools_dvd(const wchar_t* descriptionPath, MdsToolsInput* outInput);
+/* 输入卷须为绝对路径；显式0清除继承值，仅显式非零值要求16对齐；继承值仍须小于N，OTP/PTP取本次选项。 */
+bool imgburn_mds_create_tools_input(const wchar_t* mdsPath, const MdsToolsInput* input, bool overrideLayerBreak, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames);
 /* Read 保存已由源盘 PFI 核对的布局，保留原层位置，不套用新刻录镜像的对齐与介质容量限制。 */
 bool imgburn_mds_create_dvd_read(const wchar_t* mdsPath, const wchar_t* dataFile, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath);
 bool imgburn_mds_create_dvd_read_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath);

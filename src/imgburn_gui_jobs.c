@@ -242,6 +242,22 @@ static bool job_cue(GuiJob* job) {
 
 static bool job_mds(GuiJob* job) {
     if (!job->sources || !job->sourceCount || job->sourceCount > MAX_MDS_FILES) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    bool description = false;
+    for (size_t i = 0; i < job->sourceCount; i++) {
+        const wchar_t* dot = wcsrchr(job->sources[i].path,L'.');
+        if (dot && !_wcsicmp(dot,L".dvd")) description = true;
+    }
+    if (description) {
+        if (job->sourceCount != 1) { SetLastError(ERROR_NOT_SUPPORTED); job_text(job,L"请单独选择一个 .dvd 描述文件。\r\n"); return false; }
+        if (job_cancelled(job)) { SetLastError(ERROR_CANCELLED); return false; }
+        MdsToolsInput* input = calloc(1,sizeof(*input)); if (!input) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; }
+        bool ok = imgburn_mds_load_tools_dvd(job->sources[0].path,input);
+        if (ok && job_cancelled(job)) { SetLastError(ERROR_CANCELLED); ok = false; }
+        if (ok) ok = imgburn_mds_create_tools_input(job->destination,input,job->mdsLayerBreakOverride,job->layerBreak,job->oppositeTrackPath,job->mdsMedium,job->mdsPreservePaths);
+        DWORD error = GetLastError();
+        if (ok) job_text(job,L"MDS 已生成：%ls\r\n扇区：%u，分卷：%u\r\n",job->destination,input->totalSectors,input->fileCount);
+        free(input); SetLastError(error); return ok;
+    }
     const wchar_t** paths = (const wchar_t**)calloc(job->sourceCount, sizeof(*paths)); if (!paths) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; } uint64_t bytes = 0; bool ok = true;
     for (size_t i = 0; i < job->sourceCount; i++) {
         if (job_cancelled(job)) { SetLastError(ERROR_CANCELLED); ok = false; break; }
