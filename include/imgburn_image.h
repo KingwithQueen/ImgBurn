@@ -205,6 +205,8 @@ typedef struct {
 } MdsToolsInput;
 /* Tools单独.DVD描述及原版单文件门槛下的同目录后缀恢复；仅整卷2048数据，不扩普通DataSource格式。 */
 bool imgburn_mds_load_tools_dvd(const wchar_t* descriptionPath, MdsToolsInput* outInput);
+/* LST首行IMAGELIST，整卷列表及单项描述同主干恢复；未识别返回BAD_FORMAT供Tools回raw，hint为0。 */
+bool imgburn_mds_load_tools_lst(const wchar_t* descriptionPath, MdsToolsInput* outInput);
 /* 输入卷须为绝对路径；显式0清除继承值，仅显式非零值要求16对齐；继承值仍须小于N，OTP/PTP取本次选项。 */
 bool imgburn_mds_create_tools_input(const wchar_t* mdsPath, const MdsToolsInput* input, bool overrideLayerBreak, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames);
 bool imgburn_mds_create_tools_input_ex(const wchar_t* mdsPath, const MdsToolsInput* input, bool overrideLayerBreak, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames, bool ansiFilenames);
