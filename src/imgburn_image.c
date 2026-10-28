@@ -416,7 +416,7 @@ static bool mds_resolve(const wchar_t* descriptor, const wchar_t* name, wchar_t*
     return length && length < MAX_PATH;
 }
 
-static bool mds_filename(const uint8_t* data, uint64_t size, uint32_t footer, const wchar_t* descriptor, MdsDataFile* result) {
+static bool mds_filename(const uint8_t* data, uint64_t size, uint32_t footer, const wchar_t* descriptor, MdsDataFile* result, bool sourceLayout) {
     if (!mds_range(size, footer, 16)) return false;
     uint32_t offset = cue_le32(data + footer), wide = cue_le32(data + footer + 4);
     if (wide > 1 || !mds_range(size, offset, wide ? 2 : 1)) return false;
@@ -431,10 +431,17 @@ static bool mds_filename(const uint8_t* data, uint64_t size, uint32_t footer, co
         while (offset + count < size && data[offset + count] && count < MAX_PATH * 3) count++;
         if (offset + count >= size || count >= MAX_PATH * 3 || !MultiByteToWideChar(CP_ACP, 0, (const char*)data + offset, (int)count + 1, name, MAX_PATH)) return false;
     }
-    if (name[0] == '*' && name[1] == '.') {
+    if (name[0] == '*' && (name[1] == '.' || (sourceLayout && !name[1]))) {
         if (wcslen(name) >= 16 || wcschr(name + 1, L'*') || wcschr(name, L'\\') || wcschr(name, L'/')) return false;
         wchar_t local[MAX_PATH]; if (wcslen(descriptor) >= MAX_PATH) return false; wcscpy(local, descriptor);
-        wchar_t* dot = wcsrchr(local, L'.'); if (!dot || (size_t)(dot - local) + wcslen(name + 1) >= MAX_PATH) return false; wcscpy(dot, name + 1);
+        wchar_t* dot = wcsrchr(local, L'.');
+        /* 来源裸*替换描述文件的基本名主干；父目录中的点不是扩展名。 */
+        if (sourceLayout) {
+            wchar_t* basename = local;
+            for (wchar_t* p = local; *p; p++) if (*p == L'\\' || *p == L'/') basename = p + 1;
+            dot = wcsrchr(basename,L'.'); if (!dot) dot = local + wcslen(local);
+        }
+        if (!dot || (size_t)(dot - local) + wcslen(name + 1) >= MAX_PATH) return false; wcscpy(dot, name + 1);
         DWORD length = GetFullPathNameW(local, MAX_PATH, result->path, NULL); if (!length || length >= MAX_PATH) return false;
     } else if (!mds_resolve(descriptor, name, result->path)) return false;
     WIN32_FILE_ATTRIBUTE_DATA attributes;
@@ -504,7 +511,7 @@ static bool mds_parse(const wchar_t* mdsFilePath, MdsSheet* outMds, bool sourceL
             uint64_t available = 0;
             for (uint32_t f = 0; f < track.fileCount; f++) {
                 MdsDataFile* part = &result->files[result->dataFileCount++];
-                if (!mds_filename(data, size, track.footerOffset + f * 16, mdsFilePath, part)) goto done;
+                if (!mds_filename(data, size, track.footerOffset + f * 16, mdsFilePath, part, sourceLayout)) goto done;
                 uint64_t skipped = f ? 0 : track.startByteOffset;
                 if (skipped > part->bytes || available > UINT64_MAX - (part->bytes - skipped)) goto done;
                 available += part->bytes - skipped;
@@ -527,8 +534,8 @@ static bool mds_parse(const wchar_t* mdsFilePath, MdsSheet* outMds, bool sourceL
             if (!mds_range(size, header->discStructuresOffset, 8200)) goto done;
             uint32_t start = mds_be32(pfi + 4) & 0xFFFFFF, end = mds_be32(pfi + (result->oppositeTrackPath ? 12 : 8)) & 0xFFFFFF;
             if (start != 0x30000) goto done;
-            /* 来源OTP复刻原版DWORD提示：零末地址不赋值，下溢不恢复物理层位置。 */
-            if (sourceLayout && result->oppositeTrackPath) result->layerBreakLba = end ? end - start + 1 : 0;
+            /* 来源OTP/PTP复刻原版DWORD提示：零末地址不赋值，下溢不恢复物理层位置。 */
+            if (sourceLayout) result->layerBreakLba = end ? end - start + 1 : 0;
             else {
                 if (end < start) goto done;
                 result->layerBreakLba = end - start + 1;
@@ -536,9 +543,14 @@ static bool mds_parse(const wchar_t* mdsFilePath, MdsSheet* outMds, bool sourceL
             }
             if (result->oppositeTrackPath) { if (!sourceLayout && result->layerBreakLba < ((uint64_t)result->totalSectors + 1) / 2) goto done; }
             else {
-                /* PTP每层均从内圈开始，L0长度来自第一层的数据区末尾。 */
+                /* PTP每层均从内圈开始；来源只核低24位投影，不反推被省略的高位。 */
                 const uint8_t* second = pfi + 4100; uint32_t secondStart = mds_be32(second + 4) & 0xFFFFFF, secondEnd = mds_be32(second + 8) & 0xFFFFFF;
-                if ((second[2] & 0x70) != 0x20 || secondStart != 0x30000 || secondEnd < secondStart || (uint64_t)result->layerBreakLba + secondEnd - secondStart + 1 != result->totalSectors) goto done;
+                if ((second[2] & 0x70) != 0x20 || secondStart != 0x30000) goto done;
+                if (sourceLayout) {
+                    /* 端点0的公开提示仍为0，校验跨度则独立保留其模24结果。 */
+                    uint32_t firstSpan = (end - start + 1) & 0xFFFFFF, secondSpan = (secondEnd - secondStart + 1) & 0xFFFFFF;
+                    if (((firstSpan + secondSpan) & 0xFFFFFF) != (result->totalSectors & 0xFFFFFF)) goto done;
+                } else if (secondEnd < secondStart || (uint64_t)result->layerBreakLba + secondEnd - secondStart + 1 != result->totalSectors) goto done;
             }
         }
     }

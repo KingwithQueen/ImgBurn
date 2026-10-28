@@ -175,7 +175,7 @@ typedef struct {
     wchar_t dataFilePath[MAX_PATH]; /* Path to .mdf or .iso */
     uint16_t mediumType;
     uint32_t totalSectors;
-    uint32_t layerBreakLba;  /* 来源PFI的L0提示；source解析允许其超出逻辑N，不代表目标层资格。 */
+    uint32_t layerBreakLba;  /* 来源PFI的DWORD提示；可为0或超出逻辑N，不恢复回绕高位或代表目标层资格。 */
     unsigned layerCount;
     bool oppositeTrackPath; /* 两层PTP允许L1大于L0；不可据此直接按OTP刻录。 */
     int trackCount;
@@ -307,7 +307,7 @@ bool imgburn_cue_parse_ex(const wchar_t* cueFilePath, CueSheet* outCue, CueSourc
  */
 /* 严格解析保留既有DVD层布局接受域。 */
 bool imgburn_mds_parse(const wchar_t *mdsFilePath, MdsSheet *outMds);
-/* 来源另接受Tools已证DVD-RW/+R/+RW类型；OTP保留原版DWORD提示（端点0保持0），不套half；严格/PTP/文件范围不放宽。 */
+/* 来源另接受Tools三类型别名和裸*；OTP/PTP保留原版DWORD提示（端点0保持0），PTP按模24核总长；严格解析及文件范围保持。 */
 bool imgburn_mds_parse_source(const wchar_t *mdsFilePath, MdsSheet *outMds);
 
 /**
