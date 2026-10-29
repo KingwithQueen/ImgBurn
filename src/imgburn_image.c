@@ -996,11 +996,12 @@ static bool mds_tools_candidate(HANDLE file, uint64_t bytes, uint32_t sample, ui
     return true;
 }
 
-/* 后移样本之前须检查当前样本的全部先行候选，余数候选即使等于头偏移也不去重。 */
+/* 完整搜索依次检查16..79及单独0号样本；余数候选即使等于头偏移也不去重。 */
 static bool mds_tools_qualify_headed(HANDLE file, uint64_t bytes, uint64_t physicalTotal, uint32_t offset, bool scanLateSamples, bool* noMarker) {
     static const uint16_t sizes[] = {2048,2054,2064,2332,2336,2352,2448};
     if (noMarker) *noMarker = false;
-    for (uint32_t sample = 16; sample < (scanLateSamples ? 80u : 17u); sample++) {
+    for (uint32_t index = 0; index < (scanLateSamples ? 65u : 1u); index++) {
+        uint32_t sample = index < 64 ? index + 16 : 0;
         for (unsigned pregap = 0; pregap < (scanLateSamples ? 2u : 1u); pregap++) {
             for (unsigned kind = 0; kind < (scanLateSamples ? 3u : 2u); kind++) {
                 unsigned count = !scanLateSamples && kind == 1 ? 1 : ARRAYSIZE(sizes);
