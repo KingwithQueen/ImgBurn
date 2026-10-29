@@ -1030,6 +1030,7 @@ static bool mds_tools_headed_file(HANDLE file, const wchar_t* path, uint64_t byt
     DWORD length = GetFullPathNameW(path,MAX_PATH,input->files[0].path,NULL);
     if (!length || length >= MAX_PATH) { SetLastError(ERROR_INVALID_NAME); return false; }
     input->files[0].bytes = bytes; input->fileCount = 1; input->totalSectors = (uint32_t)sectors; input->startByteOffset = offset;
+    input->splitSectors = splitSectors;
     SetLastError(ERROR_SUCCESS); return true;
 }
 
@@ -1056,7 +1057,7 @@ bool imgburn_mds_load_tools_gi(const wchar_t* descriptionPath, MdsToolsInput* ou
     position = raw[0x28] + 0x28; if (position + 4 > bytes) position = 0x62;
     if (cue_le32(raw + position) == 0x22222222) {
         parsed = calloc(1,sizeof(*parsed)); if (!parsed) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
-        ok = mds_tools_headed_file(file,descriptionPath,(uint64_t)size.QuadPart,0x9C,false,true,NULL,parsed);
+        ok = mds_tools_headed_file(file,descriptionPath,(uint64_t)size.QuadPart,0x9C,true,true,NULL,parsed);
         error = GetLastError(); if (ok) *outInput = *parsed; goto done;
     }
     if (cue_le32(raw + position) != 0x88888888) { error = ERROR_NOT_SUPPORTED; goto done; }
