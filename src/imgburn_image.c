@@ -1072,10 +1072,22 @@ bool imgburn_mds_load_tools_pdi(const wchar_t* descriptionPath, MdsToolsInput* o
     if (got != sizeof(header)) { error = ERROR_READ_FAULT; goto done; }
     unsigned count = (unsigned)header[16] | (unsigned)header[17] << 8;
     if (!count) goto done;
-    if (count != 1) { error = ERROR_NOT_SUPPORTED; goto done; }
+    if (count > MAX_MDS_FILES) { error = ERROR_NOT_SUPPORTED; goto done; }
     parsed = calloc(1,sizeof(*parsed)); if (!parsed) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
-    ok = mds_tools_headed_file(file,descriptionPath,(uint64_t)size.QuadPart,0x130,parsed);
-    error = GetLastError(); if (ok) *outInput = *parsed;
+    if (!mds_tools_headed_file(file,descriptionPath,(uint64_t)size.QuadPart,0x130,parsed)) { error = GetLastError(); goto done; }
+    for (unsigned i = 1; i < count; i++) {
+        wchar_t path[MAX_PATH]; WIN32_FILE_ATTRIBUTE_DATA attributes = {0};
+        /* 原版在完整扩展名后直接附至少两位序号；后卷没有新的304字节偏移。 */
+        if (swprintf(path,MAX_PATH,L"%ls%02u",parsed->files[0].path,i) < 0) { error = ERROR_INVALID_NAME; goto done; }
+        if (!GetFileAttributesExW(path,GetFileExInfoStandard,&attributes)) { error = GetLastError(); goto done; }
+        uint64_t bytes = (uint64_t)attributes.nFileSizeHigh << 32 | attributes.nFileSizeLow;
+        if ((attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !bytes) { error = ERROR_INVALID_DATA; goto done; }
+        /* 非整卷需要原版的carry/flags；本入口只接可直接连续读取的零carry子集。 */
+        if (bytes % 2048 || bytes / 2048 > (uint64_t)INT32_MAX - parsed->totalSectors) { error = ERROR_NOT_SUPPORTED; goto done; }
+        MdsDataFile* part = &parsed->files[parsed->fileCount++]; wcscpy(part->path,path); part->bytes = bytes;
+        parsed->totalSectors += (uint32_t)(bytes / 2048);
+    }
+    *outInput = *parsed; error = ERROR_SUCCESS; ok = true;
 done:
     CloseHandle(file); free(parsed); SetLastError(error); return ok;
 }
@@ -1083,7 +1095,6 @@ done:
 /* Tools直接描述逻辑文件列表；它与Read的虚拟布局及普通DVD刻录生成规则分别保留。 */
 static bool mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames, bool explicitLayerBreak, bool ansiFilenames, uint64_t startByteOffset) {
     if (!mdsFilePath || !mdsFilePath[0] || !dataFiles || !fileCount || fileCount > MAX_MDS_FILES || wcslen(mdsFilePath) >= MAX_PATH || !totalSectors || totalSectors > INT32_MAX || (unsigned)medium > MDS_TOOLS_DVD_PLUS_RW) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
-    if (startByteOffset && fileCount != 1) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
     /* Tools显式层位置须在逻辑长度内并按16对齐；不套用新刻录DVD的容量或half限制。 */
     if (layerBreakLba && (layerBreakLba >= totalSectors || (explicitLayerBreak && layerBreakLba % 16))) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
     if (!layerBreakLba) oppositeTrackPath = false;
@@ -1193,7 +1204,6 @@ bool imgburn_mds_create_tools_input(const wchar_t* mdsFilePath, const MdsToolsIn
 
 bool imgburn_mds_create_tools_input_ex(const wchar_t* mdsFilePath, const MdsToolsInput* input, bool overrideLayerBreak, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames, bool ansiFilenames) {
     if (!input || !input->fileCount || input->fileCount > MAX_MDS_FILES || !input->totalSectors || input->totalSectors > INT32_MAX) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
-    if (input->startByteOffset && input->fileCount != 1) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
     const wchar_t* paths[MAX_MDS_FILES]; uint64_t bytes = 0;
     for (unsigned i = 0; i < input->fileCount; i++) {
         const MdsDataFile* part = &input->files[i]; WIN32_FILE_ATTRIBUTE_DATA attributes;
