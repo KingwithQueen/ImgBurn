@@ -1025,7 +1025,7 @@ static bool mds_tools_headed_file(HANDLE file, const wchar_t* path, uint64_t byt
     if (noMarker) *noMarker = false;
     if (bytes <= offset || (!splitSectors && (bytes - offset) % 2048)) { SetLastError(ERROR_INVALID_DATA); return false; }
     uint64_t sectors = (bytes - offset) / 2048;
-    if (sectors > INT32_MAX || sectors < 17) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+    if (sectors > INT32_MAX || !sectors) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
     if (!mds_tools_qualify_headed(file,bytes,bytes,offset,scanLateSamples,noMarker)) return false;
     DWORD length = GetFullPathNameW(path,MAX_PATH,input->files[0].path,NULL);
     if (!length || length >= MAX_PATH) { SetLastError(ERROR_INVALID_NAME); return false; }
