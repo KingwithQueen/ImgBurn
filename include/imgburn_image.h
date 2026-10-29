@@ -209,9 +209,9 @@ typedef struct {
 bool imgburn_mds_load_tools_dvd(const wchar_t* descriptionPath, MdsToolsInput* outInput);
 /* LST首行IMAGELIST，整卷列表及单项描述同主干恢复；未识别返回BAD_FORMAT供Tools回raw，hint为0。 */
 bool imgburn_mds_load_tools_lst(const wchar_t* descriptionPath, MdsToolsInput* outInput);
-/* GI外置列表或受检的单卷带头2048数据；未识别返回BAD_FORMAT。 */
+/* GI外置列表或按原候选顺序扫描16..79样本的单卷带头2048数据；未识别返回BAD_FORMAT。 */
 bool imgburn_mds_load_tools_gi(const wchar_t* descriptionPath, MdsToolsInput* outInput);
-/* PDI首卷须独立容纳受检标记，后卷按同名附序号跨卷补齐；后卷不得短于前卷carry。 */
+/* PDI多卷第16样本未命中时，求全卷物理长度后扫描首卷16..79；冲突/读错不重试，后卷按序补齐。 */
 bool imgburn_mds_load_tools_pdi(const wchar_t* descriptionPath, MdsToolsInput* outInput);
 /* 输入卷须为绝对路径；显式0清除继承值，仅显式非零值要求16对齐；继承值仍须小于N，OTP/PTP取本次选项。 */
 bool imgburn_mds_create_tools_input(const wchar_t* mdsPath, const MdsToolsInput* input, bool overrideLayerBreak, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames);

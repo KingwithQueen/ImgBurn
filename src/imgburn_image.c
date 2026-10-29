@@ -965,7 +965,7 @@ done:
     free(parsed); free(text); SetLastError(error); return ok;
 }
 
-/* 原版18种卷标记仅用于排除先行候选；本批带头输入只接已确认的CD001/2048偏移。 */
+/* 原版18种卷标记共用于候选排歧和2048字节数据起点识别，不代表文件系统合规。 */
 static bool mds_tools_volume_marker(const uint8_t* sector) {
     static const struct { const char* text; uint8_t offset, bytes; } markers[] = {
         {"BEA01",1,5},{"BOOT2",1,5},{"CD001",1,5},{"CDW02",1,5},{"CD-I",1,4},
@@ -984,21 +984,48 @@ static bool mds_tools_read_at(HANDLE file, uint64_t offset, void* data, DWORD by
     return true;
 }
 
-/* 首卷须独立容纳完整标记扇区；PDI允许标记之后出现非整分卷边界。 */
-static bool mds_tools_headed_file(HANDLE file, const wchar_t* path, uint64_t bytes, uint32_t offset, bool splitSectors, MdsToolsInput* input) {
-    if (bytes <= offset || (!splitSectors && (bytes - offset) % 2048)) { SetLastError(ERROR_INVALID_DATA); return false; }
-    uint64_t sectors = (bytes - offset) / 2048;
-    if (sectors > INT32_MAX || sectors < 17) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+/* 不完整的物理样本不读取；原始扇区窗口沿既有保守排歧规则检查。 */
+static bool mds_tools_candidate(HANDLE file, uint64_t bytes, uint32_t sample, uint32_t offset, unsigned geometry, bool* matched) {
     static const uint16_t sizes[] = {2048,2054,2064,2332,2336,2352,2448};
     static const uint8_t windows[][3] = {{0,0,0},{6,0,0},{12,0,0},{0,8,0},{0,8,0},{0,16,24},{0,16,24}};
     static const uint8_t counts[] = {1,1,1,2,2,3,3}; uint8_t sector[2448] = {0};
-    for (unsigned i = 0; i < ARRAYSIZE(sizes); i++) {
-        uint64_t start = (uint64_t)16 * sizes[i]; if (start + sizes[i] > bytes) continue;
-        if (!mds_tools_read_at(file,start,sector,sizes[i])) return false;
-        for (unsigned j = 0; j < counts[i]; j++) if (mds_tools_volume_marker(sector + windows[i][j])) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+    uint64_t start = (uint64_t)sample * sizes[geometry] + offset; *matched = false;
+    if (start + sizes[geometry] > bytes) return true;
+    if (!mds_tools_read_at(file,start,sector,sizes[geometry])) return false;
+    for (unsigned j = 0; j < counts[geometry]; j++) if (mds_tools_volume_marker(sector + windows[geometry][j])) { *matched = true; break; }
+    return true;
+}
+
+/* 后移样本之前须检查当前样本的全部先行候选，余数候选即使等于头偏移也不去重。 */
+static bool mds_tools_qualify_headed(HANDLE file, uint64_t bytes, uint64_t physicalTotal, uint32_t offset, bool scanLateSamples, bool* noMarker) {
+    static const uint16_t sizes[] = {2048,2054,2064,2332,2336,2352,2448};
+    if (noMarker) *noMarker = false;
+    for (uint32_t sample = 16; sample < (scanLateSamples ? 80u : 17u); sample++) {
+        for (unsigned pregap = 0; pregap < (scanLateSamples ? 2u : 1u); pregap++) {
+            for (unsigned kind = 0; kind < (scanLateSamples ? 3u : 2u); kind++) {
+                unsigned count = !scanLateSamples && kind == 1 ? 1 : ARRAYSIZE(sizes);
+                for (unsigned i = 0; i < count; i++) {
+                    uint32_t base = kind == 0 ? 0 : kind == 1 ? offset : (uint32_t)(physicalTotal % sizes[i]); bool matched;
+                    if (kind == 2 && !base) continue;
+                    if (!mds_tools_candidate(file,bytes,sample + (pregap ? 150 : 0),base,i,&matched)) return false;
+                    if (!matched) continue;
+                    if (!pregap && kind == 1 && !i) return true;
+                    SetLastError(ERROR_NOT_SUPPORTED); return false;
+                }
+            }
+        }
     }
-    if (!mds_tools_read_at(file,(uint64_t)offset + 16 * 2048,sector,2048)) return false;
-    if (memcmp(sector + 1,"CD001",5)) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+    if (noMarker) *noMarker = true;
+    SetLastError(ERROR_NOT_SUPPORTED); return false;
+}
+
+/* 多卷先用旧第16样本门槛；只有显式未命中才允许查询后卷并求总物理长度。 */
+static bool mds_tools_headed_file(HANDLE file, const wchar_t* path, uint64_t bytes, uint32_t offset, bool splitSectors, bool scanLateSamples, bool* noMarker, MdsToolsInput* input) {
+    if (noMarker) *noMarker = false;
+    if (bytes <= offset || (!splitSectors && (bytes - offset) % 2048)) { SetLastError(ERROR_INVALID_DATA); return false; }
+    uint64_t sectors = (bytes - offset) / 2048;
+    if (sectors > INT32_MAX || sectors < 17) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+    if (!mds_tools_qualify_headed(file,bytes,bytes,offset,scanLateSamples,noMarker)) return false;
     DWORD length = GetFullPathNameW(path,MAX_PATH,input->files[0].path,NULL);
     if (!length || length >= MAX_PATH) { SetLastError(ERROR_INVALID_NAME); return false; }
     input->files[0].bytes = bytes; input->fileCount = 1; input->totalSectors = (uint32_t)sectors; input->startByteOffset = offset;
@@ -1028,7 +1055,7 @@ bool imgburn_mds_load_tools_gi(const wchar_t* descriptionPath, MdsToolsInput* ou
     position = raw[0x28] + 0x28; if (position + 4 > bytes) position = 0x62;
     if (cue_le32(raw + position) == 0x22222222) {
         parsed = calloc(1,sizeof(*parsed)); if (!parsed) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
-        ok = mds_tools_headed_file(file,descriptionPath,(uint64_t)size.QuadPart,0x9C,false,parsed);
+        ok = mds_tools_headed_file(file,descriptionPath,(uint64_t)size.QuadPart,0x9C,false,true,NULL,parsed);
         error = GetLastError(); if (ok) *outInput = *parsed; goto done;
     }
     if (cue_le32(raw + position) != 0x88888888) { error = ERROR_NOT_SUPPORTED; goto done; }
@@ -1095,7 +1122,13 @@ bool imgburn_mds_load_tools_pdi(const wchar_t* descriptionPath, MdsToolsInput* o
     if (!count) goto done;
     if (count > MAX_MDS_FILES) { error = ERROR_NOT_SUPPORTED; goto done; }
     parsed = calloc(1,sizeof(*parsed)); if (!parsed) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
-    if (!mds_tools_headed_file(file,descriptionPath,(uint64_t)size.QuadPart,0x130,true,parsed)) { error = GetLastError(); goto done; }
+    bool rescan = false; uint64_t physicalTotal = (uint64_t)size.QuadPart;
+    if (!mds_tools_headed_file(file,descriptionPath,physicalTotal,0x130,true,count == 1,count > 1 ? &rescan : NULL,parsed)) {
+        if (!rescan) { error = GetLastError(); goto done; }
+        DWORD length = GetFullPathNameW(descriptionPath,MAX_PATH,parsed->files[0].path,NULL);
+        if (!length || length >= MAX_PATH) { error = ERROR_INVALID_NAME; goto done; }
+        parsed->files[0].bytes = physicalTotal; parsed->fileCount = 1; parsed->startByteOffset = 0x130;
+    }
     uint32_t sectors, carry;
     if (!mds_part_geometry(parsed->files[0].bytes,parsed->startByteOffset,0,count == 1,true,&sectors,&carry)) { error = GetLastError(); goto done; }
     parsed->totalSectors = sectors; parsed->splitSectors = true;
@@ -1108,9 +1141,13 @@ bool imgburn_mds_load_tools_pdi(const wchar_t* descriptionPath, MdsToolsInput* o
         if ((attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !bytes) { error = ERROR_INVALID_DATA; goto done; }
         if (!mds_part_geometry(bytes,0,carry,i + 1 == count,true,&sectors,&carry)) { error = GetLastError(); goto done; }
         if (sectors > (uint32_t)INT32_MAX - parsed->totalSectors) { error = ERROR_NOT_SUPPORTED; goto done; }
+        if (physicalTotal > UINT64_MAX - bytes) { error = ERROR_NOT_SUPPORTED; goto done; }
+        physicalTotal += bytes;
         MdsDataFile* part = &parsed->files[parsed->fileCount++]; wcscpy(part->path,path); part->bytes = bytes;
         parsed->totalSectors += sectors;
     }
+    /* 重扫仍只读首卷完整样本；余数使用全卷物理长度，保留末卷被截去的尾部。 */
+    if (rescan && !mds_tools_qualify_headed(file,parsed->files[0].bytes,physicalTotal,0x130,true,NULL)) { error = GetLastError(); goto done; }
     *outInput = *parsed; error = ERROR_SUCCESS; ok = true;
 done:
     CloseHandle(file); free(parsed); SetLastError(error); return ok;
