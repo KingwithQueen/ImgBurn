@@ -242,18 +242,18 @@ static bool job_cue(GuiJob* job) {
 
 static bool job_mds(GuiJob* job) {
     if (!job->sources || !job->sourceCount || job->sourceCount > MAX_MDS_FILES) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
-    const wchar_t* firstDot = wcsrchr(job->sources[0].path,L'.'); bool list = firstDot && !_wcsicmp(firstDot,L".lst"), gi = firstDot && !_wcsicmp(firstDot,L".gi"), description = false;
+    const wchar_t* firstDot = wcsrchr(job->sources[0].path,L'.'); bool list = firstDot && !_wcsicmp(firstDot,L".lst"), gi = firstDot && !_wcsicmp(firstDot,L".gi"), pdi = firstDot && !_wcsicmp(firstDot,L".pdi"), description = false;
     for (size_t i = 0; i < job->sourceCount; i++) {
         const wchar_t* dot = wcsrchr(job->sources[i].path,L'.');
         if (dot && !_wcsicmp(dot,L".dvd")) description = true;
     }
-    if (description || list || gi) {
-        if (!list && !gi && job->sourceCount != 1) { SetLastError(ERROR_NOT_SUPPORTED); job_text(job,L"请单独选择一个 .dvd 描述文件。\r\n"); return false; }
+    if (description || list || gi || pdi) {
+        if (!list && !gi && !pdi && job->sourceCount != 1) { SetLastError(ERROR_NOT_SUPPORTED); job_text(job,L"请单独选择一个 .dvd 描述文件。\r\n"); return false; }
         if (job_cancelled(job)) { SetLastError(ERROR_CANCELLED); return false; }
         MdsToolsInput* input = calloc(1,sizeof(*input)); if (!input) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; }
-        bool ok = list ? imgburn_mds_load_tools_lst(job->sources[0].path,input) : gi ? imgburn_mds_load_tools_gi(job->sources[0].path,input) : imgburn_mds_load_tools_dvd(job->sources[0].path,input);
+        bool ok = list ? imgburn_mds_load_tools_lst(job->sources[0].path,input) : gi ? imgburn_mds_load_tools_gi(job->sources[0].path,input) : pdi ? imgburn_mds_load_tools_pdi(job->sources[0].path,input) : imgburn_mds_load_tools_dvd(job->sources[0].path,input);
         DWORD loadError = GetLastError();
-        if (!ok && (list || gi) && loadError == ERROR_BAD_FORMAT) { free(input); goto raw_files; }
+        if (!ok && (list || gi || pdi) && loadError == ERROR_BAD_FORMAT) { free(input); goto raw_files; }
         if (ok && job_cancelled(job)) { SetLastError(ERROR_CANCELLED); ok = false; }
         if (ok) ok = imgburn_mds_create_tools_input_ex(job->destination,input,job->mdsLayerBreakOverride,job->layerBreak,job->oppositeTrackPath,job->mdsMedium,job->mdsPreservePaths,job->mdsAnsiFilenames);
         DWORD error = GetLastError();
