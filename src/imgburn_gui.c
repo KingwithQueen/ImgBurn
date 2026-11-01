@@ -1,5 +1,6 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "imgburn_gui.h"
+#include "imgburn_audio.h"
 #include "imgburn_gui_internal.h"
 #include "imgburn_gui_assets.h"
 #include "imgburn_gui_sector.h"
@@ -43,7 +44,15 @@ enum {
     UI_READ_FREE_SPACE, UI_READ_ADD_QUEUE, UI_READ_BATCH, UI_READ_OPTIONS, UI_READ_DEST_LABEL, UI_READ_EDIT_OK, UI_READ_EDIT_CANCEL,
     UI_TOOL_MEDIA = 1500, UI_TOOL_PRESERVE,
     UI_MDS_ADD = 1600, UI_MDS_REMOVE, UI_MDS_CLEAR, UI_MDS_TOP, UI_MDS_UP, UI_MDS_DOWN, UI_MDS_BOTTOM,
-    UI_MDS_QUICK, UI_MDS_QUEUE, UI_MDS_MEDIA_TITLE, UI_MDS_SEPARATOR
+    UI_MDS_QUICK, UI_MDS_QUEUE, UI_MDS_MEDIA_TITLE, UI_MDS_SEPARATOR,
+    UI_CUE_ADD = 1700, UI_CUE_REMOVE, UI_CUE_CLEAR, UI_CUE_TOP, UI_CUE_UP, UI_CUE_DOWN, UI_CUE_BOTTOM,
+    UI_CUE_LAYOUT, UI_CUE_OPTIONS, UI_CUE_DEFAULT_TEXT, UI_CUE_SEPARATOR, UI_CUE_STATUS,
+    UI_CUE_SORT_TAGS, UI_CUE_ADD_SESSION, UI_CUE_USAGE, UI_CUE_USAGE_TEXT, UI_CUE_ACCURATE,
+    UI_CUE_PRESERVE, UI_CUE_QUEUE, UI_CUE_QUICK, UI_CUE_LISTING, UI_CUE_GAP_LABEL, UI_CUE_GAP_ZERO,
+    UI_CUE_GAP_TWO, UI_CUE_GAP_CUSTOM, UI_CUE_GAP_VALUE, UI_CUE_GAP_UNITS, UI_CUE_OPTIONS_SEPARATOR,
+    UI_CUE_TEXT_LABEL, UI_CUE_TEXT_NONE, UI_CUE_TEXT_FILENAME, UI_CUE_TEXT_TAG, UI_CUE_TEXT_CUSTOM,
+    UI_CUE_TEXT_REFRESH, UI_CUE_PERFORMER_LABEL, UI_CUE_PERFORMER, UI_CUE_TITLE_LABEL, UI_CUE_TITLE,
+    UI_CUE_DEFAULT_SEPARATOR, UI_CUE_DISC_TEXT, UI_CUE_TRACK_TEXT, UI_CUE_FILTERS, UI_CUE_EXPAND, UI_CUE_COLLAPSE
 };
 enum { GUI_MAIN_CONTENT_WIDTH = 665, GUI_MAIN_CONTENT_HEIGHT = 385, GUI_LOG_CLIENT_WIDTH = 633, GUI_LOG_CLIENT_HEIGHT = 180 };
 
@@ -58,7 +67,7 @@ typedef struct {
     HWND cdAllowBlank, cdFinalize, cdPlanButton, cdSelect, cdWrite;
     bool cdClosing, bdReLoaded, bdReClosing;
     HWND bdReFormats, bdReCertification, bdWriteType, bdVnrOff;
-    HWND mdsMedia, mdsPreservePaths, mdsTips;
+    HWND mdsMedia, mdsPreservePaths, listTips;
     MmcFormatCapacities bdReCapacities;
     wchar_t bdReDrive[MAX_PATH];
 } GuiTool;
@@ -149,6 +158,13 @@ static GuiAssetId gui_control_asset(UINT id) {
         case UI_MDS_UP: return ASSET_MDS_UP;
         case UI_MDS_DOWN: return ASSET_MDS_DOWN;
         case UI_MDS_BOTTOM: return ASSET_MDS_BOTTOM;
+        case UI_CUE_ADD: return ASSET_CUE_ADD;
+        case UI_CUE_REMOVE: return ASSET_CUE_REMOVE;
+        case UI_CUE_CLEAR: return ASSET_CUE_REMOVE_ALL;
+        case UI_CUE_TOP: return ASSET_CUE_TOP;
+        case UI_CUE_UP: return ASSET_CUE_UP;
+        case UI_CUE_DOWN: return ASSET_CUE_DOWN;
+        case UI_CUE_BOTTOM: return ASSET_CUE_BOTTOM;
         case UI_SOURCE_FILE: case UI_DESTINATION: return ASSET_BROWSE;
         case UI_SOURCE_FOLDER: return ASSET_FOLDER; case UI_REMOVE_SOURCE: return ASSET_REMOVE; case UI_IMAGE_INFO: return ASSET_INFO;
         case UI_QUEUE: return ASSET_WRITE_QUEUE; case UI_WRITE_OPEN: return ASSET_OPEN_FOLDER; case UI_TOOL_CUE: return ASSET_CREATE_CUE;
@@ -695,9 +711,9 @@ static void gui_tool_open(GuiWindow* ui, GuiOperation operation) {
     if (ui->tool || ui->job) return; gui_read_controls(ui);
     GuiTool* tool = (GuiTool*)calloc(1, sizeof(*tool)); if (!tool) return; tool->parent = ui; tool->operation = operation; ui->tool = tool;
     const wchar_t* title = operation == GUI_CREATE_CUE ? L"生成 CUE 文件" : operation == GUI_WRITE_OPTIONS ? L"写入扩展设置" : operation == GUI_READ_OPTIONS ? L"读取选项" : L"创建 MDS 文件";
-    RECT rect = {0,0,px(ui,operation == GUI_WRITE_OPTIONS ? 464 : operation == GUI_READ_OPTIONS ? 464 : operation == GUI_CREATE_MDS ? 527 : 520),px(ui,operation == GUI_WRITE_OPTIONS ? 248 : operation == GUI_READ_OPTIONS ? 248 : operation == GUI_CREATE_MDS ? 356 : 372)}; AdjustWindowRectEx(&rect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
+    RECT rect = {0,0,px(ui,operation == GUI_WRITE_OPTIONS ? 464 : operation == GUI_READ_OPTIONS ? 464 : operation == GUI_CREATE_MDS ? 527 : 649),px(ui,operation == GUI_WRITE_OPTIONS ? 248 : operation == GUI_READ_OPTIONS ? 248 : operation == GUI_CREATE_MDS ? 356 : 548)}; AdjustWindowRectEx(&rect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
     HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, L"ImgBurnCommand", title, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top, ui->window, NULL, ui->instance, tool);
-    if (!window) { ui->tool = NULL; free(tool); return; } EnableWindow(ui->window, FALSE); ShowWindow(window, SW_SHOW); if (operation == GUI_CREATE_MDS) SetFocus(tool->list);
+    if (!window) { ui->tool = NULL; free(tool); return; } EnableWindow(ui->window, FALSE); ShowWindow(window, SW_SHOW); if (operation == GUI_CREATE_MDS || operation == GUI_CREATE_CUE) SetFocus(tool->list);
 }
 
 static void gui_dvd_candidates_fill(GuiTool* tool) {
@@ -783,14 +799,21 @@ static void gui_bd_format_submit(GuiTool* tool) {
     if (gui_launch(ui,job)) { EnableWindow(tool->ok,FALSE); EnableWindow(tool->bdReFormats,FALSE); if (tool->bdReCertification) EnableWindow(tool->bdReCertification,FALSE); EnableWindow(GetDlgItem(tool->window,UI_BD_RE_FORMAT_QUERY),FALSE); SetWindowTextW(tool->candidateStatus,L"正在执行明确选择的格式化；取消不回滚已开始的设备命令。"); }
 }
 
-/* 原MDS窗的SpeedButton不进Tab链；列表、选项及按钮状态只在此窗口内维护。 */
-static void gui_tool_mds_state(GuiTool* tool) {
+/* 两个创建窗口共用列表语义，控件ID、资源和条目上限仍各自维护。 */
+static UINT gui_tool_list_id(const GuiTool* tool, UINT id) { return tool->operation == GUI_CREATE_CUE ? id + UI_CUE_ADD - UI_MDS_ADD : id; }
+static void gui_tool_list_state(GuiTool* tool) {
     bool idle = tool->parent->job == NULL; LRESULT at = SendMessageW(tool->list,LB_GETCURSEL,0,0);
-    bool selected = at >= 0 && (size_t)at < tool->count, layer = SendMessageW(tool->layer,BM_GETCHECK,0,0) == BST_CHECKED;
-    EnableWindow(tool->list,idle); EnableWindow(GetDlgItem(tool->window,UI_MDS_ADD),idle && tool->count < MAX_MDS_FILES);
-    EnableWindow(GetDlgItem(tool->window,UI_MDS_REMOVE),idle && selected); EnableWindow(GetDlgItem(tool->window,UI_MDS_CLEAR),idle && tool->count != 0);
-    EnableWindow(GetDlgItem(tool->window,UI_MDS_TOP),idle && selected && at > 0); EnableWindow(GetDlgItem(tool->window,UI_MDS_UP),idle && selected && at > 0);
-    EnableWindow(GetDlgItem(tool->window,UI_MDS_DOWN),idle && selected && (size_t)at + 1 < tool->count); EnableWindow(GetDlgItem(tool->window,UI_MDS_BOTTOM),idle && selected && (size_t)at + 1 < tool->count);
+    bool selected = at >= 0 && (size_t)at < tool->count;
+    EnableWindow(tool->list,idle); EnableWindow(GetDlgItem(tool->window,(int)gui_tool_list_id(tool,UI_MDS_ADD)),idle && tool->count < (size_t)(tool->operation == GUI_CREATE_CUE ? MAX_AUDIO_TRACKS : MAX_MDS_FILES));
+    const UINT commands[] = {UI_MDS_REMOVE,UI_MDS_CLEAR,UI_MDS_TOP,UI_MDS_UP,UI_MDS_DOWN,UI_MDS_BOTTOM};
+    const bool enabled[] = {selected,tool->count != 0,selected && at > 0,selected && at > 0,selected && (size_t)at + 1 < tool->count,selected && (size_t)at + 1 < tool->count};
+    for (unsigned i = 0; i < ARRAYSIZE(commands); i++) EnableWindow(GetDlgItem(tool->window,(int)gui_tool_list_id(tool,commands[i])),idle && enabled[i]);
+    EnableWindow(tool->ok,idle && tool->count != 0);
+    if (tool->operation == GUI_CREATE_CUE) {
+        for (int id = UI_CUE_SORT_TAGS; id <= UI_CUE_TRACK_TEXT; id++) EnableWindow(GetDlgItem(tool->window,id),FALSE);
+        return;
+    }
+    bool layer = SendMessageW(tool->layer,BM_GETCHECK,0,0) == BST_CHECKED;
     EnableWindow(tool->layer,idle); EnableWindow(tool->lba,idle && layer); EnableWindow(tool->ptp,idle && layer); EnableWindow(tool->otp,idle && layer);
     EnableWindow(tool->mdsMedia,idle && tool->count != 0); EnableWindow(GetDlgItem(tool->window,UI_MDS_MEDIA_TITLE),idle && tool->count != 0);
     EnableWindow(tool->mdsPreservePaths,idle); EnableWindow(tool->ok,idle && tool->count != 0);
@@ -801,22 +824,22 @@ static void gui_tool_mds_state(GuiTool* tool) {
 }
 
 static void gui_tool_fill(GuiTool* tool) {
-    bool mds = tool->operation == GUI_CREATE_MDS; LRESULT selected = mds ? SendMessageW(tool->list,LB_GETCURSEL,0,0) : LB_ERR, top = mds ? SendMessageW(tool->list,LB_GETTOPINDEX,0,0) : 0;
+    bool listTool = tool->operation == GUI_CREATE_MDS || tool->operation == GUI_CREATE_CUE; LRESULT selected = listTool ? SendMessageW(tool->list,LB_GETCURSEL,0,0) : LB_ERR, top = listTool ? SendMessageW(tool->list,LB_GETTOPINDEX,0,0) : 0;
     SendMessageW(tool->list,WM_SETREDRAW,FALSE,0); SendMessageW(tool->list,LB_RESETCONTENT,0,0);
-    HDC dc = mds ? GetDC(tool->list) : NULL; HGDIOBJ font = dc ? SelectObject(dc,tool->parent->font) : NULL; int extent = 0;
+    HDC dc = listTool ? GetDC(tool->list) : NULL; HGDIOBJ font = dc ? SelectObject(dc,tool->parent->font) : NULL; int extent = 0;
     for (size_t i = 0; i < tool->count; i++) {
         SendMessageW(tool->list,LB_ADDSTRING,0,(LPARAM)tool->sources[i].path);
         if (dc) { SIZE size = {0}; if (GetTextExtentPoint32W(dc,tool->sources[i].path,(int)wcslen(tool->sources[i].path),&size) && size.cx > extent) extent = size.cx; }
     }
     if (dc) { SelectObject(dc,font); ReleaseDC(tool->list,dc); }
-    if (mds) {
+    if (listTool) {
         if (selected >= 0 && tool->count) SendMessageW(tool->list,LB_SETCURSEL,(WPARAM)((size_t)selected < tool->count ? (size_t)selected : tool->count - 1),0);
-        SendMessageW(tool->list,LB_SETTOPINDEX,(WPARAM)top,0); SendMessageW(tool->list,LB_SETHORIZONTALEXTENT,(WPARAM)(extent ? extent + px(tool->parent,8) : 0),0); gui_tool_mds_state(tool);
+        SendMessageW(tool->list,LB_SETTOPINDEX,(WPARAM)top,0); SendMessageW(tool->list,LB_SETHORIZONTALEXTENT,(WPARAM)(extent ? extent + px(tool->parent,8) : 0),0); gui_tool_list_state(tool);
     } else EnableWindow(tool->ok,tool->count != 0);
     SendMessageW(tool->list,WM_SETREDRAW,TRUE,0); InvalidateRect(tool->list,NULL,TRUE);
 }
 
-static UINT gui_tool_mds_key(WPARAM key) {
+static UINT gui_tool_list_key(WPARAM key) {
     if ((GetKeyState(VK_MENU) & 0x8000) || (GetKeyState(VK_SHIFT) & 0x8000)) return 0;
     bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     if (key == VK_INSERT && !control) return UI_MDS_ADD;
@@ -828,24 +851,29 @@ static UINT gui_tool_mds_key(WPARAM key) {
     return 0;
 }
 
-static LRESULT CALLBACK gui_tool_mds_list_proc(HWND window, UINT message, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR data) {
+static LRESULT CALLBACK gui_tool_list_proc(HWND window, UINT message, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR data) {
     (void)data;
-    if (message == WM_NCDESTROY) { RemoveWindowSubclass(window,gui_tool_mds_list_proc,id); return DefSubclassProc(window,message,wp,lp); }
+    if (message == WM_NCDESTROY) { RemoveWindowSubclass(window,gui_tool_list_proc,id); return DefSubclassProc(window,message,wp,lp); }
     HWND parent = GetParent(window); GuiTool* tool = (GuiTool*)GetWindowLongPtrW(parent,GWLP_USERDATA);
-    if (tool && message == WM_GETDLGCODE && lp && ((MSG*)lp)->message == WM_KEYDOWN && gui_tool_mds_key(((MSG*)lp)->wParam)) return DefSubclassProc(window,message,wp,lp) | DLGC_WANTMESSAGE;
-    if (tool && message == WM_KEYDOWN) { UINT command = gui_tool_mds_key(wp); if (command) { SendMessageW(parent,WM_COMMAND,command,0); return 0; } }
+    if (tool && message == WM_GETDLGCODE && lp && ((MSG*)lp)->message == WM_KEYDOWN && gui_tool_list_key(((MSG*)lp)->wParam)) return DefSubclassProc(window,message,wp,lp) | DLGC_WANTMESSAGE;
+    if (tool && message == WM_KEYDOWN) { UINT command = gui_tool_list_key(wp); if (command) { SendMessageW(parent,WM_COMMAND,gui_tool_list_id(tool,command),0); return 0; } }
     if (tool && message == WM_CONTEXTMENU) { SendMessageW(parent,message,(WPARAM)window,lp); return 0; }
     if (tool && message == WM_RBUTTONDOWN && !tool->parent->job) {
-        LRESULT hit = SendMessageW(window,LB_ITEMFROMPOINT,0,lp); if (!HIWORD(hit) && (size_t)LOWORD(hit) < tool->count) SendMessageW(window,LB_SETCURSEL,LOWORD(hit),0); gui_tool_mds_state(tool);
+        LRESULT hit = SendMessageW(window,LB_ITEMFROMPOINT,0,lp); if (!HIWORD(hit) && (size_t)LOWORD(hit) < tool->count) SendMessageW(window,LB_SETCURSEL,LOWORD(hit),0); gui_tool_list_state(tool);
     }
     return DefSubclassProc(window,message,wp,lp);
 }
 
-static void gui_tool_mds_popup(GuiTool* tool, LPARAM position) {
-    if (tool->parent->job) return; gui_tool_mds_state(tool); HMENU menu = CreatePopupMenu(); if (!menu) return;
+static void gui_tool_list_popup(GuiTool* tool, LPARAM position) {
+    if (tool->parent->job) return; gui_tool_list_state(tool); HMENU menu = CreatePopupMenu(); if (!menu) return;
     const UINT ids[] = {UI_MDS_TOP,UI_MDS_UP,UI_MDS_DOWN,UI_MDS_BOTTOM,0,UI_MDS_ADD,UI_MDS_REMOVE,0,UI_MDS_CLEAR};
     const wchar_t* names[] = {L"移到顶部\tCtrl+Home",L"上移\tCtrl+Up",L"下移\tCtrl+Down",L"移到底部\tCtrl+End",L"",L"添加...\tIns",L"移除\tDel",L"",L"全部移除\tCtrl+Del"};
-    for (unsigned i = 0; i < ARRAYSIZE(ids); i++) { if (!ids[i]) separator(menu); else item(menu,ids[i],names[i],IsWindowEnabled(GetDlgItem(tool->window,(int)ids[i])) != 0); }
+    bool cue = tool->operation == GUI_CREATE_CUE;
+    for (unsigned i = 0; i < ARRAYSIZE(ids); i++) {
+        if (cue && i == 5) { item(menu,UI_CUE_FILTERS,L"显示解码筛选器...",false); separator(menu); item(menu,UI_CUE_SORT_TAGS,L"按标签音轨号排序",false); separator(menu); }
+        if (!ids[i]) separator(menu); else { UINT command = gui_tool_list_id(tool,ids[i]); item(menu,command,names[i],IsWindowEnabled(GetDlgItem(tool->window,(int)command)) != 0); }
+    }
+    if (cue) { separator(menu); item(menu,UI_CUE_ADD_SESSION,L"添加会话\tCtrl+S",false); separator(menu); item(menu,UI_CUE_EXPAND,L"全部展开",false); item(menu,UI_CUE_COLLAPSE,L"全部折叠",false); }
     POINT point = {(short)LOWORD(position),(short)HIWORD(position)};
     if (point.x == -1 && point.y == -1) { RECT rect = {0}; LRESULT at = SendMessageW(tool->list,LB_GETCURSEL,0,0); if (at < 0 || SendMessageW(tool->list,LB_GETITEMRECT,(WPARAM)at,(LPARAM)&rect) == LB_ERR) GetClientRect(tool->list,&rect); point.x = rect.left + px(tool->parent,8); point.y = rect.top + px(tool->parent,8); ClientToScreen(tool->list,&point); }
     HWND owner = tool->window; LONG_PTR identity = (LONG_PTR)tool;
@@ -853,18 +881,22 @@ static void gui_tool_mds_popup(GuiTool* tool, LPARAM position) {
     if (command && IsWindow(owner) && GetWindowLongPtrW(owner,GWLP_USERDATA) == identity) SendMessageW(owner,WM_COMMAND,command,0);
 }
 
-static void gui_tool_mds_create(GuiTool* tool) {
+static void gui_tool_list_buttons(GuiTool* tool, int x, int y) {
     GuiWindow* ui = tool->parent; HWND window = tool->window;
-    tool->list = ctl(ui,window,L"LISTBOX",L"",WS_TABSTOP | WS_GROUP | WS_VSCROLL | WS_HSCROLL | LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,UI_SOURCE_LIST,8,8,489,217);
-    SetWindowSubclass(tool->list,gui_tool_mds_list_proc,1,0);
-    tool->mdsTips = CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,NULL,WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,window,NULL,ui->instance,NULL);
+    tool->listTips = CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,NULL,WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,window,NULL,ui->instance,NULL);
     const UINT ids[] = {UI_MDS_ADD,UI_MDS_REMOVE,UI_MDS_CLEAR,UI_MDS_TOP,UI_MDS_UP,UI_MDS_DOWN,UI_MDS_BOTTOM}; const int ys[] = {8,32,56,104,128,152,176};
     const wchar_t* labels[] = {L"+",L"−",L"×",L"顶",L"↑",L"↓",L"底"};
     const wchar_t* hints[] = {L"添加文件 (Ins)",L"移除所选项 (Del)",L"全部移除 (Ctrl+Del)",L"移到顶部 (Ctrl+Home)",L"上移 (Ctrl+Up)",L"下移 (Ctrl+Down)",L"移到底部 (Ctrl+End)"};
     for (unsigned i = 0; i < ARRAYSIZE(ids); i++) {
-        HWND button = ctl(ui,window,L"BUTTON",labels[i],0,(int)ids[i],500,ys[i],23,22);
-        if (tool->mdsTips && button) { TOOLINFOW tip = {0}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS; tip.hwnd = window; tip.uId = (UINT_PTR)button; tip.lpszText = (wchar_t*)hints[i]; SendMessageW(tool->mdsTips,TTM_ADDTOOLW,0,(LPARAM)&tip); }
+        HWND button = ctl(ui,window,L"BUTTON",labels[i],0,(int)gui_tool_list_id(tool,ids[i]),x,ys[i] + y,23,22);
+        if (tool->listTips && button) { TOOLINFOW tip = {0}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS; tip.hwnd = window; tip.uId = (UINT_PTR)button; tip.lpszText = (wchar_t*)hints[i]; SendMessageW(tool->listTips,TTM_ADDTOOLW,0,(LPARAM)&tip); }
     }
+}
+
+static void gui_tool_mds_create(GuiTool* tool) {
+    GuiWindow* ui = tool->parent; HWND window = tool->window;
+    tool->list = ctl(ui,window,L"LISTBOX",L"",WS_TABSTOP | WS_GROUP | WS_VSCROLL | WS_HSCROLL | LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,UI_SOURCE_LIST,8,8,489,217);
+    SetWindowSubclass(tool->list,gui_tool_list_proc,1,0); gui_tool_list_buttons(tool,500,0);
     tool->layer = ctl(ui,window,L"BUTTON",L"换层点 LBA：",WS_TABSTOP | BS_AUTOCHECKBOX,UI_TOOL_LAYER,8,234,105,17);
     tool->lba = ctl(ui,window,L"EDIT",L"0",WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,UI_TOOL_LBA,120,232,145,21); SendMessageW(tool->lba,EM_SETLIMITTEXT,10,0);
     tool->ptp = ctl(ui,window,L"BUTTON",L"PTP",WS_GROUP | BS_AUTORADIOBUTTON,UI_TOOL_PTP,280,234,57,17);
@@ -887,7 +919,58 @@ static void gui_tool_mds_create(GuiTool* tool) {
     /* ctl的置顶不能代表VCL TabOrder，单独排列MDS子窗的原始导航链。 */
     HWND order[] = {tool->list,tool->layer,tool->lba,tool->ptp,tool->otp,tool->mdsMedia,tool->mdsPreservePaths,GetDlgItem(window,UI_MDS_QUEUE),GetDlgItem(window,UI_MDS_QUICK),tool->ok,GetDlgItem(window,UI_TOOL_CLOSE)};
     for (size_t i = ARRAYSIZE(order); i; i--) SetWindowPos(order[i - 1],HWND_TOP,0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    gui_tool_mds_state(tool);
+    gui_tool_list_state(tool);
+}
+
+static void gui_tool_label_fit(GuiWindow* ui, HWND window, int id, int width, int height) {
+    HWND label = GetDlgItem(window,id); HDC dc = label ? GetDC(label) : NULL; if (!dc) return;
+    HGDIOBJ font = SelectObject(dc,ui->font); wchar_t caption[128]; SIZE size = {0}; TEXTMETRICW metrics = {0}; int length = GetWindowTextW(label,caption,ARRAYSIZE(caption));
+    if (GetTextExtentPoint32W(dc,caption,length,&size) && GetTextMetricsW(dc,&metrics)) SetWindowPos(label,NULL,0,0,size.cx > px(ui,width) ? size.cx : px(ui,width),metrics.tmHeight > px(ui,height) ? metrics.tmHeight : px(ui,height),SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SelectObject(dc,font); ReleaseDC(label,dc);
+}
+
+static void gui_tool_cue_create(GuiTool* tool) {
+    GuiWindow* ui = tool->parent; HWND window = tool->window;
+    ctl(ui,window,L"BUTTON",L"音轨布局",BS_GROUPBOX,UI_CUE_LAYOUT,8,8,633,313);
+    tool->list = ctl(ui,window,L"LISTBOX",L"",WS_TABSTOP | WS_GROUP | WS_VSCROLL | WS_HSCROLL | LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,UI_SOURCE_LIST,16,24,593,273);
+    SetWindowSubclass(tool->list,gui_tool_list_proc,1,0); gui_tool_list_buttons(tool,613,16);
+    ctl(ui,window,L"BUTTON",L"序",0,UI_CUE_SORT_TAGS,613,251,23,22); ctl(ui,window,L"BUTTON",L"会",0,UI_CUE_ADD_SESSION,613,275,23,22);
+    ctl(ui,window,PROGRESS_CLASSW,L"",0,UI_CUE_USAGE,16,302,593,13); ctl(ui,window,L"STATIC",L"--",SS_RIGHT,UI_CUE_USAGE_TEXT,618,301,17,13);
+    ctl(ui,window,L"BUTTON",L"选项",BS_GROUPBOX,UI_CUE_OPTIONS,8,324,633,129);
+    ctl(ui,window,L"STATIC",L"间隔：",0,UI_CUE_GAP_LABEL,16,341,39,13);
+    HWND gap = ctl(ui,window,L"BUTTON",L"0 秒",WS_GROUP | BS_AUTORADIOBUTTON,UI_CUE_GAP_ZERO,88,340,81,17); SendMessageW(gap,BM_SETCHECK,BST_CHECKED,0);
+    ctl(ui,window,L"BUTTON",L"2 秒",BS_AUTORADIOBUTTON,UI_CUE_GAP_TWO,176,340,81,17); ctl(ui,window,L"BUTTON",L"自定义",BS_AUTORADIOBUTTON,UI_CUE_GAP_CUSTOM,264,340,73,17);
+    HWND number = ctl(ui,window,L"EDIT",L"0",ES_NUMBER | ES_AUTOHSCROLL,UI_CUE_GAP_VALUE,344,338,73,21); SendMessageW(number,EM_SETLIMITTEXT,6,0);
+    ctl(ui,window,L"STATIC",L"帧（75 帧 = 1 秒）",0,UI_CUE_GAP_UNITS,432,341,166,13);
+    HWND line = ctl(ui,window,L"STATIC",L"",SS_ETCHEDHORZ,UI_CUE_OPTIONS_SEPARATOR,16,365,617,3);
+    if (line) SetWindowPos(line,NULL,px(ui,16),px(ui,365),px(ui,617),px(ui,3),SWP_NOZORDER | SWP_NOACTIVATE);
+    ctl(ui,window,L"STATIC",L"CD-TEXT:",0,UI_CUE_TEXT_LABEL,16,376,46,13);
+    HWND none = ctl(ui,window,L"BUTTON",L"无",WS_GROUP | BS_AUTORADIOBUTTON,UI_CUE_TEXT_NONE,88,374,81,17); SendMessageW(none,BM_SETCHECK,BST_CHECKED,0);
+    ctl(ui,window,L"BUTTON",L"文件名",BS_AUTORADIOBUTTON,UI_CUE_TEXT_FILENAME,176,374,81,17); ctl(ui,window,L"BUTTON",L"标签",BS_AUTORADIOBUTTON,UI_CUE_TEXT_TAG,264,374,73,17);
+    ctl(ui,window,L"BUTTON",L"自定义",BS_AUTORADIOBUTTON,UI_CUE_TEXT_CUSTOM,344,374,73,17); ctl(ui,window,L"BUTTON",L"刷",0,UI_CUE_TEXT_REFRESH,610,372,23,22);
+    ctl(ui,window,L"STATIC",L"表演者：",0,UI_CUE_PERFORMER_LABEL,16,402,52,13); ctl(ui,window,L"EDIT",L"",ES_AUTOHSCROLL,UI_CUE_PERFORMER,88,398,545,21);
+    ctl(ui,window,L"STATIC",L"标题",0,UI_CUE_TITLE_LABEL,16,426,24,13); ctl(ui,window,L"EDIT",L"",ES_AUTOHSCROLL,UI_CUE_TITLE,88,422,545,21);
+    HWND accurate = ctl(ui,window,L"BUTTON",L"按解码长度计算（固定）",BS_AUTOCHECKBOX,UI_CUE_ACCURATE,8,458,353,17); SendMessageW(accurate,BM_SETCHECK,BST_CHECKED,0);
+    HWND preserve = ctl(ui,window,L"BUTTON",L"保留完整路径（固定）",BS_AUTOCHECKBOX,UI_CUE_PRESERVE,8,474,353,17); SendMessageW(preserve,BM_SETCHECK,BST_CHECKED,0);
+    ctl(ui,window,L"BUTTON",L"生成后加入写入队列",BS_AUTOCHECKBOX,UI_CUE_QUEUE,8,490,353,17);
+    ctl(ui,window,L"BUTTON",L"默认 CD-TEXT（光盘 / 音轨）",BS_GROUPBOX,UI_CUE_DEFAULT_TEXT,408,456,233,49);
+    ctl(ui,window,L"STATIC",L"/",SS_CENTER,UI_CUE_DEFAULT_SEPARATOR,512,476,25,17);
+    const wchar_t* choices[] = {L"无",L"文件名",L"标签",L"自定义"};
+    for (int i = 0; i < 2; i++) {
+        HWND combo = ctl(ui,window,L"COMBOBOX",L"",CBS_DROPDOWNLIST,i ? UI_CUE_TRACK_TEXT : UI_CUE_DISC_TEXT,i ? 536 : 416,474,97,100); gui_combo_height(ui,combo,21);
+        for (unsigned j = 0; j < ARRAYSIZE(choices); j++) if (i || j != 1) SendMessageW(combo,CB_ADDSTRING,0,(LPARAM)choices[j]); SendMessageW(combo,CB_SETCURSEL,0,0);
+    }
+    HWND bevel = ctl(ui,window,L"STATIC",L"",SS_ETCHEDHORZ,UI_CUE_SEPARATOR,8,512,633,3);
+    if (bevel) SetWindowPos(bevel,NULL,px(ui,8),px(ui,512),px(ui,633),px(ui,3),SWP_NOZORDER | SWP_NOACTIVATE);
+    ctl(ui,window,L"BUTTON",L"快速保存",0,UI_CUE_QUICK,8,520,81,23); ctl(ui,window,L"BUTTON",L"表",0,UI_CUE_LISTING,96,520,23,23);
+    /* 当前后台固定单会话、无gap/CD-TEXT且写完整路径；不伪造预先解码的时间或容量。 */
+    ctl(ui,window,L"STATIC",L"保存时测量音频；单会话，间隔0，无CD-TEXT",SS_NOPREFIX,UI_CUE_STATUS,124,523,357,17);
+    tool->ok = ctl(ui,window,L"BUTTON",L"确定",WS_TABSTOP | BS_DEFPUSHBUTTON,UI_TOOL_OK,488,520,75,23); HWND cancel = ctl(ui,window,L"BUTTON",L"取消",WS_TABSTOP,UI_TOOL_CLOSE,568,520,75,23);
+    /* 中文字体回退的行高可能大于DFM的13像素，沿用原位置按实际字形扩展。 */
+    const int labels[][3] = {{UI_CUE_USAGE_TEXT,17,13},{UI_CUE_GAP_LABEL,39,13},{UI_CUE_GAP_UNITS,166,13},{UI_CUE_TEXT_LABEL,46,13},{UI_CUE_PERFORMER_LABEL,52,13},{UI_CUE_TITLE_LABEL,24,13},{UI_CUE_DEFAULT_SEPARATOR,25,17},{UI_CUE_STATUS,357,17}};
+    for (unsigned i = 0; i < ARRAYSIZE(labels); i++) gui_tool_label_fit(ui,window,labels[i][0],labels[i][1],labels[i][2]);
+    SetWindowPos(cancel,HWND_TOP,0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); SetWindowPos(tool->ok,HWND_TOP,0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); SetWindowPos(tool->list,HWND_TOP,0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    gui_tool_list_state(tool);
 }
 static void gui_read_options_state(GuiTool* tool) {
     const wchar_t* extension = wcsrchr(tool->parent->readImage,L'.'); bool cue = extension && !_wcsicmp(extension,L".cue"), mds = extension && !_wcsicmp(extension,L".mds");
@@ -898,12 +981,13 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
     GuiTool* tool = (GuiTool*)GetWindowLongPtrW(window, GWLP_USERDATA);
     if (message == WM_NCCREATE) { tool = (GuiTool*)((CREATESTRUCTW*)lp)->lpCreateParams; tool->window = window; SetWindowLongPtrW(window, GWLP_USERDATA, (LONG_PTR)tool); }
     if (!tool) return DefWindowProcW(window, message, wp, lp); GuiWindow* ui = tool->parent;
-    if (tool->operation == GUI_CREATE_MDS && message == DM_GETDEFID) return MAKELONG(UI_TOOL_OK,DC_HASDEFID);
-    if (tool->operation == GUI_CREATE_MDS && message == WM_DRAWITEM) {
+    bool listTool = tool->operation == GUI_CREATE_MDS || tool->operation == GUI_CREATE_CUE;
+    if (listTool && message == DM_GETDEFID) return MAKELONG(UI_TOOL_OK,DC_HASDEFID);
+    if (listTool && message == WM_DRAWITEM) {
         GuiAssetId asset = gui_control_asset((UINT)wp); DRAWITEMSTRUCT draw = *(const DRAWITEMSTRUCT*)lp; if (ui->hotControl == draw.hwndItem) draw.itemState |= ODS_HOTLIGHT;
         if (asset >= ASSET_MDS_ADD && asset < ASSET_COUNT && imgburn_gui_asset_button_dpi(&ui->assets,asset,&draw,ui->dpi,true)) return TRUE;
     }
-    if (tool->operation == GUI_CREATE_MDS && message == WM_CONTEXTMENU && (HWND)wp == tool->list) { gui_tool_mds_popup(tool,lp); return 0; }
+    if (listTool && message == WM_CONTEXTMENU && (HWND)wp == tool->list) { gui_tool_list_popup(tool,lp); return 0; }
     if (message == WM_CREATE) {
         if (gui_bd_format_list(tool->operation)) {
             bool bdr = tool->operation == GUI_BD_R_FORMAT_LIST;
@@ -956,10 +1040,8 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
             tool->ok = ctl(ui,window,L"BUTTON",L"使用所选单元",WS_TABSTOP | BS_DEFPUSHBUTTON,UI_TOOL_OK,610,374,126,28); EnableWindow(tool->ok,FALSE); ctl(ui,window,L"BUTTON",L"取消",WS_TABSTOP,UI_TOOL_CLOSE,746,374,88,28); return 0;
         }
         if (tool->operation == GUI_CREATE_MDS) { gui_tool_mds_create(tool); return 0; }
-        tool->list = ctl(ui, window, L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | WS_HSCROLL | LBS_NOINTEGRALHEIGHT, UI_SOURCE_LIST, 10, 12, 466, 220);
-        const wchar_t* labels[] = {L"+",L"−",L"↑",L"↓"}; const int ids[] = {UI_TOOL_ADD,UI_TOOL_REMOVE,UI_TOOL_UP,UI_TOOL_DOWN}; for (int i = 0; i < 4; i++) ctl(ui, window, L"BUTTON", labels[i], WS_TABSTOP, ids[i], 482, 12 + i * 32, 28, 27);
-        ctl(ui, window, L"STATIC", L"按解码后的音频长度生成轨道。\r\n标准音频为 44.1 kHz、16 位双声道。", 0, 0, 10, 246, 480, 52);
-        tool->ok = ctl(ui, window, L"BUTTON", L"确定", WS_TABSTOP | BS_DEFPUSHBUTTON, UI_TOOL_OK, 356, 332, 72, 28); EnableWindow(tool->ok, FALSE); ctl(ui, window, L"BUTTON", L"取消", WS_TABSTOP, UI_TOOL_CLOSE, 436, 332, 72, 28); return 0;
+        if (tool->operation == GUI_CREATE_CUE) { gui_tool_cue_create(tool); return 0; }
+
     }
     if (message == WM_NOTIFY && tool->operation == GUI_DVD_CANDIDATES && ((NMHDR*)lp)->idFrom == UI_DVD_CANDIDATE_LIST) {
         NMHDR* notice = (NMHDR*)lp;
@@ -968,8 +1050,9 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
         return 0;
     }
     if (message == WM_COMMAND) {
-        if (tool->operation == GUI_CREATE_MDS) {
+        if (listTool) {
             UINT command = LOWORD(wp);
+            if (tool->operation == GUI_CREATE_CUE && command >= UI_CUE_ADD && command <= UI_CUE_BOTTOM) command -= UI_CUE_ADD - UI_MDS_ADD;
             if (command == UI_TOOL_ADD) command = UI_MDS_ADD;
             else if (command == UI_TOOL_REMOVE) command = UI_MDS_REMOVE;
             else if (command == UI_TOOL_UP) command = UI_MDS_UP;
@@ -977,12 +1060,12 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
             if (command == IDCANCEL) { wp = MAKEWPARAM(UI_TOOL_CLOSE,0); command = UI_TOOL_CLOSE; }
             if (command == IDOK) { if (GetFocus() == GetDlgItem(window,UI_TOOL_CLOSE)) { wp = MAKEWPARAM(UI_TOOL_CLOSE,0); command = UI_TOOL_CLOSE; } else { if (!IsWindowEnabled(tool->ok)) return 0; wp = MAKEWPARAM(UI_TOOL_OK,0); command = UI_TOOL_OK; } }
             if (command == UI_TOOL_OK && !IsWindowEnabled(tool->ok)) return 0;
-            if (!ui->job && command == UI_SOURCE_LIST && HIWORD(wp) == LBN_SELCHANGE) { gui_tool_mds_state(tool); return 0; }
+            if (!ui->job && command == UI_SOURCE_LIST && HIWORD(wp) == LBN_SELCHANGE) { gui_tool_list_state(tool); return 0; }
             if (!ui->job && (command == UI_TOOL_OTP || command == UI_TOOL_PTP)) {
-                SendMessageW(tool->ptp,BM_SETCHECK,command == UI_TOOL_PTP ? BST_CHECKED : BST_UNCHECKED,0); SendMessageW(tool->otp,BM_SETCHECK,command == UI_TOOL_OTP ? BST_CHECKED : BST_UNCHECKED,0); gui_tool_mds_state(tool); return 0;
+                SendMessageW(tool->ptp,BM_SETCHECK,command == UI_TOOL_PTP ? BST_CHECKED : BST_UNCHECKED,0); SendMessageW(tool->otp,BM_SETCHECK,command == UI_TOOL_OTP ? BST_CHECKED : BST_UNCHECKED,0); gui_tool_list_state(tool); return 0;
             }
             if (command >= UI_MDS_ADD && command <= UI_MDS_BOTTOM) {
-                if (ui->job) return 0; gui_tool_mds_state(tool); if (!IsWindowEnabled(GetDlgItem(window,(int)command))) return 0;
+                if (ui->job) return 0; gui_tool_list_state(tool); if (!IsWindowEnabled(GetDlgItem(window,(int)gui_tool_list_id(tool,command)))) return 0;
                 if (command == UI_MDS_ADD) wp = MAKEWPARAM(UI_TOOL_ADD,0);
                 else {
                     LRESULT at = SendMessageW(tool->list,LB_GETCURSEL,0,0), next = at;
@@ -994,7 +1077,7 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
                             if (next >= 0 && (size_t)next < tool->count) { GuiPath saved = tool->sources[at]; if (next < at) memmove(tool->sources + next + 1,tool->sources + next,(size_t)(at - next) * sizeof(*tool->sources)); else memmove(tool->sources + at,tool->sources + at + 1,(size_t)(next - at) * sizeof(*tool->sources)); tool->sources[next] = saved; }
                         }
                     }
-                    gui_tool_fill(tool); SendMessageW(tool->list,LB_SETCURSEL,(WPARAM)next,0); gui_tool_mds_state(tool); SetFocus(tool->list); return 0;
+                    gui_tool_fill(tool); SendMessageW(tool->list,LB_SETCURSEL,(WPARAM)next,0); gui_tool_list_state(tool); SetFocus(tool->list); return 0;
                 }
             }
         }
@@ -1037,12 +1120,12 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
                 wchar_t path[MAX_PATH] = L""; bool cue = tool->operation == GUI_CREATE_CUE;
                 bool chosen = gui_file(window,path,false,cue ? L"音频文件\0*.wav;*.mp3;*.flac;*.aiff;*.aif;*.ogg;*.ape;*.wv\0所有文件\0*.*\0\0" : L"镜像、分卷及描述列表\0*.iso;*.bin;*.mdf;*.i00;*.i01;*.i02;*.dvd;*.lst;*.gi;*.pdi;*.di\0所有文件\0*.*\0\0",NULL);
                 if (!IsWindow(window) || GetWindowLongPtrW(window,GWLP_USERDATA) != (LONG_PTR)tool) return 0;
-                if (chosen && gui_paths_add(&tool->sources,&tool->count,path)) { gui_tool_fill(tool); if (!cue) { SendMessageW(tool->list,LB_SETCURSEL,tool->count - 1,0); gui_tool_mds_state(tool); } }
-                if (!cue) SetFocus(tool->list); break;
+                if (chosen && gui_paths_add(&tool->sources,&tool->count,path)) { gui_tool_fill(tool); SendMessageW(tool->list,LB_SETCURSEL,tool->count - 1,0); gui_tool_list_state(tool); }
+                SetFocus(tool->list); break;
             }
             case UI_TOOL_REMOVE: { LRESULT at = SendMessageW(tool->list, LB_GETCURSEL, 0, 0); if (at >= 0 && (size_t)at < tool->count) { memmove(tool->sources + at, tool->sources + at + 1, (tool->count - (size_t)at - 1) * sizeof(*tool->sources)); tool->count--; gui_tool_fill(tool); } break; }
             case UI_TOOL_UP: case UI_TOOL_DOWN: { LRESULT at = SendMessageW(tool->list, LB_GETCURSEL, 0, 0), next = at + (LOWORD(wp) == UI_TOOL_UP ? -1 : 1); if (at >= 0 && next >= 0 && (size_t)next < tool->count) { GuiPath tmp = tool->sources[at]; tool->sources[at] = tool->sources[next]; tool->sources[next] = tmp; gui_tool_fill(tool); SendMessageW(tool->list, LB_SETCURSEL, next, 0); } break; }
-            case UI_TOOL_LAYER: { if (tool->operation == GUI_CREATE_MDS) gui_tool_mds_state(tool); else { bool checked = SendMessageW(tool->layer, BM_GETCHECK, 0, 0) == BST_CHECKED; EnableWindow(tool->lba, checked); EnableWindow(tool->otp, checked); EnableWindow(tool->ptp, checked); } break; }
+            case UI_TOOL_LAYER: { if (tool->operation == GUI_CREATE_MDS) gui_tool_list_state(tool); else { bool checked = SendMessageW(tool->layer, BM_GETCHECK, 0, 0) == BST_CHECKED; EnableWindow(tool->lba, checked); EnableWindow(tool->otp, checked); EnableWindow(tool->ptp, checked); } break; }
             case UI_TOOL_OK: {
                 wchar_t output[MAX_PATH] = L""; bool cue = tool->operation == GUI_CREATE_CUE; uint32_t layerBreak = 0; LRESULT medium = 0;
                 if (!cue) {
@@ -1065,7 +1148,7 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
         } return 0;
     }
     if (message == WM_CLOSE) { if (gui_bd_format_list(tool->operation)) { tool->bdReClosing = true; tool->bdReLoaded = false; } if (tool->operation == GUI_CD_ISO_PLAN) { tool->cdClosing = true; gui_cd_plan_clear(ui); } if (tool->operation == GUI_DVD_CANDIDATES) { tool->candidateClosing = true; gui_dvd_candidates_clear(ui,true); if (!ui->job) gui_status(ui,L"已关闭候选窗口，未保留派生单元选择"); } if (!ui->job) DestroyWindow(window); else { SetEvent(ui->job->cancel); EnableWindow(GetDlgItem(window,UI_TOOL_CLOSE),FALSE); SetWindowTextW(window,L"正在取消..."); } return 0; }
-    if (message == WM_DESTROY) { if (tool->mdsTips) DestroyWindow(tool->mdsTips); if (tool->operation == GUI_WRITE_OPTIONS) ui->writeLayer = NULL; if (tool->operation == GUI_CD_ISO_PLAN) gui_cd_plan_clear(ui); if (tool->operation == GUI_DVD_CANDIDATES && !tool->candidateAccepted) gui_dvd_candidates_clear(ui,true); EnableWindow(ui->window, TRUE); SetForegroundWindow(ui->window); ui->tool = NULL; SetWindowLongPtrW(window,GWLP_USERDATA,0); free(tool->sources); free(tool); if (ui->writeNeedsRefresh) { ui->writeNeedsRefresh = false; PostMessageW(ui->window,WM_COMMAND,UI_DEVICE_REFRESH,0); } return 0; }
+    if (message == WM_DESTROY) { if (tool->listTips) DestroyWindow(tool->listTips); if (tool->operation == GUI_WRITE_OPTIONS) ui->writeLayer = NULL; if (tool->operation == GUI_CD_ISO_PLAN) gui_cd_plan_clear(ui); if (tool->operation == GUI_DVD_CANDIDATES && !tool->candidateAccepted) gui_dvd_candidates_clear(ui,true); EnableWindow(ui->window, TRUE); SetForegroundWindow(ui->window); ui->tool = NULL; SetWindowLongPtrW(window,GWLP_USERDATA,0); free(tool->sources); free(tool); if (ui->writeNeedsRefresh) { ui->writeNeedsRefresh = false; PostMessageW(ui->window,WM_COMMAND,UI_DEVICE_REFRESH,0); } return 0; }
     return DefWindowProcW(window, message, wp, lp);
 }
 
@@ -1179,7 +1262,7 @@ static void gui_complete(GuiWindow* ui, GuiJob* job) {
     if (ui->go) EnableWindow(ui->go, ui->mode != GUI_READ && ui->mode != GUI_DISCOVERY && !(ui->mode == GUI_BUILD && ui->outputDevice)); if (ui->cancel) EnableWindow(ui->cancel,FALSE);
     if (ui->tool) {
         if (job->succeeded || job->error == ERROR_CANCELLED) DestroyWindow(ui->tool->window);
-        else { HWND toolWindow = ui->tool->window; for (HWND child = GetWindow(toolWindow,GW_CHILD); child; child = GetWindow(child,GW_HWNDNEXT)) EnableWindow(child,TRUE); SetWindowTextW(toolWindow,ui->tool->operation == GUI_CREATE_CUE ? L"生成 CUE 文件" : L"创建 MDS 文件"); if (ui->tool->layer) SendMessageW(toolWindow,WM_COMMAND,UI_TOOL_LAYER,0); MessageBoxW(toolWindow,job->result,L"ImgBurn",MB_OK | MB_ICONERROR); }
+        else { HWND toolWindow = ui->tool->window; for (HWND child = GetWindow(toolWindow,GW_CHILD); child; child = GetWindow(child,GW_HWNDNEXT)) EnableWindow(child,TRUE); SetWindowTextW(toolWindow,ui->tool->operation == GUI_CREATE_CUE ? L"生成 CUE 文件" : L"创建 MDS 文件"); if (ui->tool->operation == GUI_CREATE_CUE) gui_tool_list_state(ui->tool); else if (ui->tool->layer) SendMessageW(toolWindow,WM_COMMAND,UI_TOOL_LAYER,0); MessageBoxW(toolWindow,job->result,L"ImgBurn",MB_OK | MB_ICONERROR); }
     }
     else if (!job->succeeded && job->error != ERROR_CANCELLED) MessageBoxW(ui->window,job->result,L"ImgBurn",MB_OK | MB_ICONERROR);
     bool refreshMedia = job->operation == GUI_ERASE_QUICK || job->operation == GUI_ERASE_FULL || job->operation == GUI_DISCOVERY_DISC || job->operation == GUI_WRITE_DISC;

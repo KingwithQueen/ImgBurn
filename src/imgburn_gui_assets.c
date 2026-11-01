@@ -20,7 +20,9 @@ static const wchar_t* const imageNames[ASSET_COUNT] = {
     L"ui_images\\tfrmmain\\Panel_ISOWRITE_GraphDataDisplay.png", L"ui_images\\tfrmmain\\Panel_ISOWRITE_GraphDataExport.png", L"ui_images\\tfrmmain\\PngImageList32.png", L"ui_images\\tfrmmain\\PngImageList32_2.png", L"ui_images\\tfrmmain\\ImageList.png",
     L"ui_images\\tfrmmain\\Panel_ISOREAD_SourceSectorViewer.png",
     L"ui_images\\tfrmcreatemds\\btnAdd.png", L"ui_images\\tfrmcreatemds\\btnRemove.png", L"ui_images\\tfrmcreatemds\\btnRemoveAll.png",
-    L"ui_images\\tfrmcreatemds\\btnMoveToTop.png", L"ui_images\\tfrmcreatemds\\btnMoveUp.png", L"ui_images\\tfrmcreatemds\\btnMoveDown.png", L"ui_images\\tfrmcreatemds\\btnMoveToBottom.png"
+    L"ui_images\\tfrmcreatemds\\btnMoveToTop.png", L"ui_images\\tfrmcreatemds\\btnMoveUp.png", L"ui_images\\tfrmcreatemds\\btnMoveDown.png", L"ui_images\\tfrmcreatemds\\btnMoveToBottom.png",
+    L"ui_images\\tfrmcreatecue\\Layout_Add.png", L"ui_images\\tfrmcreatecue\\Layout_Remove.png", L"ui_images\\tfrmcreatecue\\Layout_RemoveAll.png",
+    L"ui_images\\tfrmcreatecue\\Layout_MoveToTop.png", L"ui_images\\tfrmcreatecue\\Layout_MoveUp.png", L"ui_images\\tfrmcreatecue\\Layout_MoveDown.png", L"ui_images\\tfrmcreatecue\\Layout_MoveToBottom.png"
 };
 
 /* 整数化的Round近似沿用原组件的最近偶数规则，避免在正好半值时一律向上。 */
