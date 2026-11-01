@@ -1263,6 +1263,29 @@ done:
     CloseHandle(file); free(parsed); SetLastError(error); return ok;
 }
 
+/* 仅查询目标身份；数据文件的读锁保持到原子发布结束，不新增内容读取。 */
+static DWORD mds_tools_lock_sources(const wchar_t* destination, wchar_t (*paths)[MAX_PATH], const uint64_t* physicalBytes, size_t count, HANDLE* locks) {
+    BY_HANDLE_FILE_INFORMATION targetInfo = {0}; bool haveTarget = false; DWORD error = ERROR_SUCCESS;
+    HANDLE target = CreateFileW(destination,FILE_READ_ATTRIBUTES,FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+    if (target == INVALID_HANDLE_VALUE) { error = GetLastError(); if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) error = ERROR_SUCCESS; }
+    else {
+        haveTarget = GetFileInformationByHandle(target,&targetInfo) != 0; if (!haveTarget) error = GetLastError();
+        CloseHandle(target);
+    }
+    if (error) return error;
+    size_t opened = 0;
+    for (size_t i = 0; i < count; i++) {
+        HANDLE source = CreateFileW(paths[i],GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+        if (source == INVALID_HANDLE_VALUE) { error = GetLastError(); break; }
+        locks[opened++] = source; BY_HANDLE_FILE_INFORMATION info = {0};
+        if (!GetFileInformationByHandle(source,&info)) { error = GetLastError(); break; }
+        if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || ((uint64_t)info.nFileSizeHigh << 32 | info.nFileSizeLow) != physicalBytes[i]) { error = ERROR_INVALID_DATA; break; }
+        if (haveTarget && info.dwVolumeSerialNumber == targetInfo.dwVolumeSerialNumber && info.nFileIndexHigh == targetInfo.nFileIndexHigh && info.nFileIndexLow == targetInfo.nFileIndexLow) { error = ERROR_INVALID_PARAMETER; break; }
+    }
+    if (error) while (opened) CloseHandle(locks[--opened]);
+    return error;
+}
+
 /* Tools直接描述逻辑文件列表；它与Read的虚拟布局及普通DVD刻录生成规则分别保留。 */
 static bool mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames, bool explicitLayerBreak, bool ansiFilenames, uint64_t startByteOffset, bool splitSectors) {
     if (!mdsFilePath || !mdsFilePath[0] || !dataFiles || !fileCount || fileCount > MAX_MDS_FILES || wcslen(mdsFilePath) >= MAX_PATH || !totalSectors || totalSectors > INT32_MAX || (unsigned)medium > MDS_TOOLS_DVD_PLUS_RW) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
@@ -1279,6 +1302,9 @@ static bool mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* co
     size_t destinationDirectory = (size_t)(destinationName - destination);
     wchar_t (*names)[MAX_PATH] = (wchar_t (*)[MAX_PATH])calloc(fileCount,sizeof(*names));
     if (!names) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; }
+    wchar_t (*paths)[MAX_PATH] = (wchar_t (*)[MAX_PATH])calloc(fileCount,sizeof(*paths));
+    if (!paths) { free(names); SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; }
+    uint64_t physicalBytes[MAX_MDS_FILES]; HANDLE locks[MAX_MDS_FILES];
     uint32_t parts[MAX_MDS_FILES], carries[MAX_MDS_FILES], incomingCarry = 0, footerOffset = layerBreakLba ? 8392 : 4292;
     uint32_t bytes = footerOffset + (uint32_t)fileCount * 16;
     uint64_t sourceSectors = 0; DWORD error = ERROR_SUCCESS;
@@ -1290,6 +1316,7 @@ static bool mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* co
         uint64_t skipped = i ? 0 : startByteOffset;
         if (attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { error = ERROR_INVALID_DATA; break; }
         if (!mds_part_geometry(part,skipped,incomingCarry,i + 1 == fileCount,splitSectors,&parts[i],&carries[i])) { error = GetLastError(); break; }
+        wcscpy(paths[i],source); physicalBytes[i] = part;
         sourceSectors += parts[i]; incomingCarry = carries[i];
         const wchar_t* name = source;
         for (const wchar_t* p = source; *p; p++) if (*p == L'\\' || *p == L'/') name = p + 1;
@@ -1305,9 +1332,9 @@ static bool mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* co
         bytes += (uint32_t)(wcslen(names[i]) + 1) * (ansiFilenames ? 1 : 2);
     }
     if (!error && sourceSectors != totalSectors) error = ERROR_INVALID_DATA;
-    if (error) { free(names); SetLastError(error); return false; }
+    if (error) { free(paths); free(names); SetLastError(error); return false; }
     uint8_t* data = (uint8_t*)calloc(1,bytes);
-    if (!data) { free(names); SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; }
+    if (!data) { free(paths); free(names); SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; }
     static const uint16_t media[] = {0x10,0x12,0x13,0x15,0x14};
     static const uint8_t books[] = {0x01,0x21,0x31,0xA1,0x91};
     MdsHeader* header = (MdsHeader*)data;
@@ -1340,14 +1367,16 @@ static bool mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* co
         nameOffset += nameBytes;
     }
     free(names);
-    if (error) { free(data); SetLastError(error); return false; }
-    static volatile LONG sequence = 0; HANDLE output = INVALID_HANDLE_VALUE;
+    if (error) { free(paths); free(data); SetLastError(error); return false; }
+    static volatile LONG sequence = 0; HANDLE output = INVALID_HANDLE_VALUE; bool sourcesLocked = false;
     for (int i = 0; i < 16; i++) {
         if (swprintf(temporary,MAX_PATH,L"%ls.partial.%lu.%ld",destination,GetCurrentProcessId(),InterlockedIncrement(&sequence)) < 0) { error = ERROR_FILENAME_EXCED_RANGE; break; }
+        if (!sourcesLocked) { error = mds_tools_lock_sources(destination,paths,physicalBytes,fileCount,locks); if (error) break; sourcesLocked = true; }
         output = CreateFileW(temporary,GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
         if (output != INVALID_HANDLE_VALUE) break;
         error = GetLastError(); if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) break;
     }
+    free(paths);
     bool ok = output != INVALID_HANDLE_VALUE; uint32_t offset = 0;
     while (ok && offset < bytes) {
         DWORD actual = 0;
@@ -1359,6 +1388,7 @@ static bool mds_create_tools_files(const wchar_t* mdsFilePath, const wchar_t* co
     if (output != INVALID_HANDLE_VALUE && !CloseHandle(output) && ok) { error = GetLastError(); ok = false; }
     if (ok && !MoveFileExW(temporary,destination,MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { error = GetLastError(); ok = false; }
     if (!ok && output != INVALID_HANDLE_VALUE) DeleteFileW(temporary);
+    if (sourcesLocked) for (size_t i = fileCount; i; i--) CloseHandle(locks[i - 1]);
     free(data); SetLastError(ok ? ERROR_SUCCESS : error); return ok;
 }
 

@@ -195,6 +195,7 @@ typedef enum {
     MDS_TOOLS_DVD_PLUS_R, MDS_TOOLS_DVD_PLUS_RW
 } MdsToolsMedium;
 /* Tools的整扇区2048字节文件列表；默认相对名/基本名可同主干通配，保留完整路径时不通配。 */
+/* Tools生成接口拒绝目标与任何实际数据文件同身份，并保持所有数据文件只读共享至发布结束。 */
 bool imgburn_mds_create_tools_files(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames);
 /* 旧接口默认Unicode；ANSI沿原版码元数加1写名称，多字节可截断，转换结果较短时拒绝。 */
 bool imgburn_mds_create_tools_files_ex(const wchar_t* mdsPath, const wchar_t* const* dataFiles, size_t fileCount, uint32_t totalSectors, uint32_t layerBreakLba, bool oppositeTrackPath, MdsToolsMedium medium, bool preserveFullPathnames, bool ansiFilenames);
