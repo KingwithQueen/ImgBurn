@@ -209,6 +209,8 @@ typedef struct {
 bool imgburn_mds_load_tools_dvd(const wchar_t* descriptionPath, MdsToolsInput* outInput);
 /* LST首行IMAGELIST，整卷列表及单项描述同主干恢复；未识别返回BAD_FORMAT供Tools回raw，hint为0。 */
 bool imgburn_mds_load_tools_lst(const wchar_t* descriptionPath, MdsToolsInput* outInput);
+/* DI单字节文本按首NUL终止识别及计数；后缀01a..01z/02a可跨卷补齐及截尾，首卷独立offset0资格。 */
+bool imgburn_mds_load_tools_di(const wchar_t* descriptionPath, MdsToolsInput* outInput);
 /* GI外置整卷列表或至少一个完整载荷扇区的带头单卷数据；允许截去单卷不足2048的尾部，先扫描16..79再检查0号。 */
 bool imgburn_mds_load_tools_gi(const wchar_t* descriptionPath, MdsToolsInput* outInput);
 /* PDI首卷须独立容纳完整2048载荷样本；第16样本未命中后求全卷物理长度并扫描首卷16..79及0。 */

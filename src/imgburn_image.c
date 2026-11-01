@@ -1007,10 +1007,10 @@ static bool mds_tools_qualify_headed(HANDLE file, uint64_t bytes, uint64_t physi
                 unsigned count = !scanLateSamples && kind == 1 ? 1 : ARRAYSIZE(sizes);
                 for (unsigned i = 0; i < count; i++) {
                     uint32_t base = kind == 0 ? 0 : kind == 1 ? offset : (uint32_t)(physicalTotal % sizes[i]); bool matched;
-                    if (kind == 2 && !base) continue;
+                    if (kind && !base) continue;
                     if (!mds_tools_candidate(file,bytes,sample + (pregap ? 150 : 0),base,i,&matched)) return false;
                     if (!matched) continue;
-                    if (!pregap && kind == 1 && !i) return true;
+                    if (!pregap && kind == (offset ? 1u : 0u) && !i) return true;
                     SetLastError(ERROR_NOT_SUPPORTED); return false;
                 }
             }
@@ -1032,6 +1032,99 @@ static bool mds_tools_headed_file(HANDLE file, const wchar_t* path, uint64_t byt
     input->files[0].bytes = bytes; input->fileCount = 1; input->totalSectors = (uint32_t)sectors; input->startByteOffset = offset;
     input->splitSectors = splitSectors;
     SetLastError(ERROR_SUCCESS); return true;
+}
+
+/* Delphi的32位计数：十进制限有符号范围，十六进制保留补码，失败默认0。 */
+static uint32_t mds_tools_di_count(const char* text) {
+    while (*text && (unsigned char)*text <= 0x20) text++;
+    const char* end = text + strlen(text); while (end > text && (unsigned char)end[-1] <= 0x20) end--;
+    bool negative = text < end && *text == '-'; if (text < end && (*text == '-' || *text == '+')) text++;
+    unsigned base = 10;
+    if (text < end && (*text == '$' || *text == 'x' || *text == 'X')) { base = 16; text++; }
+    else if (end - text >= 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) { base = 16; text += 2; }
+    if (text == end) return 0;
+    uint32_t value = 0, limit = base == 16 ? UINT32_MAX : (uint32_t)INT32_MAX + (negative ? 1u : 0u);
+    for (; text < end; text++) {
+        unsigned char c = (unsigned char)*text;
+        unsigned digit = c >= '0' && c <= '9' ? (unsigned)(c - '0') : c >= 'a' && c <= 'f' ? (unsigned)(c - 'a' + 10) : c >= 'A' && c <= 'F' ? (unsigned)(c - 'A' + 10) : UINT32_MAX;
+        if (digit >= base || value > (limit - digit) / base) return 0;
+        value = value * base + digit;
+    }
+    return negative ? 0u - value : value;
+}
+
+/* DI单字节文本以首NUL结束；识别和计数共用可见前缀，BOM及高字节不转码。 */
+bool imgburn_mds_load_tools_di(const wchar_t* descriptionPath, MdsToolsInput* outInput) {
+    if (outInput) memset(outInput,0,sizeof(*outInput));
+    if (!descriptionPath || !descriptionPath[0] || wcslen(descriptionPath) >= MAX_PATH || !outInput) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
+    HANDLE descriptor = CreateFileW(descriptionPath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL), file = INVALID_HANDLE_VALUE;
+    if (descriptor == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size = {0}; DWORD got = 0, error = ERROR_BAD_FORMAT; char* text = NULL; MdsToolsInput* parsed = NULL; bool ok = false;
+    if (!GetFileSizeEx(descriptor,&size)) { error = GetLastError(); goto done; }
+    if (size.QuadPart <= 0 || size.QuadPart > 1024 * 1024) goto done;
+    text = calloc((size_t)size.QuadPart + 1,1); if (!text) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
+    if (!ReadFile(descriptor,text,(DWORD)size.QuadPart,&got,NULL)) { error = GetLastError(); goto done; }
+    if (got != (DWORD)size.QuadPart) { error = ERROR_READ_FAULT; goto done; }
+    bool recognized = false; size_t visibleBytes = strlen(text);
+    for (DWORD i = 0; i + 15 <= visibleBytes; i++) if (!memcmp(text + i,"Num Of Sessions",15)) { recognized = true; break; }
+    if (!recognized) goto done;
+    uint32_t sessions = 0, tracks = 0; error = ERROR_NOT_SUPPORTED;
+    for (char* cursor = text; *cursor;) {
+        char* line = cursor; while (*cursor && *cursor != '\r' && *cursor != '\n') cursor++;
+        if (*cursor) { char ending = *cursor; *cursor++ = 0; if (ending == '\r' && *cursor == '\n') cursor++; }
+        bool sessionLine = strstr(line,"Num Of Sessions") != NULL, trackLine = strstr(line,"Num Of Tracks") != NULL;
+        char* equals = strchr(line,'=');
+        if ((sessionLine || trackLine) && equals) {
+            uint32_t count = mds_tools_di_count(equals + 1);
+            if (sessionLine) sessions = count;
+            if (trackLine) tracks = count;
+        }
+        if (sessions && tracks) break;
+    }
+    if (sessions != 1 || tracks != 1) goto done;
+    parsed = calloc(1,sizeof(*parsed)); if (!parsed) { error = ERROR_NOT_ENOUGH_MEMORY; goto done; }
+    wchar_t description[MAX_PATH]; DWORD length = GetFullPathNameW(descriptionPath,MAX_PATH,description,NULL);
+    if (!length || length >= MAX_PATH) { error = ERROR_INVALID_NAME; goto done; }
+    uint64_t physicalTotal = 0;
+    /* 完整描述路径附加01a..01z/02a；查到首个缺项或目录即停止，不跨缺口猜文件。 */
+    for (unsigned i = 0; i <= MAX_MDS_FILES; i++) {
+        wchar_t path[MAX_PATH]; WIN32_FILE_ATTRIBUTE_DATA attributes = {0};
+        if (swprintf(path,MAX_PATH,L"%ls%02u%lc",description,i / 26 + 1,(wint_t)(L'a' + i % 26)) < 0) { error = ERROR_INVALID_NAME; goto done; }
+        if (!GetFileAttributesExW(path,GetFileExInfoStandard,&attributes)) {
+            error = GetLastError();
+            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) goto done;
+            if (!parsed->fileCount) { error = ERROR_FILE_NOT_FOUND; goto done; }
+            break;
+        }
+        if (attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!parsed->fileCount) { error = ERROR_FILE_NOT_FOUND; goto done; }
+            break;
+        }
+        if (i == MAX_MDS_FILES) { error = ERROR_NOT_SUPPORTED; goto done; }
+        uint64_t bytes = (uint64_t)attributes.nFileSizeHigh << 32 | attributes.nFileSizeLow;
+        if (!bytes) { error = ERROR_INVALID_DATA; goto done; }
+        if (physicalTotal > UINT64_MAX - bytes || (physicalTotal + bytes) / 2048 > INT32_MAX) { error = ERROR_NOT_SUPPORTED; goto done; }
+        MdsDataFile* part = &parsed->files[parsed->fileCount++]; wcscpy(part->path,path); part->bytes = bytes;
+        physicalTotal += bytes; if (bytes % 2048) parsed->splitSectors = true;
+    }
+    /* 末卷取整，前卷借下一卷补齐；物理尾部仍保留在资格检查的总长度中。 */
+    uint32_t incomingCarry = 0;
+    for (unsigned i = 0; i < parsed->fileCount; i++) {
+        uint32_t sectors, carry;
+        if (!mds_part_geometry(parsed->files[i].bytes,0,incomingCarry,i + 1 == parsed->fileCount,true,&sectors,&carry)) { error = GetLastError(); goto done; }
+        if (sectors > (uint32_t)INT32_MAX - parsed->totalSectors) { error = ERROR_NOT_SUPPORTED; goto done; }
+        parsed->totalSectors += sectors; incomingCarry = carry;
+    }
+    if (!parsed->totalSectors) { error = ERROR_NOT_SUPPORTED; goto done; }
+    file = CreateFileW(parsed->files[0].path,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+    if (file == INVALID_HANDLE_VALUE) { error = GetLastError(); goto done; }
+    if (!GetFileSizeEx(file,&size)) { error = GetLastError(); goto done; }
+    if (size.QuadPart < 0 || (uint64_t)size.QuadPart != parsed->files[0].bytes) { error = ERROR_INVALID_DATA; goto done; }
+    if (!mds_tools_qualify_headed(file,parsed->files[0].bytes,physicalTotal,0,true,NULL)) { error = GetLastError(); goto done; }
+    *outInput = *parsed; error = ERROR_SUCCESS; ok = true;
+done:
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    CloseHandle(descriptor); free(parsed); free(text); SetLastError(error); return ok;
 }
 
 bool imgburn_mds_load_tools_gi(const wchar_t* descriptionPath, MdsToolsInput* outInput) {
