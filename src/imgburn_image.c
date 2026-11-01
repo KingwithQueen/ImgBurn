@@ -1034,6 +1034,20 @@ static bool mds_tools_headed_file(HANDLE file, const wchar_t* path, uint64_t byt
     SetLastError(ERROR_SUCCESS); return true;
 }
 
+/* 仅短DI首卷可跳过尚未实现的raw-sync搜索；四种头按原顺序独立读取。 */
+static bool mds_tools_qualify_di_header(HANDLE file, uint64_t bytes) {
+    static const uint8_t signatures[][8] = {{0,0,0,0,0xC2,0x33,0x9F,0x3D},{'C','O','B','R','A','M','B','1'},{0x5D,0x1C,0x9E,0xA3,0,0,0,0},{0x86,0x56,0x55,0x50,0,0,0,2}};
+    static const uint8_t offsets[] = {24,0,24,0};
+    /* raw-sync最早完整候选为第16样本的2336字节扇区，不含单独0号样本。 */
+    if (bytes < 2048 || bytes >= 17u * 2336u) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
+    uint8_t sector[2048];
+    for (unsigned i = 0; i < ARRAYSIZE(signatures); i++) {
+        if (!mds_tools_read_at(file,0,sector,sizeof(sector))) return false;
+        if (!memcmp(sector + offsets[i],signatures[i],sizeof(signatures[i]))) return true;
+    }
+    SetLastError(ERROR_NOT_SUPPORTED); return false;
+}
+
 /* Delphi的32位计数：十进制限有符号范围，十六进制保留补码，失败默认0。 */
 static uint32_t mds_tools_di_count(const char* text) {
     while (*text && (unsigned char)*text <= 0x20) text++;
@@ -1120,7 +1134,8 @@ bool imgburn_mds_load_tools_di(const wchar_t* descriptionPath, MdsToolsInput* ou
     if (file == INVALID_HANDLE_VALUE) { error = GetLastError(); goto done; }
     if (!GetFileSizeEx(file,&size)) { error = GetLastError(); goto done; }
     if (size.QuadPart < 0 || (uint64_t)size.QuadPart != parsed->files[0].bytes) { error = ERROR_INVALID_DATA; goto done; }
-    if (!mds_tools_qualify_headed(file,parsed->files[0].bytes,physicalTotal,0,true,NULL)) { error = GetLastError(); goto done; }
+    bool noMarker;
+    if (!mds_tools_qualify_headed(file,parsed->files[0].bytes,physicalTotal,0,true,&noMarker) && (!noMarker || !mds_tools_qualify_di_header(file,parsed->files[0].bytes))) { error = GetLastError(); goto done; }
     *outInput = *parsed; error = ERROR_SUCCESS; ok = true;
 done:
     if (file != INVALID_HANDLE_VALUE) CloseHandle(file);

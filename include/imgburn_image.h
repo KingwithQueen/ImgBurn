@@ -210,6 +210,7 @@ bool imgburn_mds_load_tools_dvd(const wchar_t* descriptionPath, MdsToolsInput* o
 /* LST首行IMAGELIST，整卷列表及单项描述同主干恢复；未识别返回BAD_FORMAT供Tools回raw，hint为0。 */
 bool imgburn_mds_load_tools_lst(const wchar_t* descriptionPath, MdsToolsInput* outInput);
 /* DI单字节文本按首NUL终止识别及计数；后缀01a..01z/02a可跨卷补齐及截尾，首卷独立offset0资格。 */
+/* 常规标记全未中时，仅2048..39711字节首卷继续检查四种特殊2048首扇区签名。 */
 bool imgburn_mds_load_tools_di(const wchar_t* descriptionPath, MdsToolsInput* outInput);
 /* GI外置整卷列表或至少一个完整载荷扇区的带头单卷数据；允许截去单卷不足2048的尾部，先扫描16..79再检查0号。 */
 bool imgburn_mds_load_tools_gi(const wchar_t* descriptionPath, MdsToolsInput* outInput);
