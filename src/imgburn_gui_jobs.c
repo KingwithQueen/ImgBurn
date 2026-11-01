@@ -240,6 +240,31 @@ static bool job_cue(GuiJob* job) {
     free(comp); return ok;
 }
 
+/* 描述不在展开后的数据卷列表中，单独锁住首描述并检查目标文件身份。 */
+static HANDLE job_mds_lock_description(const wchar_t* description, const wchar_t* destination) {
+    wchar_t sourcePath[MAX_PATH], targetPath[MAX_PATH];
+    if (!destination[0]) { SetLastError(ERROR_INVALID_PARAMETER); return INVALID_HANDLE_VALUE; }
+    DWORD sourceLength = GetFullPathNameW(description,MAX_PATH,sourcePath,NULL), targetLength = GetFullPathNameW(destination,MAX_PATH,targetPath,NULL);
+    if (!sourceLength || sourceLength >= MAX_PATH || !targetLength || targetLength >= MAX_PATH) { SetLastError(ERROR_INVALID_NAME); return INVALID_HANDLE_VALUE; }
+    int comparison = CompareStringOrdinal(sourcePath,-1,targetPath,-1,TRUE); if (!comparison) return INVALID_HANDLE_VALUE;
+    if (comparison == CSTR_EQUAL) { SetLastError(ERROR_INVALID_PARAMETER); return INVALID_HANDLE_VALUE; }
+    HANDLE source = CreateFileW(sourcePath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+    if (source == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
+    BY_HANDLE_FILE_INFORMATION sourceInfo = {0}, targetInfo = {0}; DWORD error = ERROR_SUCCESS;
+    HANDLE target = INVALID_HANDLE_VALUE;
+    if (!GetFileInformationByHandle(source,&sourceInfo)) error = GetLastError();
+    if (!error) {
+        target = CreateFileW(targetPath,FILE_READ_ATTRIBUTES,FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+        if (target == INVALID_HANDLE_VALUE) { DWORD missing = GetLastError(); if (missing != ERROR_FILE_NOT_FOUND && missing != ERROR_PATH_NOT_FOUND) error = missing; }
+        else if (!GetFileInformationByHandle(target,&targetInfo)) error = GetLastError();
+        else if (sourceInfo.dwVolumeSerialNumber == targetInfo.dwVolumeSerialNumber && sourceInfo.nFileIndexHigh == targetInfo.nFileIndexHigh && sourceInfo.nFileIndexLow == targetInfo.nFileIndexLow) error = ERROR_INVALID_PARAMETER;
+    }
+    if (target != INVALID_HANDLE_VALUE) CloseHandle(target);
+    if (error) { CloseHandle(source); SetLastError(error); return INVALID_HANDLE_VALUE; }
+    /* 保持不共享写入和删除，直到原子发布结束，避免身份检查之后覆盖原描述。 */
+    SetLastError(ERROR_SUCCESS); return source;
+}
+
 static bool job_mds(GuiJob* job) {
     if (!job->sources || !job->sourceCount || job->sourceCount > MAX_MDS_FILES) { SetLastError(ERROR_INVALID_PARAMETER); return false; }
     const wchar_t* firstDot = wcsrchr(job->sources[0].path,L'.'); bool list = firstDot && !_wcsicmp(firstDot,L".lst"), gi = firstDot && !_wcsicmp(firstDot,L".gi"), pdi = firstDot && !_wcsicmp(firstDot,L".pdi"), di = firstDot && !_wcsicmp(firstDot,L".di"), description = false;
@@ -255,8 +280,12 @@ static bool job_mds(GuiJob* job) {
         DWORD loadError = GetLastError();
         if (!ok && (list || gi || pdi || di) && loadError == ERROR_BAD_FORMAT) { free(input); goto raw_files; }
         if (ok && job_cancelled(job)) { SetLastError(ERROR_CANCELLED); ok = false; }
+        HANDLE descriptionLock = INVALID_HANDLE_VALUE; bool checkedDescription = ok;
+        if (ok) { descriptionLock = job_mds_lock_description(job->sources[0].path,job->destination); ok = descriptionLock != INVALID_HANDLE_VALUE; }
         if (ok) ok = imgburn_mds_create_tools_input_ex(job->destination,input,job->mdsLayerBreakOverride,job->layerBreak,job->oppositeTrackPath,job->mdsMedium,job->mdsPreservePaths,job->mdsAnsiFilenames);
         DWORD error = GetLastError();
+        if (descriptionLock != INVALID_HANDLE_VALUE) CloseHandle(descriptionLock);
+        if (checkedDescription && error == ERROR_INVALID_PARAMETER && !ok && descriptionLock == INVALID_HANDLE_VALUE) job_text(job,L"请选择有效的 MDS 目标，且不要覆盖输入描述文件。\r\n");
         if (ok) job_text(job,L"MDS 已生成：%ls\r\n扇区：%u，分卷：%u\r\n",job->destination,input->totalSectors,input->fileCount);
         free(input); SetLastError(error); return ok;
     }
