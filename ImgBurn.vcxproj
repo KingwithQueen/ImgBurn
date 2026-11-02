@@ -63,6 +63,7 @@
     <ClCompile Include="src\imgburn_fs_layout.c" />
     <ClCompile Include="src\imgburn_gui.c" />
     <ClCompile Include="src\imgburn_gui_assets.c" />
+    <ClCompile Include="src\imgburn_gui_log.c" />
     <ClCompile Include="src\imgburn_gui_sector.c" />
     <ClCompile Include="src\imgburn_gui_jobs.c" />
     <ClCompile Include="src\imgburn_image.c" />
@@ -91,6 +92,7 @@
     <ClInclude Include="include\imgburn_gui.h" />
     <ClInclude Include="src\imgburn_gui_internal.h" />
     <ClInclude Include="src\imgburn_gui_assets.h" />
+    <ClInclude Include="src\imgburn_gui_log.h" />
     <ClInclude Include="src\imgburn_gui_sector.h" />
     <ClInclude Include="include\imgburn_sector.h" />
     <ClInclude Include="include\imgburn_image.h" />

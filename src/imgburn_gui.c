@@ -4,6 +4,7 @@
 #include "imgburn_gui_internal.h"
 #include "imgburn_gui_assets.h"
 #include "imgburn_gui_sector.h"
+#include "imgburn_gui_log.h"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -12,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -52,7 +54,9 @@ enum {
     UI_CUE_GAP_TWO, UI_CUE_GAP_CUSTOM, UI_CUE_GAP_VALUE, UI_CUE_GAP_UNITS, UI_CUE_OPTIONS_SEPARATOR,
     UI_CUE_TEXT_LABEL, UI_CUE_TEXT_NONE, UI_CUE_TEXT_FILENAME, UI_CUE_TEXT_TAG, UI_CUE_TEXT_CUSTOM,
     UI_CUE_TEXT_REFRESH, UI_CUE_PERFORMER_LABEL, UI_CUE_PERFORMER, UI_CUE_TITLE_LABEL, UI_CUE_TITLE,
-    UI_CUE_DEFAULT_SEPARATOR, UI_CUE_DISC_TEXT, UI_CUE_TRACK_TEXT, UI_CUE_FILTERS, UI_CUE_EXPAND, UI_CUE_COLLAPSE
+    UI_CUE_DEFAULT_SEPARATOR, UI_CUE_DISC_TEXT, UI_CUE_TRACK_TEXT, UI_CUE_FILTERS, UI_CUE_EXPAND, UI_CUE_COLLAPSE,
+    UI_LOG_LIST = 1800, UI_LOG_CUT, UI_LOG_COPY_SELECTED, UI_LOG_DELETE, UI_LOG_SELECT_ALL,
+    UI_LOG_NEW, UI_LOG_OPEN, UI_LOG_PRINT, UI_LOG_COUNT
 };
 enum { GUI_MAIN_CONTENT_WIDTH = 665, GUI_MAIN_CONTENT_HEIGHT = 385, GUI_LOG_CLIENT_WIDTH = 633, GUI_LOG_CLIENT_HEIGHT = 180 };
 
@@ -79,7 +83,8 @@ struct GuiWindow {
     HFONT font, bold;
     GuiMode mode;
     unsigned dpi;
-    bool outputDevice, logVisible, mediaReady, writeMediaReady, writeNeedsRefresh, eraseSupported, bdReMedia, bdReWritable;
+    bool outputDevice, logVisible, logBusy, mediaReady, writeMediaReady, writeNeedsRefresh, eraseSupported, bdReMedia, bdReWritable;
+    int logExtent;
     GuiPath* paths;
     size_t pathCount;
     wchar_t sourceImage[MAX_PATH], destinationImage[MAX_PATH], readImage[MAX_PATH], volumeLabel[127];
@@ -199,10 +204,24 @@ static void separator(HMENU menu) { AppendMenuW(menu, MF_SEPARATOR, 0, NULL); }
 static void popup(HMENU menu, HMENU sub, const wchar_t* text) { AppendMenuW(menu, MF_POPUP, (UINT_PTR)sub, text); }
 static void gui_status(GuiWindow* ui, const wchar_t* text) { SendMessageW(ui->status, SB_SETTEXTW, 0, (LPARAM)text); }
 static void gui_log(GuiWindow* ui, const wchar_t* text) {
-    wchar_t* line = (wchar_t*)calloc(8500,sizeof(wchar_t)); if (!line) return;
-    SYSTEMTIME now; GetLocalTime(&now); _snwprintf_s(line,8500,_TRUNCATE,L"%02u:%02u:%02u  %ls",now.wHour,now.wMinute,now.wSecond,text);
-    LRESULT at = SendMessageW(ui->logList, LB_ADDSTRING, 0, (LPARAM)line); SendMessageW(ui->logList, LB_SETTOPINDEX, at, 0);
-    free(line);
+    if (!ui->logList || !IsWindow(ui->logList) || !text || !text[0]) return;
+    LRESULT count = SendMessageW(ui->logList,LB_GETCOUNT,0,0), top = SendMessageW(ui->logList,LB_GETTOPINDEX,0,0), height = SendMessageW(ui->logList,LB_GETITEMHEIGHT,0,0);
+    RECT client; GetClientRect(ui->logList,&client); int rows = height > 0 ? (client.bottom - client.top) / (int)height : 1; if (rows < 1) rows = 1;
+    bool follow = (count <= 0 || top + rows >= count) && SendMessageW(ui->logList,LB_GETSELCOUNT,0,0) <= 0; SYSTEMTIME now; GetLocalTime(&now);
+    HDC dc = GetDC(ui->logList); HGDIOBJ font = dc ? SelectObject(dc,ui->font) : NULL;
+    for (const wchar_t* start = text; *start;) {
+        const wchar_t* end = start; while (*end && *end != L'\r' && *end != L'\n') end++;
+        size_t length = (size_t)(end - start); if (length > (SIZE_MAX / sizeof(wchar_t)) - 12 || length > INT_MAX - 11) break;
+        wchar_t* line = calloc(length + 12,sizeof(*line)); if (!line) break;
+        swprintf(line,12,L"%02u:%02u:%02u  ",now.wHour,now.wMinute,now.wSecond); memcpy(line + 10,start,length * sizeof(*line));
+        LRESULT at = SendMessageW(ui->logList,LB_ADDSTRING,0,(LPARAM)line);
+        if (at >= 0 && dc) { SIZE size = {0}; if (GetTextExtentPoint32W(dc,line,(int)length + 10,&size) && size.cx >= 0 && size.cx <= INT_MAX - px(ui,4) && size.cx + px(ui,4) > ui->logExtent) ui->logExtent = size.cx + px(ui,4); }
+        free(line); if (at < 0) break;
+        start = end; if (*start == L'\r') start++; if (*start == L'\n') start++;
+    }
+    if (dc) { SelectObject(dc,font); ReleaseDC(ui->logList,dc); }
+    SendMessageW(ui->logList,LB_SETHORIZONTALEXTENT,(WPARAM)ui->logExtent,0);
+    LRESULT addedCount = SendMessageW(ui->logList,LB_GETCOUNT,0,0); if (addedCount > 0) SendMessageW(ui->logList,LB_SETTOPINDEX,follow ? (WPARAM)addedCount - 1 : (WPARAM)top,0);
 }
 static void gui_number(wchar_t* output, size_t capacity, uint64_t value) {
     wchar_t digits[32]; swprintf(digits,32,L"%llu",value); size_t length = wcslen(digits), at = 0;
@@ -1271,13 +1290,80 @@ static void gui_complete(GuiWindow* ui, GuiJob* job) {
     imgburn_gui_job_free(job); gui_write_checks(ui); gui_menu(ui); if (refreshMedia) gui_start(ui,GUI_DRIVE_INFO); else if (inspectSource) { ui->sourceInspectPopup = false; gui_start(ui,GUI_INSPECT); } else if (readDestination) gui_read_destination_query(ui);
 }
 
+typedef struct { wchar_t* text; size_t length; int* rows; int count; } GuiLogText;
+
+static bool gui_log_snapshot(HWND list, bool selected, GuiLogText* out) {
+    memset(out,0,sizeof(*out)); LRESULT total = SendMessageW(list,LB_GETCOUNT,0,0), count = selected ? SendMessageW(list,LB_GETSELCOUNT,0,0) : total;
+    if (total < 0 || count <= 0 || count > INT_MAX || (size_t)count > SIZE_MAX / sizeof(int)) return false;
+    out->rows = calloc((size_t)count,sizeof(*out->rows)); if (!out->rows) return false; out->count = (int)count;
+    if (selected) { if (SendMessageW(list,LB_GETSELITEMS,(WPARAM)count,(LPARAM)out->rows) != count) goto failed; }
+    else for (int i = 0; i < out->count; i++) out->rows[i] = i;
+    size_t capacity = 1;
+    for (int i = 0; i < out->count; i++) { LRESULT n = SendMessageW(list,LB_GETTEXTLEN,out->rows[i],0); if (n < 0 || capacity > SIZE_MAX / sizeof(wchar_t) - 2 || (size_t)n > SIZE_MAX / sizeof(wchar_t) - capacity - 2) goto failed; capacity += (size_t)n + 2; }
+    out->text = calloc(capacity,sizeof(*out->text)); if (!out->text) goto failed;
+    for (int i = 0; i < out->count; i++) {
+        LRESULT n = SendMessageW(list,LB_GETTEXTLEN,out->rows[i],0);
+        if (n < 0 || out->length >= capacity || capacity - out->length < 3 || (size_t)n > capacity - out->length - 3) goto failed;
+        if (SendMessageW(list,LB_GETTEXT,out->rows[i],(LPARAM)(out->text + out->length)) != n) goto failed;
+        out->length += (size_t)n; out->text[out->length++] = L'\r'; out->text[out->length++] = L'\n';
+    }
+    return true;
+failed:
+    free(out->rows); free(out->text); memset(out,0,sizeof(*out)); return false;
+}
+
+static void gui_log_state(GuiWindow* ui, HMENU extra) {
+    LRESULT count = SendMessageW(ui->logList,LB_GETCOUNT,0,0), selected = SendMessageW(ui->logList,LB_GETSELCOUNT,0,0);
+    const UINT ids[] = {UI_LOG_NEW,UI_LOG_OPEN,UI_LOG_SAVE,UI_LOG_PRINT,UI_LOG_CUT,UI_LOG_COPY_SELECTED,UI_LOG_COPY,UI_LOG_DELETE,UI_LOG_SELECT_ALL,UI_LOG_COUNT};
+    const bool enabled[] = {count > 0,false,count > 0,false,selected > 0,selected > 0,count > 0,selected > 0,count > 0,true};
+    HMENU menus[] = {GetMenu(ui->logWindow),extra};
+    for (unsigned j = 0; j < ARRAYSIZE(menus); j++) if (menus[j]) for (unsigned i = 0; i < ARRAYSIZE(ids); i++) EnableMenuItem(menus[j],ids[i],MF_BYCOMMAND | (!ui->logBusy && enabled[i] ? MF_ENABLED : MF_GRAYED));
+}
+
+static void gui_log_extent(GuiWindow* ui) {
+    HDC dc = GetDC(ui->logList); if (!dc) return; HGDIOBJ font = SelectObject(dc,ui->font); ui->logExtent = 0;
+    LRESULT count = SendMessageW(ui->logList,LB_GETCOUNT,0,0);
+    for (LRESULT i = 0; i < count; i++) {
+        LRESULT length = SendMessageW(ui->logList,LB_GETTEXTLEN,i,0); if (length < 0 || length > INT_MAX || (size_t)length >= SIZE_MAX / sizeof(wchar_t)) continue;
+        wchar_t* text = calloc((size_t)length + 1,sizeof(*text)); if (!text) break;
+        SIZE size = {0}; if (SendMessageW(ui->logList,LB_GETTEXT,i,(LPARAM)text) == length && GetTextExtentPoint32W(dc,text,(int)length,&size) && size.cx >= 0 && size.cx <= INT_MAX - px(ui,4) && size.cx + px(ui,4) > ui->logExtent) ui->logExtent = size.cx + px(ui,4); free(text);
+    }
+    SelectObject(dc,font); ReleaseDC(ui->logList,dc); SendMessageW(ui->logList,LB_SETHORIZONTALEXTENT,(WPARAM)ui->logExtent,0);
+}
+
+static bool gui_log_message(const GuiWindow* ui, const MSG* message) { return ui->logWindow && (message->hwnd == ui->logWindow || IsChild(ui->logWindow,message->hwnd)); }
+static bool gui_log_translate(GuiWindow* ui, const MSG* message) {
+    if (!gui_log_message(ui,message) || message->message != WM_KEYDOWN || (GetKeyState(VK_MENU) & 0x8000)) return false;
+    bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0; UINT command = 0;
+    if (!control && !shift && message->wParam == VK_DELETE) command = UI_LOG_DELETE;
+    else if (!control && !shift && message->wParam == VK_ESCAPE) command = UI_LOG;
+    else if (control && message->wParam == 'C') command = shift ? UI_LOG_COPY : UI_LOG_COPY_SELECTED;
+    else if (control && !shift) { switch (message->wParam) { case 'X': command = UI_LOG_CUT; break; case 'A': command = UI_LOG_SELECT_ALL; break; case 'N': command = UI_LOG_NEW; break; case 'S': command = UI_LOG_SAVE; break; case 'O': command = UI_LOG_OPEN; break; case 'P': command = UI_LOG_PRINT; break; } }
+    if (!command) return false; SendMessageW(ui->logWindow,WM_COMMAND,command,0); return true;
+}
+
+static LRESULT CALLBACK gui_log_list_proc(HWND window, UINT message, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR data) {
+    (void)data; if (message == WM_NCDESTROY) { RemoveWindowSubclass(window,gui_log_list_proc,id); return DefSubclassProc(window,message,wp,lp); }
+    HWND parent = GetParent(window); GuiWindow* ui = (GuiWindow*)GetWindowLongPtrW(parent,GWLP_USERDATA);
+    if (ui && message == WM_CONTEXTMENU) { SendMessageW(parent,message,(WPARAM)window,lp); return 0; }
+    if (ui && !ui->logBusy && message == WM_RBUTTONDOWN) {
+        LRESULT hit = SendMessageW(window,LB_ITEMFROMPOINT,0,lp);
+        if (!HIWORD(hit) && SendMessageW(window,LB_GETSEL,LOWORD(hit),0) == 0) { SendMessageW(window,LB_SETSEL,FALSE,-1); SendMessageW(window,LB_SETSEL,TRUE,LOWORD(hit)); }
+        SetFocus(window); gui_log_state(ui,NULL); return 0;
+    }
+    return DefSubclassProc(window,message,wp,lp);
+}
+
 static LRESULT CALLBACK gui_log_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     GuiWindow* ui = (GuiWindow*)GetWindowLongPtrW(window,GWLP_USERDATA);
-    if (message == WM_NCCREATE) { ui = (GuiWindow*)((CREATESTRUCTW*)lp)->lpCreateParams; SetWindowLongPtrW(window,GWLP_USERDATA,(LONG_PTR)ui); }
+    if (message == WM_NCCREATE) { ui = (GuiWindow*)((CREATESTRUCTW*)lp)->lpCreateParams; ui->logWindow = window; SetWindowLongPtrW(window,GWLP_USERDATA,(LONG_PTR)ui); }
     if (!ui) return DefWindowProcW(window,message,wp,lp);
     if (message == WM_CREATE) {
-        HMENU menu = CreateMenu(), file = CreatePopupMenu(), edit = CreatePopupMenu(); item(file,UI_LOG_SAVE,L"另存为(&S)...",true); item(file,UI_LOG,L"关闭(&C)",true); item(edit,UI_LOG_COPY,L"复制全部(&C)",true); popup(menu,file,L"文件(&F)"); popup(menu,edit,L"编辑(&E)"); SetMenu(window,menu);
-        ui->logList = ctl(ui,window,L"LISTBOX",L"",WS_VSCROLL | WS_HSCROLL | LBS_NOINTEGRALHEIGHT | LBS_MULTIPLESEL | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,0,0,0,633,180); SendMessageW(ui->logList,LB_SETITEMHEIGHT,0,px(ui,16)); return 0;
+        HMENU menu = CreateMenu(), file = CreatePopupMenu(), edit = CreatePopupMenu(), tools = CreatePopupMenu();
+        item(file,UI_LOG_NEW,L"新建日志(&N)\tCtrl+N",false); item(file,UI_LOG_OPEN,L"打开(&O)...",false); item(file,UI_LOG_SAVE,L"另存为(&S)...\tCtrl+S",false); separator(file); item(file,UI_LOG_PRINT,L"打印(&P)",false); separator(file); item(file,UI_LOG,L"关闭(&C)\tEsc",true);
+        item(edit,UI_LOG_CUT,L"剪切(&T)\tCtrl+X",false); item(edit,UI_LOG_COPY_SELECTED,L"复制(&C)\tCtrl+C",false); item(edit,UI_LOG_COPY,L"复制全部\tCtrl+Shift+C",false); item(edit,UI_LOG_DELETE,L"删除(&D)\tDel",false); separator(edit); item(edit,UI_LOG_SELECT_ALL,L"全选(&A)\tCtrl+A",false); item(tools,UI_LOG_COUNT,L"行数统计(&C)",true);
+        popup(menu,file,L"文件(&F)"); popup(menu,edit,L"编辑(&E)"); popup(menu,tools,L"工具(&T)"); SetMenu(window,menu);
+        ui->logList = ctl(ui,window,L"LISTBOX",L"",WS_TABSTOP | WS_VSCROLL | WS_HSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_EXTENDEDSEL | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,UI_LOG_LIST,0,0,633,180); SendMessageW(ui->logList,LB_SETITEMHEIGHT,0,px(ui,16)); SetWindowSubclass(ui->logList,gui_log_list_proc,1,0); return 0;
     }
     if (message == WM_MEASUREITEM) { ((MEASUREITEMSTRUCT*)lp)->itemHeight = px(ui,16); return TRUE; }
     if (message == WM_DRAWITEM) {
@@ -1285,21 +1371,45 @@ static LRESULT CALLBACK gui_log_proc(HWND window, UINT message, WPARAM wp, LPARA
         if (draw->itemID != (UINT)-1) { LRESULT length = SendMessageW(draw->hwndItem,LB_GETTEXTLEN,draw->itemID,0); if (length >= 0) { wchar_t* text = calloc((size_t)length + 1,sizeof(*text)); if (text) { SendMessageW(draw->hwndItem,LB_GETTEXT,draw->itemID,(LPARAM)text); rect.left += px(ui,2); HGDIOBJ font = SelectObject(draw->hDC,ui->font); SetBkMode(draw->hDC,TRANSPARENT); SetTextColor(draw->hDC,GetSysColor(selected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT)); DrawTextW(draw->hDC,text,-1,&rect,DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX); SelectObject(draw->hDC,font); free(text); } } } if (draw->itemState & ODS_FOCUS) DrawFocusRect(draw->hDC,&draw->rcItem); return TRUE;
     }
     if (message == WM_SIZE) { MoveWindow(ui->logList,0,0,LOWORD(lp),HIWORD(lp),TRUE); return 0; }
+    if (message == WM_SETFOCUS) { SetFocus(ui->logList); return 0; }
+    if (message == WM_GETMINMAXINFO) { RECT rect = {0,0,0,px(ui,20)}; AdjustWindowRectEx(&rect,(DWORD)GetWindowLongPtrW(window,GWL_STYLE),TRUE,(DWORD)GetWindowLongPtrW(window,GWL_EXSTYLE)); ((MINMAXINFO*)lp)->ptMinTrackSize.y = rect.bottom - rect.top; return 0; }
+    if (message == WM_INITMENUPOPUP) { gui_log_state(ui,(HMENU)wp); return 0; }
+    if (message == WM_CONTEXTMENU && ((HWND)wp == ui->logList || (HWND)wp == window)) {
+        if (ui->logBusy) return 0; HMENU menu = CreatePopupMenu(); if (!menu) return 0;
+        item(menu,UI_LOG_CUT,L"剪切",true); item(menu,UI_LOG_COPY_SELECTED,L"复制",true); item(menu,UI_LOG_DELETE,L"删除",true); separator(menu); item(menu,UI_LOG_SELECT_ALL,L"全选",true); gui_log_state(ui,menu);
+        POINT point = {(short)LOWORD(lp),(short)HIWORD(lp)}; if (point.x == -1 && point.y == -1) { RECT rect = {0}; LRESULT at = SendMessageW(ui->logList,LB_GETCARETINDEX,0,0); if (at < 0 || SendMessageW(ui->logList,LB_GETITEMRECT,(WPARAM)at,(LPARAM)&rect) == LB_ERR) GetClientRect(ui->logList,&rect); point.x = rect.left + px(ui,4); point.y = rect.top + px(ui,4); ClientToScreen(ui->logList,&point); }
+        LONG_PTR identity = (LONG_PTR)ui; UINT command = (UINT)TrackPopupMenu(menu,TPM_RETURNCMD | TPM_RIGHTBUTTON,point.x,point.y,0,window,NULL); DestroyMenu(menu);
+        if (command && IsWindow(window) && GetWindowLongPtrW(window,GWLP_USERDATA) == identity) SendMessageW(window,WM_COMMAND,command,0); return 0;
+    }
     if (message == WM_COMMAND) {
-        if (LOWORD(wp) == UI_LOG) SendMessageW(window,WM_CLOSE,0,0);
-        else if (LOWORD(wp) == UI_LOG_SAVE || LOWORD(wp) == UI_LOG_COPY) {
-            LRESULT count = SendMessageW(ui->logList,LB_GETCOUNT,0,0); size_t capacity = 1;
-            if (count == LB_ERR) return 0;
-            for (LRESULT i = 0; i < count; i++) { LRESULT n = SendMessageW(ui->logList,LB_GETTEXTLEN,i,0); if (n < 0 || capacity > SIZE_MAX / sizeof(wchar_t) - 2 || (size_t)n > SIZE_MAX / sizeof(wchar_t) - capacity - 2) return 0; capacity += (size_t)n + 2; }
-            wchar_t* text = (wchar_t*)calloc(capacity,sizeof(wchar_t)); if (!text) return 0; size_t used = 0;
-            for (LRESULT i = 0; i < count; i++) { LRESULT n = SendMessageW(ui->logList,LB_GETTEXTLEN,i,0); if (n < 0 || used >= capacity || capacity - used < 3 || (size_t)n > capacity - used - 3) break; LRESULT copied = SendMessageW(ui->logList,LB_GETTEXT,i,(LPARAM)(text + used)); if (copied != n) { free(text); return 0; } used += (size_t)n; text[used++] = L'\r'; text[used++] = L'\n'; }
-            if (used >= capacity) { free(text); return 0; } text[used] = 0;
-            if (LOWORD(wp) == UI_LOG_SAVE) { wchar_t path[MAX_PATH] = L"ImgBurn.log"; if (gui_file(window,path,true,L"日志文件\0*.log\0\0",L"log")) { FILE* out = _wfopen(path,L"wb"); if (out) { uint16_t bom = 0xFEFF; fwrite(&bom,2,1,out); fwrite(text,sizeof(wchar_t),used,out); fclose(out); } } }
-            else if (LOWORD(wp) == UI_LOG_COPY && OpenClipboard(window)) { HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE,(used + 1) * sizeof(wchar_t)); if (data) { void* p = GlobalLock(data); if (p) { memcpy(p,text,(used + 1) * sizeof(wchar_t)); GlobalUnlock(data); EmptyClipboard(); if (!SetClipboardData(CF_UNICODETEXT,data)) GlobalFree(data); } else GlobalFree(data); } CloseClipboard(); }
-            free(text);
+        UINT command = LOWORD(wp);
+        if (command == UI_LOG_LIST && HIWORD(wp) == LBN_SELCHANGE) { gui_log_state(ui,NULL); return 0; }
+        if (command == UI_LOG) { SendMessageW(window,WM_CLOSE,0,0); return 0; }
+        if (ui->logBusy || command == UI_LOG_OPEN || command == UI_LOG_PRINT) return 0;
+        if (command == UI_LOG_NEW) { SendMessageW(ui->logList,LB_RESETCONTENT,0,0); ui->logExtent = 0; SendMessageW(ui->logList,LB_SETHORIZONTALEXTENT,0,0); gui_log_state(ui,NULL); return 0; }
+        if (command == UI_LOG_SELECT_ALL) { SendMessageW(ui->logList,LB_SETSEL,TRUE,-1); gui_log_state(ui,NULL); return 0; }
+        if (command == UI_LOG_COUNT) { wchar_t counts[120]; swprintf(counts,ARRAYSIZE(counts),L"总行数：%d\r\n选中行数：%d",(int)SendMessageW(ui->logList,LB_GETCOUNT,0,0),(int)SendMessageW(ui->logList,LB_GETSELCOUNT,0,0)); MessageBoxW(window,counts,L"日志行数",MB_OK | MB_ICONINFORMATION); return 0; }
+        if (command == UI_LOG_DELETE || command == UI_LOG_SAVE || command == UI_LOG_COPY || command == UI_LOG_COPY_SELECTED || command == UI_LOG_CUT) {
+            GuiLogText text; bool selected = command == UI_LOG_DELETE || command == UI_LOG_COPY_SELECTED || command == UI_LOG_CUT;
+            if ((selected ? SendMessageW(ui->logList,LB_GETSELCOUNT,0,0) : SendMessageW(ui->logList,LB_GETCOUNT,0,0)) <= 0) return 0;
+            if (!gui_log_snapshot(ui->logList,selected,&text)) { MessageBoxW(window,L"无法创建完整日志快照。",L"ImgBurn",MB_OK | MB_ICONERROR); return 0; }
+            LONG_PTR identity = (LONG_PTR)ui; HWND list = ui->logList; bool copied = command == UI_LOG_DELETE; DWORD error = 0;
+            ui->logBusy = true; gui_log_state(ui,NULL);
+            if (command == UI_LOG_SAVE) {
+                wchar_t path[MAX_PATH] = L"ImgBurn.log";
+                bool chosen = gui_file(window,path,true,L"日志文件\0*.log\0\0",L"log");
+                if (chosen && IsWindow(window) && GetWindowLongPtrW(window,GWLP_USERDATA) == identity) copied = imgburn_gui_log_save(path,text.text,text.length,&error);
+            } else if (command != UI_LOG_DELETE) copied = imgburn_gui_log_copy(window,text.text,text.length,&error);
+            if (IsWindow(window) && GetWindowLongPtrW(window,GWLP_USERDATA) == identity) {
+                if (copied && (command == UI_LOG_DELETE || command == UI_LOG_CUT)) { for (int i = text.count; i > 0; i--) SendMessageW(list,LB_DELETESTRING,(WPARAM)text.rows[i - 1],0); gui_log_extent(ui); }
+                ui->logBusy = false; gui_log_state(ui,NULL);
+                if (error) { wchar_t messageText[160]; swprintf(messageText,ARRAYSIZE(messageText),command == UI_LOG_SAVE ? L"无法保存日志（错误 %lu）。" : L"无法复制日志（错误 %lu）。",error); MessageBoxW(window,messageText,L"ImgBurn",MB_OK | MB_ICONERROR); }
+            }
+            free(text.rows); free(text.text);
         } return 0;
     }
     if (message == WM_CLOSE) { ShowWindow(window,SW_HIDE); ui->logVisible = false; gui_menu(ui); return 0; }
+    if (message == WM_DESTROY) { ui->logList = NULL; ui->logWindow = NULL; ui->logVisible = false; ui->logBusy = false; ui->logExtent = 0; SetWindowLongPtrW(window,GWLP_USERDATA,0); return 0; }
     return DefWindowProcW(window,message,wp,lp);
 }
 
@@ -1397,7 +1507,7 @@ int imgburn_gui_show(HINSTANCE instance, int show) {
         ui->logVisible = true; ShowWindow(window,show); ShowWindow(ui->logWindow,SW_SHOWNOACTIVATE); gui_log(ui,L"ImgBurn C17 桌面界面已启动。"); gui_refresh(ui);
         ACCEL keys[] = {{FVIRTKEY | FCONTROL | FSHIFT,'P',UI_MODE_EZ},{FVIRTKEY | FCONTROL | FSHIFT,'R',UI_MODE_READ},{FVIRTKEY | FCONTROL | FSHIFT,'B',UI_MODE_BUILD},{FVIRTKEY | FCONTROL | FSHIFT,'W',UI_MODE_WRITE},{FVIRTKEY | FCONTROL | FSHIFT,'V',UI_MODE_VERIFY},{FVIRTKEY | FCONTROL | FSHIFT,'D',UI_MODE_DISCOVERY},{FVIRTKEY | FCONTROL,'O',UI_SOURCE_FILE},{FVIRTKEY,VK_F5,UI_REFRESH}};
         HACCEL accel = CreateAcceleratorTableW(keys,(int)(sizeof(keys) / sizeof(*keys))); MSG msg;
-        while (GetMessageW(&msg,NULL,0,0) > 0) { if (!ui->tool && msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN && msg.hwnd == ui->sourceEdit && ui->mode == GUI_BUILD) { wchar_t path[MAX_PATH]; GetWindowTextW(ui->sourceEdit,path,MAX_PATH); if (gui_paths_add(&ui->paths,&ui->pathCount,path)) gui_mode(ui,GUI_BUILD); else MessageBoxW(window,L"无法添加该路径。",L"ImgBurn",MB_OK | MB_ICONERROR); continue; } if (ui->tool && IsDialogMessageW(ui->tool->window,&msg)) continue; if ((ui->tool || !TranslateAcceleratorW(window,accel,&msg)) && !IsDialogMessageW(window,&msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); } }
+        while (GetMessageW(&msg,NULL,0,0) > 0) { if (gui_log_message(ui,&msg)) { if (!gui_log_translate(ui,&msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); } continue; } if (!ui->tool && msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN && msg.hwnd == ui->sourceEdit && ui->mode == GUI_BUILD) { wchar_t path[MAX_PATH]; GetWindowTextW(ui->sourceEdit,path,MAX_PATH); if (gui_paths_add(&ui->paths,&ui->pathCount,path)) gui_mode(ui,GUI_BUILD); else MessageBoxW(window,L"无法添加该路径。",L"ImgBurn",MB_OK | MB_ICONERROR); continue; } if (ui->tool && IsDialogMessageW(ui->tool->window,&msg)) continue; if ((ui->tool || !TranslateAcceleratorW(window,accel,&msg)) && !IsDialogMessageW(window,&msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); } }
         if (accel) DestroyAcceleratorTable(accel);
     }
     gui_dvd_candidates_clear(ui,false); gui_cd_plan_clear(ui); free(ui->paths); imgburn_gui_assets_free(&ui->assets); if (ui->font) DeleteObject(ui->font); if (ui->bold) DeleteObject(ui->bold); if (SUCCEEDED(comResult)) CoUninitialize(); free(ui); return window ? 0 : 1;
