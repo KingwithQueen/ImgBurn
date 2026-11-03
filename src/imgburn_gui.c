@@ -1365,7 +1365,9 @@ static void gui_complete(GuiWindow* ui, GuiJob* job) {
     if (job->operation == GUI_WRITE_DISC || job->operation == GUI_ERASE_QUICK || job->operation == GUI_ERASE_FULL) ui->bdReWritable = ui->bdReMedia = ui->writeMediaReady = false;
     if (job->operation == GUI_READ_DISC || job->operation == GUI_VERIFY_DISC || job->operation == GUI_WRITE_DISC || job->operation == GUI_ERASE_QUICK || job->operation == GUI_ERASE_FULL || job->operation == GUI_DISCOVERY_DISC) { EnableWindow(ui->destination,ui->mode != GUI_READ); EnableWindow(ui->drives,TRUE); }
     if (ui->progress) SendMessageW(ui->progress, PBM_SETPOS, job->succeeded && job->operation != GUI_DRIVE_INFO ? 100 : 0, 0); if (ui->info && !writeInspection) { if (ui->mode != GUI_READ) SetWindowTextW(ui->info,job->result); else if (job->operation == GUI_DRIVE_INFO) SetWindowTextW(ui->info,ui->readDiscText); } gui_log(ui,job->result);
-    if (writeInspection && ui->sourceInspectPopup && job->succeeded && job->sourceCount == 1 && !_wcsicmp(ui->sourceImage,job->sources[0].path)) MessageBoxW(ui->window,job->result,L"镜像信息",MB_OK | MB_ICONINFORMATION); if (job->operation == GUI_INSPECT) ui->sourceInspectPopup = false;
+    bool showInspection = writeInspection && ui->sourceInspectPopup && job->succeeded && job->sourceCount == 1 && !_wcsicmp(ui->sourceImage,job->sources[0].path);
+    wchar_t inspection[ARRAYSIZE(job->result)] = L""; if (showInspection) wcscpy(inspection,job->result);
+    if (job->operation == GUI_INSPECT) ui->sourceInspectPopup = false;
     const wchar_t* completed = job->operation == GUI_DRIVE_INFO ? ((ui->mode == GUI_READ ? ui->mediaReady : job->mediaReady) ? L"介质已就绪" : L"介质未就绪或未插入光盘") : job->operation == GUI_CALCULATE ? L"计算完成" : job->operation == GUI_INSPECT ? L"镜像信息已载入" : L"操作成功完成";
     gui_status(ui, job->succeeded ? completed : job->error == ERROR_CANCELLED ? L"操作已取消" : L"操作失败；请查看日志");
     if (ui->go) EnableWindow(ui->go, ui->mode != GUI_READ && ui->mode != GUI_DISCOVERY && !(ui->mode == GUI_BUILD && ui->outputDevice)); if (ui->cancel) EnableWindow(ui->cancel,FALSE);
@@ -1378,6 +1380,8 @@ static void gui_complete(GuiWindow* ui, GuiJob* job) {
     bool inspectSource = job->operation == GUI_DRIVE_INFO && ui->mode == GUI_WRITE && ui->sourceImage[0] && !ui->sourceInfoAttempted && !ui->tool;
     bool readDestination = job->operation == GUI_DRIVE_INFO && ui->mode == GUI_READ && !ui->tool;
     imgburn_gui_job_free(job); gui_write_checks(ui); gui_menu(ui); if (refreshMedia) gui_start(ui,GUI_DRIVE_INFO); else if (inspectSource) { ui->sourceInspectPopup = false; gui_start(ui,GUI_INSPECT); } else if (readDestination) gui_read_destination_query(ui);
+    /* 镜像信息通知位于旧任务收尾之后，弹框返回时不再触碰ui或旧job。 */
+    if (showInspection) MessageBoxW(ui->window,inspection,L"镜像信息",MB_OK | MB_ICONINFORMATION);
 }
 
 typedef struct { wchar_t* text; size_t length; int* rows; int count; } GuiLogText;
