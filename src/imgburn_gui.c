@@ -735,6 +735,53 @@ static bool gui_cd_iso_start(GuiWindow* ui, bool writing) {
     SetWindowTextW(tool->candidateStatus,writing ? L"正在执行明确选择的计划并回读；实际状态会在完成后显示。" : L"正在后台只读查询来源和光盘布局..."); gui_cd_plan_fill(tool); return true;
 }
 
+typedef struct {
+    HWND window;
+    LRESULT value;
+    wchar_t text[MAX_PATH];
+} GuiReadReplaceControl;
+
+typedef struct {
+    HWND window;
+    uint64_t activitySerial;
+    int driveCount, selectedDrive;
+    bool complete, readCdText, rawCdMds, includeSessionPregaps, readEject;
+    wchar_t destination[MAX_PATH], drive[MAX_PATH], split[40], rate[24], audioRate[24], retries[8];
+    GuiReadReplaceControl controls[10];
+} GuiReadReplaceContext;
+
+/* 覆盖确认绑定完整Read意图；只读采样，不把弹框期间的新控件值写回旧请求。 */
+static void gui_read_replace_context(const GuiWindow* ui, GuiReadReplaceContext* context) {
+    memset(context,0,sizeof(*context)); context->window = ui->window; context->activitySerial = ui->activitySerial;
+    context->driveCount = ui->driveCount; context->selectedDrive = ui->selectedDrive;
+    context->complete = ui->mode == GUI_READ && !ui->job && ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount;
+    wcscpy(context->destination,ui->readImage); if (context->complete) wcscpy(context->drive,ui->devices[ui->selectedDrive].devicePath);
+    context->readCdText = ui->readCdText; context->rawCdMds = ui->rawCdMds; context->includeSessionPregaps = ui->includeSessionPregaps; context->readEject = ui->readEjectWhenDone;
+    wcscpy(context->split,ui->readSplitText); wcscpy(context->rate,ui->readRate); wcscpy(context->audioRate,ui->readAudioRate); wcscpy(context->retries,ui->readRetryText);
+    HWND controls[] = {ui->destination,ui->drives,ui->readSplit,ui->readSpeed,ui->readAudioSpeed,ui->readRetries,ui->readText,ui->readRawMds,ui->sessionPregaps,ui->readEject};
+    const int capacities[] = {MAX_PATH,MAX_PATH,40,24,24,8};
+    for (size_t i = 0; i < ARRAYSIZE(controls); i++) {
+        GuiReadReplaceControl* saved = &context->controls[i]; saved->window = controls[i]; if (!saved->window) continue;
+        if (!IsWindow(saved->window)) { context->complete = false; continue; }
+        if (i < ARRAYSIZE(capacities)) {
+            int length = GetWindowTextLengthW(saved->window);
+            if (length >= capacities[i] || GetWindowTextW(saved->window,saved->text,capacities[i]) != length) context->complete = false;
+            if (i >= 1 && i < 5) saved->value = SendMessageW(saved->window,CB_GETCURSEL,0,0);
+        } else saved->value = SendMessageW(saved->window,BM_GETCHECK,0,0);
+    }
+}
+
+static bool gui_read_replace_current(const GuiWindow* ui, const GuiReadReplaceContext* context) {
+    if (!context->complete || !IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)ui) return false;
+    if (ui->window != context->window || ui->mode != GUI_READ || ui->job || ui->activitySerial != context->activitySerial || ui->driveCount != context->driveCount || ui->selectedDrive != context->selectedDrive) return false;
+    GuiReadReplaceContext current; gui_read_replace_context(ui,&current);
+    if (!current.complete || current.window != context->window || current.activitySerial != context->activitySerial || current.driveCount != context->driveCount || current.selectedDrive != context->selectedDrive) return false;
+    if (wcscmp(current.destination,context->destination) || wcscmp(current.drive,context->drive) || wcscmp(current.split,context->split) || wcscmp(current.rate,context->rate) || wcscmp(current.audioRate,context->audioRate) || wcscmp(current.retries,context->retries)) return false;
+    if (current.readCdText != context->readCdText || current.rawCdMds != context->rawCdMds || current.includeSessionPregaps != context->includeSessionPregaps || current.readEject != context->readEject) return false;
+    for (size_t i = 0; i < ARRAYSIZE(current.controls); i++) if (current.controls[i].window != context->controls[i].window || current.controls[i].value != context->controls[i].value || wcscmp(current.controls[i].text,context->controls[i].text)) return false;
+    return true;
+}
+
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
     if (ui->job) return; gui_read_controls(ui);
     bool erase = operation == GUI_ERASE_QUICK || operation == GUI_ERASE_FULL, discovery = operation == GUI_DISCOVERY_DISC;
@@ -771,7 +818,12 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
     bool replace = false;
     if (operation == GUI_READ_DISC) {
         if (!ui->readImage[0]) { if (!gui_file(ui->window,ui->readImage,true,readFilter,L"iso")) return; if (ui->destination) SetWindowTextW(ui->destination,ui->readImage); replace = GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES; }
-        else if (GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES) { if (MessageBoxW(ui->window,L"目标文件已存在，是否替换？",L"ImgBurn",MB_YESNO | MB_ICONQUESTION) != IDYES) return; replace = true; }
+        else if (GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES) {
+            GuiReadReplaceContext context; gui_read_replace_context(ui,&context);
+            if (MessageBoxW(context.window,L"目标文件已存在，是否替换？",L"ImgBurn",MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+            if (!gui_read_replace_current(ui,&context)) return;
+            replace = true;
+        }
     }
     if (operation == GUI_READ_DISC) {
         bool automatic; uint64_t bytes; double rate; wchar_t* end; unsigned long retries = wcstoul(ui->readRetryText,&end,10); const wchar_t* extension = wcsrchr(ui->readImage,L'.'); bool cue = extension && !_wcsicmp(extension,L".cue");
