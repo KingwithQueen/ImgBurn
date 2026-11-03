@@ -832,6 +832,50 @@ static bool gui_disc_confirm_current(const GuiWindow* ui, const GuiDiscConfirmCo
     return true;
 }
 
+typedef struct {
+    HWND window;
+    GuiMode mode;
+    uint64_t activitySerial;
+    int driveCount, selectedDrive;
+    uint32_t discoveryCapacity;
+    bool complete, all, mediaReady, testMode, testWriteSupported, verifyAfter, bdDisableVnr;
+    BdWriteType bdWriteType;
+    wchar_t drive[MAX_PATH], count[32], rate[24];
+    GuiDiscConfirmControl controls[7];
+} GuiDiscoveryConfirmContext;
+
+/* 只读绑定品质测试确认的范围、速度和目标；保留原入口资格与解析规则。 */
+static void gui_discovery_confirm_context(const GuiWindow* ui, GuiDiscoveryConfirmContext* context) {
+    memset(context,0,sizeof(*context)); context->window = ui->window; context->mode = ui->mode; context->activitySerial = ui->activitySerial;
+    context->driveCount = ui->driveCount; context->selectedDrive = ui->selectedDrive;
+    context->complete = !ui->job && ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount;
+    if (context->complete) wcscpy(context->drive,ui->devices[ui->selectedDrive].devicePath);
+    context->all = ui->discoveryAll; wcscpy(context->count,ui->discoveryCount); wcscpy(context->rate,ui->discoveryRate);
+    context->discoveryCapacity = ui->discoveryCapacity; context->mediaReady = ui->mediaReady; context->testMode = ui->testMode; context->testWriteSupported = ui->testWriteSupported; context->verifyAfter = ui->verifyAfter;
+    context->bdWriteType = ui->bdWriteType; context->bdDisableVnr = ui->bdDisableVnr;
+    HWND controls[] = {ui->drives,ui->discoverySectors,ui->discoverySpeed,GetDlgItem(ui->window,UI_TEST),ui->verify,GetDlgItem(ui->window,UI_DISCOVERY_ALL),GetDlgItem(ui->window,UI_DISCOVERY_CUSTOM)};
+    const int capacities[] = {MAX_PATH,32,24};
+    for (size_t i = 0; i < ARRAYSIZE(controls); i++) {
+        GuiDiscConfirmControl* saved = &context->controls[i]; saved->window = controls[i]; if (!saved->window) continue;
+        if (!IsWindow(saved->window)) { context->complete = false; continue; }
+        if (i < ARRAYSIZE(capacities)) {
+            int length = GetWindowTextLengthW(saved->window);
+            if (length >= capacities[i] || GetWindowTextW(saved->window,saved->text,capacities[i]) != length) context->complete = false;
+            if (i != 1) saved->value = SendMessageW(saved->window,CB_GETCURSEL,0,0);
+        } else saved->value = SendMessageW(saved->window,BM_GETCHECK,0,0);
+    }
+}
+
+static bool gui_discovery_confirm_current(const GuiWindow* ui, const GuiDiscoveryConfirmContext* context) {
+    if (!context->complete || !IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)ui) return false;
+    if (ui->window != context->window || ui->mode != context->mode || ui->job || ui->activitySerial != context->activitySerial || ui->driveCount != context->driveCount || ui->selectedDrive != context->selectedDrive) return false;
+    GuiDiscoveryConfirmContext current; gui_discovery_confirm_context(ui,&current);
+    if (!current.complete || wcscmp(current.drive,context->drive) || current.all != context->all || wcscmp(current.count,context->count) || wcscmp(current.rate,context->rate)) return false;
+    if (current.discoveryCapacity != context->discoveryCapacity || current.mediaReady != context->mediaReady || current.testMode != context->testMode || current.testWriteSupported != context->testWriteSupported || current.verifyAfter != context->verifyAfter || current.bdWriteType != context->bdWriteType || current.bdDisableVnr != context->bdDisableVnr) return false;
+    for (size_t i = 0; i < ARRAYSIZE(current.controls); i++) if (current.controls[i].window != context->controls[i].window || current.controls[i].value != context->controls[i].value || wcscmp(current.controls[i].text,context->controls[i].text)) return false;
+    return true;
+}
+
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
     if (ui->job) return; gui_read_controls(ui);
     bool erase = operation == GUI_ERASE_QUICK || operation == GUI_ERASE_FULL, discovery = operation == GUI_DISCOVERY_DISC;
@@ -870,7 +914,11 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
         if (!gui_disc_confirm_current(ui,&context)) return;
         if (answer != IDYES) { gui_bd_write_clear(ui); return; }
     }
-    if (discovery && MessageBoxW(ui->window,ui->testMode ? L"将以设备测试模式执行品质测试，是否继续？" : L"品质测试将向所选光盘写入零数据，是否继续？",L"ImgBurn",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+    if (discovery) {
+        GuiDiscoveryConfirmContext context; gui_discovery_confirm_context(ui,&context);
+        if (MessageBoxW(context.window,ui->testMode ? L"将以设备测试模式执行品质测试，是否继续？" : L"品质测试将向所选光盘写入零数据，是否继续？",L"ImgBurn",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+        if (!gui_discovery_confirm_current(ui,&context)) return;
+    }
     if (bdReErase) {
         wchar_t confirm[700]; swprintf(confirm,700,L"目标：%ls\r\n%ls\r\n这不是安全擦除，不执行格式化。已开始的命令须等待设备结束。是否继续？",ui->devices[ui->selectedDrive].devicePath,operation == GUI_ERASE_FULL ? L"将向全部逻辑用户区写零，现有文件将不可再用。" : L"将向前800个逻辑扇区写零，其余原内容可能仍保留。");
         GuiDiscConfirmContext context; gui_disc_confirm_context(ui,false,&context);
