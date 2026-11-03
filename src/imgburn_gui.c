@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 #include <math.h>
 #include <limits.h>
 #pragma comment(lib, "comctl32.lib")
@@ -876,6 +877,69 @@ static bool gui_discovery_confirm_current(const GuiWindow* ui, const GuiDiscover
     return true;
 }
 
+typedef struct {
+    HWND window, sources;
+    uint64_t activitySerial;
+    size_t pathCount, listCount;
+    GuiPath* paths;
+    bool complete, outputDevice, dvdVideo, bluray, deduplicate, bdDisableVnr;
+    FsTypeFlags fsTypes;
+    UdfRevision revision;
+    BdWriteType bdWriteType;
+    wchar_t destination[MAX_PATH], label[127];
+    GuiDiscConfirmControl controls[7];
+} GuiBuildReplaceContext;
+
+static void gui_build_replace_values(const GuiWindow* ui, GuiBuildReplaceContext* context) {
+    memset(context,0,sizeof(*context)); context->window = ui->window; context->sources = ui->sources; context->activitySerial = ui->activitySerial; context->pathCount = ui->pathCount;
+    context->complete = ui->mode == GUI_BUILD && !ui->job && ui->paths && ui->pathCount && ui->pathCount <= 4096;
+    context->outputDevice = ui->outputDevice; context->fsTypes = ui->fsTypes; context->revision = ui->revision; context->dvdVideo = ui->dvdVideo; context->bluray = ui->bluray; context->deduplicate = ui->deduplicate;
+    context->bdWriteType = ui->bdWriteType; context->bdDisableVnr = ui->bdDisableVnr; wcscpy(context->destination,ui->destinationImage); wcscpy(context->label,ui->volumeLabel);
+    if (ui->sources) {
+        if (!IsWindow(ui->sources)) context->complete = false;
+        else { LRESULT count = SendMessageW(ui->sources,LB_GETCOUNT,0,0); if (count < 0 || count > 4096) context->complete = false; else context->listCount = (size_t)count; }
+    }
+    HWND controls[] = {ui->destination,ui->label,ui->fs,ui->udf,ui->dvd,ui->bd,ui->optimize};
+    const int capacities[] = {MAX_PATH,127,MAX_PATH,MAX_PATH};
+    for (size_t i = 0; i < ARRAYSIZE(controls); i++) {
+        GuiDiscConfirmControl* saved = &context->controls[i]; saved->window = controls[i]; if (!saved->window) continue;
+        if (!IsWindow(saved->window)) { context->complete = false; continue; }
+        if (i < ARRAYSIZE(capacities)) {
+            int length = GetWindowTextLengthW(saved->window);
+            if (length >= capacities[i] || GetWindowTextW(saved->window,saved->text,capacities[i]) != length) context->complete = false;
+            if (i >= 2) saved->value = SendMessageW(saved->window,CB_GETCURSEL,0,0);
+        } else saved->value = SendMessageW(saved->window,BM_GETCHECK,0,0);
+    }
+}
+
+/* LB_GETTEXT不接受容量，必须先核完整行长再写入固定GuiPath。 */
+static bool gui_build_list_path(HWND list, size_t index, GuiPath* path) {
+    LRESULT length = SendMessageW(list,LB_GETTEXTLEN,(WPARAM)index,0);
+    if (length < 0 || length >= MAX_PATH) return false;
+    return SendMessageW(list,LB_GETTEXT,(WPARAM)index,(LPARAM)path->path) == length && path->path[(size_t)length] == 0;
+}
+
+static bool gui_build_replace_context(const GuiWindow* ui, GuiBuildReplaceContext* context) {
+    gui_build_replace_values(ui,context); if (!context->complete || context->pathCount > SIZE_MAX - context->listCount) return false;
+    size_t count = context->pathCount + context->listCount; if (count > SIZE_MAX / sizeof(*context->paths)) return false;
+    context->paths = (GuiPath*)calloc(count,sizeof(*context->paths)); if (!context->paths) return false;
+    for (size_t i = 0; i < context->pathCount; i++) { if (!wmemchr(ui->paths[i].path,0,MAX_PATH)) return false; wcscpy(context->paths[i].path,ui->paths[i].path); }
+    for (size_t i = 0; i < context->listCount; i++) if (!gui_build_list_path(context->sources,i,&context->paths[context->pathCount + i])) return false;
+    return true;
+}
+
+static bool gui_build_replace_current(const GuiWindow* ui, const GuiBuildReplaceContext* context) {
+    if (!context->complete || !context->paths || !IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)ui) return false;
+    if (ui->window != context->window || ui->mode != GUI_BUILD || ui->job || ui->activitySerial != context->activitySerial) return false;
+    GuiBuildReplaceContext current; gui_build_replace_values(ui,&current);
+    if (!current.complete || current.sources != context->sources || current.pathCount != context->pathCount || current.listCount != context->listCount || current.outputDevice != context->outputDevice) return false;
+    if (wcscmp(current.destination,context->destination) || wcscmp(current.label,context->label) || current.fsTypes != context->fsTypes || current.revision != context->revision || current.dvdVideo != context->dvdVideo || current.bluray != context->bluray || current.deduplicate != context->deduplicate || current.bdWriteType != context->bdWriteType || current.bdDisableVnr != context->bdDisableVnr) return false;
+    for (size_t i = 0; i < ARRAYSIZE(current.controls); i++) if (current.controls[i].window != context->controls[i].window || current.controls[i].value != context->controls[i].value || wcscmp(current.controls[i].text,context->controls[i].text)) return false;
+    for (size_t i = 0; i < context->pathCount; i++) if (!wmemchr(ui->paths[i].path,0,MAX_PATH) || wcscmp(ui->paths[i].path,context->paths[i].path)) return false;
+    for (size_t i = 0; i < context->listCount; i++) { GuiPath path = {0}; if (!gui_build_list_path(current.sources,i,&path) || wcscmp(path.path,context->paths[context->pathCount + i].path)) return false; }
+    return true;
+}
+
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
     if (ui->job) return; gui_read_controls(ui);
     bool erase = operation == GUI_ERASE_QUICK || operation == GUI_ERASE_FULL, discovery = operation == GUI_DISCOVERY_DISC;
@@ -896,7 +960,14 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
     if (operation == GUI_BUILD_IMAGE && !ui->destinationImage[0]) {
         if (!gui_file(ui->window, ui->destinationImage, true, L"ISO 镜像 (*.iso)\0*.iso\0\0", L"iso")) return;
         if (ui->destination) SetWindowTextW(ui->destination, ui->destinationImage);
-    } else if (operation == GUI_BUILD_IMAGE && GetFileAttributesW(ui->destinationImage) != INVALID_FILE_ATTRIBUTES && MessageBoxW(ui->window, L"目标文件已存在，是否替换？", L"ImgBurn", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    } else if (operation == GUI_BUILD_IMAGE && GetFileAttributesW(ui->destinationImage) != INVALID_FILE_ATTRIBUTES) {
+        GuiBuildReplaceContext context;
+        if (!gui_build_replace_context(ui,&context)) { free(context.paths); return; }
+        if (MessageBoxW(context.window, L"目标文件已存在，是否替换？", L"ImgBurn", MB_YESNO | MB_ICONQUESTION) != IDYES) { free(context.paths); return; }
+        bool current = gui_build_replace_current(ui,&context); free(context.paths); if (!current) return;
+        /* 完整内容允许同值重分配；从已核验的新列表重新绑定，绝不再借用弹框前指针。 */
+        sources = ui->paths; count = ui->pathCount;
+    }
     if ((bdReOverwrite && (ui->testMode || writeLayer)) || (((operation == GUI_WRITE_DISC && ui->bdReMedia) || bdReErase) && !ui->bdReWritable)) { MessageBoxW(ui->window,L"BD-RE需已格式化且具备2048字节逻辑容量；覆写不接受测试模式或L0设置。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
     if (bdReOverwrite && (ui->bdWriteType != BD_WRITE_TYPE_CURRENT || ui->bdDisableVnr)) { gui_bd_write_clear(ui); MessageBoxW(ui->window,L"这些本次写入选项仅用于BD-R；BD-RE覆写请保持当前写入选项。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
     if (bdReOverwrite) {
