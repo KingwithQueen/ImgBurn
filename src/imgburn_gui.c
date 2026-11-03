@@ -782,6 +782,56 @@ static bool gui_read_replace_current(const GuiWindow* ui, const GuiReadReplaceCo
     return true;
 }
 
+typedef struct {
+    HWND window;
+    LRESULT value;
+    wchar_t text[MAX_PATH];
+} GuiDiscConfirmControl;
+
+typedef struct {
+    HWND window;
+    GuiMode mode;
+    uint64_t activitySerial;
+    int driveCount, selectedDrive;
+    bool complete, writing, bdReMedia, bdReWritable, bdDisableVnr, testMode, testWriteSupported, verifyAfter;
+    BdWriteType bdWriteType;
+    wchar_t drive[MAX_PATH], source[MAX_PATH], layer[16];
+    GuiDiscConfirmControl controls[5];
+} GuiDiscConfirmContext;
+
+/* 写入与擦除各绑定实际消费的意图；擦除也不能消费弹框期间新设的BD临时值。 */
+static void gui_disc_confirm_context(const GuiWindow* ui, bool writing, GuiDiscConfirmContext* context) {
+    memset(context,0,sizeof(*context)); context->window = ui->window; context->mode = ui->mode; context->activitySerial = ui->activitySerial; context->writing = writing;
+    context->driveCount = ui->driveCount; context->selectedDrive = ui->selectedDrive;
+    context->complete = !ui->job && ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount;
+    if (context->complete) wcscpy(context->drive,ui->devices[ui->selectedDrive].devicePath);
+    context->bdReMedia = ui->bdReMedia; context->bdReWritable = ui->bdReWritable; context->bdWriteType = ui->bdWriteType; context->bdDisableVnr = ui->bdDisableVnr;
+    HWND controls[] = {ui->drives,NULL,NULL,NULL,NULL};
+    if (writing) {
+        wcscpy(context->source,ui->sourceImage); wcscpy(context->layer,ui->writeLayerValue); context->testMode = ui->testMode; context->testWriteSupported = ui->testWriteSupported; context->verifyAfter = ui->verifyAfter;
+        controls[1] = ui->sourceEdit; controls[2] = ui->writeLayer; controls[3] = GetDlgItem(ui->window,UI_TEST); controls[4] = ui->verify;
+    }
+    for (size_t i = 0; i < ARRAYSIZE(controls); i++) {
+        GuiDiscConfirmControl* saved = &context->controls[i]; saved->window = controls[i]; if (!saved->window) continue;
+        if (!IsWindow(saved->window)) { context->complete = false; continue; }
+        if (i < 3) {
+            int capacity = i == 2 ? (int)ARRAYSIZE(context->layer) : MAX_PATH, length = GetWindowTextLengthW(saved->window);
+            if (length >= capacity || GetWindowTextW(saved->window,saved->text,capacity) != length) context->complete = false;
+            if (!i) saved->value = SendMessageW(saved->window,CB_GETCURSEL,0,0);
+        } else saved->value = SendMessageW(saved->window,BM_GETCHECK,0,0);
+    }
+}
+
+static bool gui_disc_confirm_current(const GuiWindow* ui, const GuiDiscConfirmContext* context) {
+    if (!context->complete || !IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)ui) return false;
+    if (ui->window != context->window || ui->mode != context->mode || ui->job || ui->activitySerial != context->activitySerial || ui->driveCount != context->driveCount || ui->selectedDrive != context->selectedDrive) return false;
+    GuiDiscConfirmContext current; gui_disc_confirm_context(ui,context->writing,&current);
+    if (!current.complete || wcscmp(current.drive,context->drive) || current.bdReMedia != context->bdReMedia || current.bdReWritable != context->bdReWritable || current.bdWriteType != context->bdWriteType || current.bdDisableVnr != context->bdDisableVnr) return false;
+    if (wcscmp(current.source,context->source) || wcscmp(current.layer,context->layer) || current.testMode != context->testMode || current.testWriteSupported != context->testWriteSupported || current.verifyAfter != context->verifyAfter) return false;
+    for (size_t i = 0; i < ARRAYSIZE(current.controls); i++) if (current.controls[i].window != context->controls[i].window || current.controls[i].value != context->controls[i].value || wcscmp(current.controls[i].text,context->controls[i].text)) return false;
+    return true;
+}
+
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
     if (ui->job) return; gui_read_controls(ui);
     bool erase = operation == GUI_ERASE_QUICK || operation == GUI_ERASE_FULL, discovery = operation == GUI_DISCOVERY_DISC;
@@ -805,16 +855,33 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
     } else if (operation == GUI_BUILD_IMAGE && GetFileAttributesW(ui->destinationImage) != INVALID_FILE_ATTRIBUTES && MessageBoxW(ui->window, L"目标文件已存在，是否替换？", L"ImgBurn", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
     if ((bdReOverwrite && (ui->testMode || writeLayer)) || (((operation == GUI_WRITE_DISC && ui->bdReMedia) || bdReErase) && !ui->bdReWritable)) { MessageBoxW(ui->window,L"BD-RE需已格式化且具备2048字节逻辑容量；覆写不接受测试模式或L0设置。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
     if (bdReOverwrite && (ui->bdWriteType != BD_WRITE_TYPE_CURRENT || ui->bdDisableVnr)) { gui_bd_write_clear(ui); MessageBoxW(ui->window,L"这些本次写入选项仅用于BD-R；BD-RE覆写请保持当前写入选项。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
-    if (bdReOverwrite) { wchar_t confirm[900]; swprintf(confirm,900,L"目标：%ls\r\n来源：%ls\r\n将覆写所选BD-RE中的现有文件，而不是追加；来源范围外旧数据可能保留。是否继续？",ui->devices[ui->selectedDrive].devicePath,ui->sourceImage); if (MessageBoxW(ui->window,confirm,L"确认BD-RE覆写",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return; }
+    if (bdReOverwrite) {
+        wchar_t confirm[900]; swprintf(confirm,900,L"目标：%ls\r\n来源：%ls\r\n将覆写所选BD-RE中的现有文件，而不是追加；来源范围外旧数据可能保留。是否继续？",ui->devices[ui->selectedDrive].devicePath,ui->sourceImage);
+        GuiDiscConfirmContext context; gui_disc_confirm_context(ui,true,&context);
+        if (MessageBoxW(context.window,confirm,L"确认BD-RE覆写",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+        if (!gui_disc_confirm_current(ui,&context)) return;
+    }
     if (operation == GUI_WRITE_DISC && !bdReOverwrite) {
         wchar_t confirm[700];
         if (ui->bdWriteType != BD_WRITE_TYPE_CURRENT || ui->bdDisableVnr) swprintf(confirm,700,L"仅本次BD-R写入：%ls，关闭VNR：%ls。\r\n这不会追加旧文件，也不会自动格式化或建立备用区。将向所选光驱写入镜像，是否继续？",ui->bdWriteType == BD_WRITE_TYPE_INCREMENTAL ? L"Incremental" : ui->bdWriteType == BD_WRITE_TYPE_SAO ? L"SAO" : L"保持当前",ui->bdDisableVnr ? L"是" : L"否");
         else wcscpy(confirm,ui->testMode ? L"将以设备测试模式执行镜像写入流程，是否继续？" : L"将开始向所选光驱写入镜像，是否继续？");
-        if (MessageBoxW(ui->window,confirm,L"ImgBurn",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) { gui_bd_write_clear(ui); return; }
+        GuiDiscConfirmContext context; gui_disc_confirm_context(ui,true,&context);
+        int answer = MessageBoxW(context.window,confirm,L"ImgBurn",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+        if (!gui_disc_confirm_current(ui,&context)) return;
+        if (answer != IDYES) { gui_bd_write_clear(ui); return; }
     }
     if (discovery && MessageBoxW(ui->window,ui->testMode ? L"将以设备测试模式执行品质测试，是否继续？" : L"品质测试将向所选光盘写入零数据，是否继续？",L"ImgBurn",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
-    if (bdReErase) { wchar_t confirm[700]; swprintf(confirm,700,L"目标：%ls\r\n%ls\r\n这不是安全擦除，不执行格式化。已开始的命令须等待设备结束。是否继续？",ui->devices[ui->selectedDrive].devicePath,operation == GUI_ERASE_FULL ? L"将向全部逻辑用户区写零，现有文件将不可再用。" : L"将向前800个逻辑扇区写零，其余原内容可能仍保留。"); if (MessageBoxW(ui->window,confirm,L"确认BD-RE清零",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return; }
-    if (erase && !bdReErase && MessageBoxW(ui->window,operation == GUI_ERASE_FULL ? L"完整擦除将清除所选光盘的内容。开始后取消仍须等待设备结束。是否继续？" : L"快速擦除将使所选光盘重新可写，数据区可能仍保留原内容。开始后取消仍须等待设备结束。是否继续？",L"ImgBurn",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+    if (bdReErase) {
+        wchar_t confirm[700]; swprintf(confirm,700,L"目标：%ls\r\n%ls\r\n这不是安全擦除，不执行格式化。已开始的命令须等待设备结束。是否继续？",ui->devices[ui->selectedDrive].devicePath,operation == GUI_ERASE_FULL ? L"将向全部逻辑用户区写零，现有文件将不可再用。" : L"将向前800个逻辑扇区写零，其余原内容可能仍保留。");
+        GuiDiscConfirmContext context; gui_disc_confirm_context(ui,false,&context);
+        if (MessageBoxW(context.window,confirm,L"确认BD-RE清零",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+        if (!gui_disc_confirm_current(ui,&context)) return;
+    }
+    if (erase && !bdReErase) {
+        GuiDiscConfirmContext context; gui_disc_confirm_context(ui,false,&context);
+        if (MessageBoxW(context.window,operation == GUI_ERASE_FULL ? L"完整擦除将清除所选光盘的内容。开始后取消仍须等待设备结束。是否继续？" : L"快速擦除将使所选光盘重新可写，数据区可能仍保留原内容。开始后取消仍须等待设备结束。是否继续？",L"ImgBurn",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+        if (!gui_disc_confirm_current(ui,&context)) return;
+    }
     bool replace = false;
     if (operation == GUI_READ_DISC) {
         if (!ui->readImage[0]) { if (!gui_file(ui->window,ui->readImage,true,readFilter,L"iso")) return; if (ui->destination) SetWindowTextW(ui->destination,ui->readImage); replace = GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES; }
