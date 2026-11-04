@@ -1734,8 +1734,9 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
             case UI_TOOL_CLOSE: SendMessageW(window, WM_CLOSE, 0, 0); break;
         } return 0;
     }
-    if (message == WM_CLOSE) { if (gui_bd_format_list(tool->operation)) { tool->bdReClosing = true; tool->bdReLoaded = false; } if (tool->operation == GUI_CD_ISO_PLAN) { tool->cdClosing = true; gui_cd_plan_clear(ui); } if (tool->operation == GUI_DVD_CANDIDATES) { tool->candidateClosing = true; gui_dvd_candidates_clear(ui,true); if (!ui->job) gui_status(ui,L"已关闭候选窗口，未保留派生单元选择"); } if (!ui->job) DestroyWindow(window); else if (gui_task_cancel(ui)) { EnableWindow(GetDlgItem(window,UI_TOOL_CLOSE),FALSE); SetWindowTextW(window,L"正在取消..."); } return 0; }
-    if (message == WM_DESTROY) { ui->activitySerial++; if (tool->listTips) DestroyWindow(tool->listTips); if (tool->operation == GUI_CD_ISO_PLAN) gui_cd_plan_clear(ui); if (tool->operation == GUI_DVD_CANDIDATES && !tool->candidateAccepted) gui_dvd_candidates_clear(ui,true); EnableWindow(ui->window, TRUE); SetForegroundWindow(ui->window); ui->tool = NULL; SetWindowLongPtrW(window,GWLP_USERDATA,0); free(tool->sources); free(tool); if (ui->writeNeedsRefresh) { ui->writeNeedsRefresh = false; PostMessageW(ui->window,WM_COMMAND,UI_DEVICE_REFRESH,0); } return 0; }
+    /* 来源检查不属于工具；关窗不取消主窗任务，遗留刷新由检查完成后排队。 */
+    if (message == WM_CLOSE) { if (gui_bd_format_list(tool->operation)) { tool->bdReClosing = true; tool->bdReLoaded = false; } if (tool->operation == GUI_CD_ISO_PLAN) { tool->cdClosing = true; gui_cd_plan_clear(ui); } if (tool->operation == GUI_DVD_CANDIDATES) { tool->candidateClosing = true; gui_dvd_candidates_clear(ui,true); if (!ui->job) gui_status(ui,L"已关闭候选窗口，未保留派生单元选择"); } if (!ui->job || ui->job->operation == GUI_INSPECT) DestroyWindow(window); else if (gui_task_cancel(ui)) { EnableWindow(GetDlgItem(window,UI_TOOL_CLOSE),FALSE); SetWindowTextW(window,L"正在取消..."); } return 0; }
+    if (message == WM_DESTROY) { ui->activitySerial++; if (tool->listTips) DestroyWindow(tool->listTips); if (tool->operation == GUI_CD_ISO_PLAN) gui_cd_plan_clear(ui); if (tool->operation == GUI_DVD_CANDIDATES && !tool->candidateAccepted) gui_dvd_candidates_clear(ui,true); EnableWindow(ui->window, TRUE); SetForegroundWindow(ui->window); ui->tool = NULL; SetWindowLongPtrW(window,GWLP_USERDATA,0); free(tool->sources); free(tool); if (ui->writeNeedsRefresh && (!ui->job || ui->job->operation != GUI_INSPECT)) { ui->writeNeedsRefresh = false; PostMessageW(ui->window,WM_COMMAND,UI_DEVICE_REFRESH,0); } return 0; }
     return DefWindowProcW(window, message, wp, lp);
 }
 
@@ -1898,16 +1899,20 @@ static void gui_complete(GuiWindow* ui, GuiJob* job) {
     const wchar_t* completed = job->operation == GUI_DRIVE_INFO ? ((ui->mode == GUI_READ ? ui->mediaReady : job->mediaReady) ? L"介质已就绪" : L"介质未就绪或未插入光盘") : job->operation == GUI_CALCULATE ? L"计算完成" : job->operation == GUI_INSPECT ? L"镜像信息已载入" : L"操作成功完成";
     gui_status(ui, job->succeeded ? completed : job->error == ERROR_CANCELLED ? L"操作已取消" : L"操作失败；请查看日志");
     if (ui->go) EnableWindow(ui->go, ui->mode != GUI_READ && ui->mode != GUI_DISCOVERY && !(ui->mode == GUI_BUILD && ui->outputDevice)); if (ui->cancel) EnableWindow(ui->cancel,FALSE);
-    HWND errorOwner = NULL;
-    if (ui->tool) {
-        if (job->succeeded || job->error == ERROR_CANCELLED) DestroyWindow(ui->tool->window);
-        else { HWND toolWindow = ui->tool->window; for (HWND child = GetWindow(toolWindow,GW_CHILD); child; child = GetWindow(child,GW_HWNDNEXT)) EnableWindow(child,TRUE); SetWindowTextW(toolWindow,ui->tool->operation == GUI_CREATE_CUE ? L"生成 CUE 文件" : L"创建 MDS 文件"); if (ui->tool->operation == GUI_CREATE_CUE) gui_tool_list_state(ui->tool); else if (ui->tool->layer) SendMessageW(toolWindow,WM_COMMAND,UI_TOOL_LAYER,0); errorOwner = toolWindow; }
+    /* 来源检查不拥有工具；其他任务沿原通用收尾，提示可挂靠有效工具。 */
+    GuiTool* tool = ui->tool; HWND toolWindow = tool ? tool->window : NULL;
+    bool liveTool = tool && IsWindow(toolWindow) && GetWindowLongPtrW(toolWindow,GWLP_USERDATA) == (LONG_PTR)tool && tool->parent == ui && GetWindow(toolWindow,GW_OWNER) == ui->window;
+    HWND errorOwner = showError ? (liveTool ? toolWindow : ui->window) : NULL;
+    if (liveTool && job->operation != GUI_INSPECT) {
+        if (job->succeeded || job->error == ERROR_CANCELLED) DestroyWindow(toolWindow);
+        else { for (HWND child = GetWindow(toolWindow,GW_CHILD); child; child = GetWindow(child,GW_HWNDNEXT)) EnableWindow(child,TRUE); SetWindowTextW(toolWindow,tool->operation == GUI_CREATE_CUE ? L"生成 CUE 文件" : L"创建 MDS 文件"); if (tool->operation == GUI_CREATE_CUE) gui_tool_list_state(tool); else if (tool->layer) SendMessageW(toolWindow,WM_COMMAND,UI_TOOL_LAYER,0); }
     }
-    else if (showError) errorOwner = ui->window;
+    bool deferredRefresh = job->operation == GUI_INSPECT && !ui->tool && ui->writeNeedsRefresh;
     bool refreshMedia = job->operation == GUI_ERASE_QUICK || job->operation == GUI_ERASE_FULL || job->operation == GUI_DISCOVERY_DISC || job->operation == GUI_WRITE_DISC;
     bool inspectSource = job->operation == GUI_DRIVE_INFO && ui->mode == GUI_WRITE && ui->sourceImage[0] && !ui->sourceInfoAttempted && !ui->tool;
     bool readDestination = job->operation == GUI_DRIVE_INFO && ui->mode == GUI_READ && !ui->tool;
     imgburn_gui_job_free(job); gui_write_checks(ui); gui_menu(ui);
+    if (deferredRefresh) { ui->writeNeedsRefresh = false; PostMessageW(ui->window,WM_COMMAND,UI_DEVICE_REFRESH,0); }
     if (errorOwner) {
         bool followup = refreshMedia || inspectSource || readDestination; GuiCompletionContext context = {0};
         if (followup) gui_completion_context(ui,&context);
