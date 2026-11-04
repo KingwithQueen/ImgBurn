@@ -135,6 +135,7 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
 static LRESULT CALLBACK gui_log_proc(HWND window, UINT message, WPARAM wp, LPARAM lp);
 static void gui_mode(GuiWindow* ui, GuiMode mode);
 static void gui_start(GuiWindow* ui, GuiOperation operation);
+static void gui_build_source(GuiWindow* ui, bool folder);
 static void gui_menu(GuiWindow* ui);
 static void gui_refresh(GuiWindow* ui);
 static void gui_tool_open(GuiWindow* ui, GuiOperation operation);
@@ -642,6 +643,7 @@ static void gui_refresh(GuiWindow* ui) {
 
 static void gui_source(GuiWindow* ui, bool folder) {
     if (ui->mode == GUI_DISCOVERY || (ui->mode == GUI_VERIFY && !ui->verifyAgainstImage)) return;
+    if (ui->mode == GUI_BUILD) { gui_build_source(ui,folder); return; }
     wchar_t path[MAX_PATH] = L""; bool build = ui->mode == GUI_BUILD;
     if (!(folder ? gui_folder(ui->window, path) : gui_file(ui->window, path, false, build ? L"所有文件\0*.*\0\0" : imageFilter, NULL))) return;
     if (build) { if (!gui_paths_add(&ui->paths, &ui->pathCount, path)) MessageBoxW(ui->window, L"无法添加该路径。", L"ImgBurn", MB_OK | MB_ICONERROR); gui_mode(ui, ui->mode); }
@@ -955,6 +957,51 @@ static bool gui_destination_file(GuiWindow* ui, GuiMode mode, wchar_t* path, con
     if (!gui_file(owner,path,true,filter,L"iso") || !wmemchr(path,0,MAX_PATH) || !path[0]) { free(build.paths); return false; }
     bool current = mode == GUI_READ ? gui_read_replace_current(ui,&read) && ui->bdWriteType == bdWriteType && ui->bdDisableVnr == bdDisableVnr : gui_build_replace_current(ui,&build);
     free(build.paths); return current;
+}
+
+typedef struct {
+    GuiBuildReplaceContext build;
+    GuiDiscConfirmControl draft, drives;
+    int driveCount, selectedDrive;
+    wchar_t drive[MAX_PATH], shownDrive[MAX_PATH];
+    bool complete;
+} GuiBuildSourceContext;
+
+/* 来源追加会重建Build页，须保护尚未提交的输入及设备输出的自动查询目标。 */
+static void gui_build_source_values(const GuiWindow* ui, GuiBuildSourceContext* context) {
+    memset(context,0,sizeof(*context)); context->complete = true;
+    if (ui->outputDevice) {
+        context->driveCount = ui->driveCount; context->selectedDrive = ui->selectedDrive;
+        if (ui->driveCount < 0 || ui->driveCount > MAX_OPTICAL_DRIVES) context->complete = false;
+        else if (ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount) wcscpy(context->drive,ui->devices[ui->selectedDrive].devicePath);
+    }
+    HWND controls[] = {ui->sourceEdit,ui->outputDevice ? ui->drives : NULL};
+    GuiDiscConfirmControl* saved[] = {&context->draft,&context->drives};
+    for (size_t i = 0; i < ARRAYSIZE(controls); i++) {
+        saved[i]->window = controls[i]; if (!controls[i]) continue;
+        if (!IsWindow(controls[i])) { context->complete = false; continue; }
+        int length = GetWindowTextLengthW(controls[i]);
+        if (length >= MAX_PATH || GetWindowTextW(controls[i],saved[i]->text,MAX_PATH) != length) context->complete = false;
+        if (i) saved[i]->value = SendMessageW(controls[i],CB_GETCURSEL,0,0);
+    }
+    if (context->complete && context->drives.window && context->drives.value >= 0 && context->drives.value < context->driveCount) wcscpy(context->shownDrive,ui->devices[(size_t)context->drives.value].devicePath);
+}
+
+static bool gui_build_source_current(const GuiWindow* ui, const GuiBuildSourceContext* context) {
+    if (!gui_build_replace_current(ui,&context->build)) return false;
+    GuiBuildSourceContext current; gui_build_source_values(ui,&current);
+    return current.complete && current.draft.window == context->draft.window && !wcscmp(current.draft.text,context->draft.text) && current.drives.window == context->drives.window && current.drives.value == context->drives.value && !wcscmp(current.drives.text,context->drives.text) && current.driveCount == context->driveCount && current.selectedDrive == context->selectedDrive && !wcscmp(current.drive,context->drive) && !wcscmp(current.shownDrive,context->shownDrive);
+}
+
+static void gui_build_source(GuiWindow* ui, bool folder) {
+    GuiBuildSourceContext context; gui_build_source_values(ui,&context);
+    if (!context.complete || !gui_build_replace_context(ui,&context.build)) { free(context.build.paths); return; }
+    wchar_t path[MAX_PATH] = L"";
+    bool chosen = folder ? gui_folder(context.build.window,path) : gui_file(context.build.window,path,false,L"所有文件\0*.*\0\0",NULL);
+    if (!chosen || !wmemchr(path,0,MAX_PATH) || !path[0] || !gui_build_source_current(ui,&context)) { free(context.build.paths); return; }
+    HWND owner = context.build.window; bool added = gui_paths_add(&ui->paths,&ui->pathCount,path); free(context.build.paths);
+    if (!added) { MessageBoxW(owner,L"无法添加该路径。",L"ImgBurn",MB_OK | MB_ICONERROR); return; }
+    gui_mode(ui,GUI_BUILD);
 }
 
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
