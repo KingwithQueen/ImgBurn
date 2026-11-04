@@ -553,6 +553,8 @@ static void gui_read_page(GuiWindow* ui) {
     ui->go = ctl(ui,ui->window,L"BUTTON",L"读取",WS_TABSTOP | BS_DEFPUSHBUTTON,UI_GO,92,312,153,63); EnableWindow(ui->go,FALSE);
     ui->cancel = ctl(ui,ui->window,L"BUTTON",L"取消",WS_TABSTOP,UI_CANCEL,16,334,64,30); EnableWindow(ui->cancel,FALSE); ShowWindow(ui->cancel,SW_HIDE); ui->progress = ctl(ui,ui->window,PROGRESS_CLASSW,L"",0,0,16,280,305,14); ShowWindow(ui->progress,SW_HIDE);
     for (int i = 0; i < ui->driveCount; i++) { wchar_t text[128]; swprintf(text,128,L"%c:  %hs %hs",ui->devices[i].driveLetter ? ui->devices[i].driveLetter : L'?',ui->devices[i].vendorId,ui->devices[i].productId); SendMessageW(ui->drives,CB_ADDSTRING,0,(LPARAM)text); } SendMessageW(ui->drives,CB_SETCURSEL,ui->selectedDrive,0);
+    /* 组合框创建文本不会恢复编辑区；控件就绪后在回采前写回已存目标。 */
+    SetWindowTextW(ui->destination,ui->readImage);
     gui_read_destination_info(ui); gui_menu(ui); if (ui->selectedDrive >= 0) gui_start(ui,GUI_DRIVE_INFO); else gui_read_destination_query(ui);
 }
 
