@@ -1826,8 +1826,9 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
                 bool chosen = gui_file(window,path,false,cue ? L"音频文件\0*.wav;*.mp3;*.flac;*.aiff;*.aif;*.ogg;*.ape;*.wv\0所有文件\0*.*\0\0" : L"镜像、分卷及描述列表\0*.iso;*.bin;*.mdf;*.i00;*.i01;*.i02;*.dvd;*.lst;*.gi;*.pdi;*.di\0所有文件\0*.*\0\0",NULL);
                 if (!chosen || !wmemchr(path,0,MAX_PATH) || !path[0] || !gui_tool_picker_current(ui,&context)) { free(context.paths); return 0; }
                 free(context.paths);
-                if (gui_paths_add(&tool->sources,&tool->count,path)) { gui_tool_fill(tool); SendMessageW(tool->list,LB_SETCURSEL,tool->count - 1,0); gui_tool_list_state(tool); }
-                SetFocus(tool->list); break;
+                /* 失败提示终末返回，不能在提示后抢回旧列表焦点。 */
+                if (!gui_paths_add(&tool->sources,&tool->count,path)) { MessageBoxW(window,L"无法添加该路径。",L"ImgBurn",MB_OK | MB_ICONERROR); return 0; }
+                gui_tool_fill(tool); SendMessageW(tool->list,LB_SETCURSEL,tool->count - 1,0); gui_tool_list_state(tool); SetFocus(tool->list); break;
             }
             case UI_TOOL_REMOVE: { LRESULT at = SendMessageW(tool->list, LB_GETCURSEL, 0, 0); if (at >= 0 && (size_t)at < tool->count) { memmove(tool->sources + at, tool->sources + at + 1, (tool->count - (size_t)at - 1) * sizeof(*tool->sources)); tool->count--; gui_tool_fill(tool); } break; }
             case UI_TOOL_UP: case UI_TOOL_DOWN: { LRESULT at = SendMessageW(tool->list, LB_GETCURSEL, 0, 0), next = at + (LOWORD(wp) == UI_TOOL_UP ? -1 : 1); if (at >= 0 && next >= 0 && (size_t)next < tool->count) { GuiPath tmp = tool->sources[at]; tool->sources[at] = tool->sources[next]; tool->sources[next] = tmp; gui_tool_fill(tool); SendMessageW(tool->list, LB_SETCURSEL, next, 0); } break; }
@@ -1848,9 +1849,10 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
                 if (!chosen || !wmemchr(output,0,MAX_PATH) || !output[0] || !gui_tool_picker_current(ui,&context)) { free(context.paths); return 0; }
                 free(context.paths);
                 if (!cue && (mdsFilter < 1 || mdsFilter > 3)) { MessageBoxW(window,L"请选择MDS名称编码。",L"ImgBurn",MB_OK | MB_ICONERROR); return 0; }
-                GuiJob* job = gui_job(ui, tool->operation, tool->sources, tool->count); if (!job) break; wcscpy(job->destination, output);
+                GuiJob* job = gui_job(ui, tool->operation, tool->sources, tool->count); if (!job) { MessageBoxW(window,L"无法启动操作。",L"ImgBurn",MB_OK | MB_ICONERROR); return 0; } wcscpy(job->destination, output);
                 if (!cue) { job->layerBreak = layerBreak; job->mdsLayerBreakOverride = SendMessageW(tool->layer,BM_GETCHECK,0,0) == BST_CHECKED; job->oppositeTrackPath = SendMessageW(tool->otp,BM_GETCHECK,0,0) == BST_CHECKED; job->mdsMedium = (MdsToolsMedium)medium; job->mdsPreservePaths = SendMessageW(tool->mdsPreservePaths,BM_GETCHECK,0,0) == BST_CHECKED; job->mdsAnsiFilenames = mdsFilter != 2; }
-                if (gui_launch(ui, job)) for (HWND child = GetWindow(window,GW_CHILD); child; child = GetWindow(child,GW_HWNDNEXT)) if (GetDlgCtrlID(child) != UI_TOOL_CLOSE) EnableWindow(child,FALSE); break;
+                if (!gui_launch(ui,job)) { MessageBoxW(window,L"无法启动操作。",L"ImgBurn",MB_OK | MB_ICONERROR); return 0; }
+                for (HWND child = GetWindow(window,GW_CHILD); child; child = GetWindow(child,GW_HWNDNEXT)) if (GetDlgCtrlID(child) != UI_TOOL_CLOSE) EnableWindow(child,FALSE); break;
             }
             case UI_TOOL_CLOSE: SendMessageW(window, WM_CLOSE, 0, 0); break;
         } return 0;
