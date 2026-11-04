@@ -136,6 +136,7 @@ static LRESULT CALLBACK gui_log_proc(HWND window, UINT message, WPARAM wp, LPARA
 static void gui_mode(GuiWindow* ui, GuiMode mode);
 static void gui_start(GuiWindow* ui, GuiOperation operation);
 static void gui_build_source(GuiWindow* ui, bool folder);
+static void gui_image_source(GuiWindow* ui, bool folder);
 static void gui_menu(GuiWindow* ui);
 static void gui_refresh(GuiWindow* ui);
 static void gui_tool_open(GuiWindow* ui, GuiOperation operation);
@@ -644,10 +645,7 @@ static void gui_refresh(GuiWindow* ui) {
 static void gui_source(GuiWindow* ui, bool folder) {
     if (ui->mode == GUI_DISCOVERY || (ui->mode == GUI_VERIFY && !ui->verifyAgainstImage)) return;
     if (ui->mode == GUI_BUILD) { gui_build_source(ui,folder); return; }
-    wchar_t path[MAX_PATH] = L""; bool build = ui->mode == GUI_BUILD;
-    if (!(folder ? gui_folder(ui->window, path) : gui_file(ui->window, path, false, build ? L"所有文件\0*.*\0\0" : imageFilter, NULL))) return;
-    if (build) { if (!gui_paths_add(&ui->paths, &ui->pathCount, path)) MessageBoxW(ui->window, L"无法添加该路径。", L"ImgBurn", MB_OK | MB_ICONERROR); gui_mode(ui, ui->mode); }
-    else { gui_dvd_source_set(ui,path); if (ui->sourceEdit) SetWindowTextW(ui->sourceEdit, path); if (ui->mode == GUI_VERIFY && ui->destination) SetWindowTextW(ui->destination, path); ui->sourceInspectPopup = false; gui_start(ui, GUI_INSPECT); }
+    gui_image_source(ui,folder);
 }
 
 static GuiJob* gui_job(GuiWindow* ui, GuiOperation operation, const GuiPath* paths, size_t count) {
@@ -1002,6 +1000,77 @@ static void gui_build_source(GuiWindow* ui, bool folder) {
     HWND owner = context.build.window; bool added = gui_paths_add(&ui->paths,&ui->pathCount,path); free(context.build.paths);
     if (!added) { MessageBoxW(owner,L"无法添加该路径。",L"ImgBurn",MB_OK | MB_ICONERROR); return; }
     gui_mode(ui,GUI_BUILD);
+}
+
+typedef struct {
+    HWND window, toolWindow;
+    GuiTool* tool;
+    GuiMode mode;
+    GuiOperation toolOperation;
+    uint64_t activitySerial, sourceBytes;
+    int driveCount, selectedDrive;
+    bool complete, compare, sourcePopup, sourceReady, sourceAttempted, dvdDerived, updatingLayer, cdValid, cdSelected, bdDisableVnr;
+    BdWriteType bdWriteType;
+    uint32_t sourceSectors, sourceSectorBytes;
+    DvdLayerBreakCandidate* dvdCandidates;
+    size_t dvdCount, dvdSelected;
+    DataImageSource dvdLock;
+    IsoSessionSource cdLock;
+    MmcCdAppendPlan cdPlan;
+    wchar_t source[MAX_PATH], target[MAX_PATH], layer[16], drive[MAX_PATH], shownDrive[MAX_PATH];
+    wchar_t dvdSource[MAX_PATH], cdSource[MAX_PATH], cdDrive[MAX_PATH], volume[128], implementation[128], fileSystems[64];
+    GuiDiscConfirmControl controls[5];
+} GuiSourcePickerContext;
+
+static void gui_source_picker_values(const GuiWindow* ui, GuiSourcePickerContext* context) {
+    memset(context,0,sizeof(*context)); context->window = ui->window; context->mode = ui->mode; context->activitySerial = ui->activitySerial; context->tool = ui->tool;
+    if (ui->tool) { context->toolWindow = ui->tool->window; context->toolOperation = ui->tool->operation; }
+    context->complete = !ui->job && ui->mode != GUI_BUILD && ui->mode != GUI_DISCOVERY && (ui->mode != GUI_VERIFY || ui->verifyAgainstImage) && ui->driveCount >= 0 && ui->driveCount <= MAX_OPTICAL_DRIVES;
+    context->compare = ui->mode == GUI_VERIFY && ui->verifyAgainstImage; context->sourcePopup = ui->sourceInspectPopup; context->bdWriteType = ui->bdWriteType; context->bdDisableVnr = ui->bdDisableVnr;
+    wcscpy(context->source,ui->sourceImage); wcscpy(context->layer,ui->writeLayerValue);
+    if (ui->mode == GUI_READ) wcscpy(context->target,ui->readImage); else if (ui->mode == GUI_VERIFY) wcscpy(context->target,ui->sourceImage); else if (ui->destination) wcscpy(context->target,ui->destinationImage);
+    context->driveCount = ui->driveCount; context->selectedDrive = ui->selectedDrive;
+    if (context->complete && ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount) wcscpy(context->drive,ui->devices[ui->selectedDrive].devicePath);
+    context->sourceReady = ui->sourceInfoReady; context->sourceAttempted = ui->sourceInfoAttempted; context->sourceBytes = ui->sourceBytes; context->sourceSectors = ui->sourceSectors; context->sourceSectorBytes = ui->sourceSectorBytes;
+    wcscpy(context->volume,ui->sourceVolume); wcscpy(context->implementation,ui->sourceImplementation); wcscpy(context->fileSystems,ui->sourceFileSystems);
+    context->dvdCandidates = ui->dvdCandidates; context->dvdCount = ui->dvdCandidateCount; context->dvdSelected = ui->dvdSelected; context->dvdDerived = ui->dvdLayerDerived; context->updatingLayer = ui->updatingWriteLayer; context->dvdLock = ui->dvdCandidateLock; wcscpy(context->dvdSource,ui->dvdCandidateSource);
+    context->cdValid = ui->cdPlanValid; context->cdSelected = ui->cdPlanSelected; context->cdPlan = ui->cdPlan; context->cdLock = ui->cdIsoLock; wcscpy(context->cdSource,ui->cdPlanSource); wcscpy(context->cdDrive,ui->cdPlanDrive);
+    HWND controls[] = {ui->sourceEdit,ui->destination,ui->writeLayer,ui->drives,ui->mode == GUI_VERIFY ? ui->compare : NULL};
+    for (size_t i = 0; i < ARRAYSIZE(controls); i++) {
+        GuiDiscConfirmControl* saved = &context->controls[i]; saved->window = controls[i]; if (!saved->window) continue;
+        if (!IsWindow(saved->window)) { context->complete = false; continue; }
+        if (i < 4) {
+            int capacity = i == 2 ? 16 : MAX_PATH, length = GetWindowTextLengthW(saved->window);
+            if (length >= capacity || GetWindowTextW(saved->window,saved->text,capacity) != length) context->complete = false;
+            if (i == 3) saved->value = SendMessageW(saved->window,CB_GETCURSEL,0,0);
+        } else saved->value = SendMessageW(saved->window,BM_GETCHECK,0,0);
+    }
+    if (context->complete && context->controls[3].window && context->controls[3].value >= 0 && context->controls[3].value < ui->driveCount) wcscpy(context->shownDrive,ui->devices[(size_t)context->controls[3].value].devicePath);
+}
+
+static bool gui_source_picker_current(const GuiWindow* ui, const GuiSourcePickerContext* context) {
+    if (!context->complete || !IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)ui) return false;
+    if (ui->window != context->window || ui->job || ui->mode != context->mode || ui->activitySerial != context->activitySerial || ui->tool != context->tool) return false;
+    if (context->tool && (!IsWindow(context->toolWindow) || GetWindowLongPtrW(context->toolWindow,GWLP_USERDATA) != (LONG_PTR)context->tool || context->tool->parent != ui || context->tool->window != context->toolWindow || context->tool->operation != context->toolOperation)) return false;
+    GuiSourcePickerContext current; gui_source_picker_values(ui,&current);
+    if (!current.complete || current.compare != context->compare || current.sourcePopup != context->sourcePopup || current.bdWriteType != context->bdWriteType || current.bdDisableVnr != context->bdDisableVnr || wcscmp(current.source,context->source) || wcscmp(current.target,context->target) || wcscmp(current.layer,context->layer)) return false;
+    if (current.driveCount != context->driveCount || current.selectedDrive != context->selectedDrive || wcscmp(current.drive,context->drive) || wcscmp(current.shownDrive,context->shownDrive)) return false;
+    if (current.sourceReady != context->sourceReady || current.sourceAttempted != context->sourceAttempted || current.sourceBytes != context->sourceBytes || current.sourceSectors != context->sourceSectors || current.sourceSectorBytes != context->sourceSectorBytes || wcscmp(current.volume,context->volume) || wcscmp(current.implementation,context->implementation) || wcscmp(current.fileSystems,context->fileSystems)) return false;
+    if (current.dvdCandidates != context->dvdCandidates || current.dvdCount != context->dvdCount || current.dvdSelected != context->dvdSelected || current.dvdDerived != context->dvdDerived || current.updatingLayer != context->updatingLayer || wcscmp(current.dvdSource,context->dvdSource)) return false;
+    if (current.dvdLock.descriptor != context->dvdLock.descriptor || current.dvdLock.parts != context->dvdLock.parts || current.dvdLock.partCount != context->dvdLock.partCount || current.dvdLock.sectors != context->dvdLock.sectors || current.dvdLock.layerBreakLba != context->dvdLock.layerBreakLba || current.dvdLock.layerCount != context->dvdLock.layerCount || current.dvdLock.oppositeTrackPath != context->dvdLock.oppositeTrackPath || current.dvdLock.mds != context->dvdLock.mds) return false;
+    if (current.cdValid != context->cdValid || current.cdSelected != context->cdSelected || wcscmp(current.cdSource,context->cdSource) || wcscmp(current.cdDrive,context->cdDrive)) return false;
+    if (current.cdLock.file != context->cdLock.file || current.cdLock.cancelEvent != context->cdLock.cancelEvent || current.cdLock.sectors != context->cdLock.sectors || current.cdLock.volumeSectors != context->cdLock.volumeSectors || current.cdLock.startLba != context->cdLock.startLba || current.cdLock.patches != context->cdLock.patches || current.cdLock.patchCount != context->cdLock.patchCount || current.cdLock.joliet != context->cdLock.joliet) return false;
+    if (current.cdPlan.sessionNumber != context->cdPlan.sessionNumber || current.cdPlan.trackNumber != context->cdPlan.trackNumber || current.cdPlan.previousLeadOutLba != context->cdPlan.previousLeadOutLba || current.cdPlan.nextWritableAddress != context->cdPlan.nextWritableAddress || current.cdPlan.dataStartLba != context->cdPlan.dataStartLba || current.cdPlan.dataEndLba != context->cdPlan.dataEndLba || current.cdPlan.sourceSectors != context->cdPlan.sourceSectors || current.cdPlan.availableDataSectors != context->cdPlan.availableDataSectors || current.cdPlan.remainingDataSectors != context->cdPlan.remainingDataSectors || current.cdPlan.sectorBytes != context->cdPlan.sectorBytes || current.cdPlan.writeType != context->cdPlan.writeType || current.cdPlan.trackMode != context->cdPlan.trackMode || current.cdPlan.dataBlockType != context->cdPlan.dataBlockType) return false;
+    for (size_t i = 0; i < ARRAYSIZE(current.controls); i++) if (current.controls[i].window != context->controls[i].window || current.controls[i].value != context->controls[i].value || wcscmp(current.controls[i].text,context->controls[i].text)) return false;
+    return true;
+}
+
+static void gui_image_source(GuiWindow* ui, bool folder) {
+    GuiSourcePickerContext context; gui_source_picker_values(ui,&context); if (!context.complete) return;
+    wchar_t path[MAX_PATH] = L"";
+    if (!(folder ? gui_folder(context.window,path) : gui_file(context.window,path,false,imageFilter,NULL)) || !wmemchr(path,0,MAX_PATH) || !path[0] || !gui_source_picker_current(ui,&context)) return;
+    gui_dvd_source_set(ui,path); if (ui->sourceEdit) SetWindowTextW(ui->sourceEdit,path); if (ui->mode == GUI_VERIFY && ui->destination) SetWindowTextW(ui->destination,path);
+    ui->sourceInspectPopup = false; gui_start(ui,GUI_INSPECT);
 }
 
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
