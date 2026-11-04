@@ -755,8 +755,8 @@ typedef struct {
 static void gui_read_replace_context(const GuiWindow* ui, GuiReadReplaceContext* context) {
     memset(context,0,sizeof(*context)); context->window = ui->window; context->activitySerial = ui->activitySerial;
     context->driveCount = ui->driveCount; context->selectedDrive = ui->selectedDrive;
-    context->complete = ui->mode == GUI_READ && !ui->job && ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount;
-    wcscpy(context->destination,ui->readImage); if (context->complete) wcscpy(context->drive,ui->devices[ui->selectedDrive].devicePath);
+    context->complete = ui->mode == GUI_READ && !ui->job && ui->driveCount >= 0 && ui->driveCount <= MAX_OPTICAL_DRIVES;
+    wcscpy(context->destination,ui->readImage); if (ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount && ui->selectedDrive < MAX_OPTICAL_DRIVES) wcscpy(context->drive,ui->devices[ui->selectedDrive].devicePath);
     context->readCdText = ui->readCdText; context->rawCdMds = ui->rawCdMds; context->includeSessionPregaps = ui->includeSessionPregaps; context->readEject = ui->readEjectWhenDone;
     wcscpy(context->split,ui->readSplitText); wcscpy(context->rate,ui->readRate); wcscpy(context->audioRate,ui->readAudioRate); wcscpy(context->retries,ui->readRetryText);
     HWND controls[] = {ui->destination,ui->drives,ui->readSplit,ui->readSpeed,ui->readAudioSpeed,ui->readRetries,ui->readText,ui->readRawMds,ui->sessionPregaps,ui->readEject};
@@ -892,7 +892,7 @@ typedef struct {
 
 static void gui_build_replace_values(const GuiWindow* ui, GuiBuildReplaceContext* context) {
     memset(context,0,sizeof(*context)); context->window = ui->window; context->sources = ui->sources; context->activitySerial = ui->activitySerial; context->pathCount = ui->pathCount;
-    context->complete = ui->mode == GUI_BUILD && !ui->job && ui->paths && ui->pathCount && ui->pathCount <= 4096;
+    context->complete = ui->mode == GUI_BUILD && !ui->job && (!ui->pathCount || ui->paths) && ui->pathCount <= 4096;
     context->outputDevice = ui->outputDevice; context->fsTypes = ui->fsTypes; context->revision = ui->revision; context->dvdVideo = ui->dvdVideo; context->bluray = ui->bluray; context->deduplicate = ui->deduplicate;
     context->bdWriteType = ui->bdWriteType; context->bdDisableVnr = ui->bdDisableVnr; wcscpy(context->destination,ui->destinationImage); wcscpy(context->label,ui->volumeLabel);
     if (ui->sources) {
@@ -922,14 +922,14 @@ static bool gui_build_list_path(HWND list, size_t index, GuiPath* path) {
 static bool gui_build_replace_context(const GuiWindow* ui, GuiBuildReplaceContext* context) {
     gui_build_replace_values(ui,context); if (!context->complete || context->pathCount > SIZE_MAX - context->listCount) return false;
     size_t count = context->pathCount + context->listCount; if (count > SIZE_MAX / sizeof(*context->paths)) return false;
-    context->paths = (GuiPath*)calloc(count,sizeof(*context->paths)); if (!context->paths) return false;
+    if (count) { context->paths = (GuiPath*)calloc(count,sizeof(*context->paths)); if (!context->paths) return false; }
     for (size_t i = 0; i < context->pathCount; i++) { if (!wmemchr(ui->paths[i].path,0,MAX_PATH)) return false; wcscpy(context->paths[i].path,ui->paths[i].path); }
     for (size_t i = 0; i < context->listCount; i++) if (!gui_build_list_path(context->sources,i,&context->paths[context->pathCount + i])) return false;
     return true;
 }
 
 static bool gui_build_replace_current(const GuiWindow* ui, const GuiBuildReplaceContext* context) {
-    if (!context->complete || !context->paths || !IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)ui) return false;
+    if (!context->complete || (!context->paths && (context->pathCount || context->listCount)) || !IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)ui) return false;
     if (ui->window != context->window || ui->mode != GUI_BUILD || ui->job || ui->activitySerial != context->activitySerial) return false;
     GuiBuildReplaceContext current; gui_build_replace_values(ui,&current);
     if (!current.complete || current.sources != context->sources || current.pathCount != context->pathCount || current.listCount != context->listCount || current.outputDevice != context->outputDevice) return false;
@@ -938,6 +938,23 @@ static bool gui_build_replace_current(const GuiWindow* ui, const GuiBuildReplace
     for (size_t i = 0; i < context->pathCount; i++) if (!wmemchr(ui->paths[i].path,0,MAX_PATH) || wcscmp(ui->paths[i].path,context->paths[i].path)) return false;
     for (size_t i = 0; i < context->listCount; i++) { GuiPath path = {0}; if (!gui_build_list_path(current.sources,i,&path) || wcscmp(path.path,context->paths[context->pathCount + i].path)) return false; }
     return true;
+}
+
+/* 原生保存框仅写调用者的局部路径；取消或过期返回不提交任何界面状态。 */
+static bool gui_destination_file(GuiWindow* ui, GuiMode mode, wchar_t* path, const wchar_t* filter) {
+    if (ui->mode != mode || (mode != GUI_READ && mode != GUI_BUILD)) return false;
+    GuiReadReplaceContext read = {0}; GuiBuildReplaceContext build = {0}; HWND owner;
+    BdWriteType bdWriteType = ui->bdWriteType; bool bdDisableVnr = ui->bdDisableVnr;
+    if (mode == GUI_READ) {
+        gui_read_replace_context(ui,&read); if (!read.complete) return false;
+        owner = read.window; wcscpy(path,read.destination);
+    } else {
+        if (!gui_build_replace_context(ui,&build)) { free(build.paths); return false; }
+        owner = build.window; wcscpy(path,build.destination);
+    }
+    if (!gui_file(owner,path,true,filter,L"iso") || !wmemchr(path,0,MAX_PATH) || !path[0]) { free(build.paths); return false; }
+    bool current = mode == GUI_READ ? gui_read_replace_current(ui,&read) && ui->bdWriteType == bdWriteType && ui->bdDisableVnr == bdDisableVnr : gui_build_replace_current(ui,&build);
+    free(build.paths); return current;
 }
 
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
@@ -958,8 +975,9 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
     if (operation == GUI_VERIFY_DISC && !ui->verifyAgainstImage) single.path[0] = 0;
     if (!count || (!single.path[0] && sources == &single && (operation != GUI_VERIFY_DISC || ui->verifyAgainstImage))) { MessageBoxW(ui->window, L"请先选择来源。", L"ImgBurn", MB_OK | MB_ICONINFORMATION); return; }
     if (operation == GUI_BUILD_IMAGE && !ui->destinationImage[0]) {
-        if (!gui_file(ui->window, ui->destinationImage, true, L"ISO 镜像 (*.iso)\0*.iso\0\0", L"iso")) return;
-        if (ui->destination) SetWindowTextW(ui->destination, ui->destinationImage);
+        wchar_t path[MAX_PATH]; if (!gui_destination_file(ui,GUI_BUILD,path,L"ISO 镜像 (*.iso)\0*.iso\0\0")) return;
+        wcscpy(ui->destinationImage,path); if (ui->destination) SetWindowTextW(ui->destination,path);
+        sources = ui->paths; count = ui->pathCount;
     } else if (operation == GUI_BUILD_IMAGE && GetFileAttributesW(ui->destinationImage) != INVALID_FILE_ATTRIBUTES) {
         GuiBuildReplaceContext context;
         if (!gui_build_replace_context(ui,&context)) { free(context.paths); return; }
@@ -1003,7 +1021,10 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
     }
     bool replace = false;
     if (operation == GUI_READ_DISC) {
-        if (!ui->readImage[0]) { if (!gui_file(ui->window,ui->readImage,true,readFilter,L"iso")) return; if (ui->destination) SetWindowTextW(ui->destination,ui->readImage); replace = GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES; }
+        if (!ui->readImage[0]) {
+            wchar_t path[MAX_PATH]; if (!gui_destination_file(ui,GUI_READ,path,readFilter)) return;
+            wcscpy(ui->readImage,path); if (ui->destination) SetWindowTextW(ui->destination,path); replace = GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES;
+        }
         else if (GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES) {
             GuiReadReplaceContext context; gui_read_replace_context(ui,&context);
             if (MessageBoxW(context.window,L"目标文件已存在，是否替换？",L"ImgBurn",MB_YESNO | MB_ICONQUESTION) != IDYES) return;
@@ -1842,7 +1863,16 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
             case UI_NEW:
                 gui_read_controls(ui); free(ui->paths); ui->paths = NULL; ui->pathCount = 0; ui->destinationImage[0] = 0; ui->fsTypes = FS_TYPE_ALL; ui->revision = UDF_REV_102; ui->dvdVideo = ui->bluray = false; ui->deduplicate = true; wcscpy(ui->volumeLabel,L"IMGBURN_DISC"); wcscpy(ui->readSplitText,L"Auto"); wcscpy(ui->readRate,L"MAX"); wcscpy(ui->readAudioRate,L"MAX"); wcscpy(ui->readRetryText,L"20");
                 ui->fs = ui->udf = ui->label = ui->dvd = ui->bd = ui->optimize = NULL; if (ui->destination) SetWindowTextW(ui->destination,L""); gui_mode(ui,GUI_BUILD); break;
-            case UI_DESTINATION: { wchar_t path[MAX_PATH]; wchar_t* target = ui->mode == GUI_READ ? ui->readImage : ui->destinationImage; wcscpy(path,target); if (gui_file(window,path,true,ui->mode == GUI_READ ? readFilter : L"ISO 镜像\0*.iso\0\0",L"iso")) { if (ui->mode == GUI_READ) { ui->readDestinationReady = ui->readDestinationAttempted = false; ui->readDestinationTotalBytes = ui->readDestinationFreeBytes = 0; } wcscpy(target,path); if (ui->destination) SetWindowTextW(ui->destination,path); gui_read_controls(ui); gui_menu(ui); gui_read_destination_query(ui); } break; }
+            case UI_DESTINATION: {
+                if (ui->mode == GUI_READ || ui->mode == GUI_BUILD) {
+                    GuiMode mode = ui->mode; wchar_t path[MAX_PATH];
+                    if (!gui_destination_file(ui,mode,path,mode == GUI_READ ? readFilter : L"ISO 镜像\0*.iso\0\0")) break;
+                    if (mode == GUI_READ) { ui->readDestinationReady = ui->readDestinationAttempted = false; ui->readDestinationTotalBytes = ui->readDestinationFreeBytes = 0; }
+                    wcscpy(mode == GUI_READ ? ui->readImage : ui->destinationImage,path); if (ui->destination) SetWindowTextW(ui->destination,path);
+                    gui_read_controls(ui); gui_menu(ui); gui_read_destination_query(ui); break;
+                }
+                wchar_t path[MAX_PATH]; wchar_t* target = ui->mode == GUI_READ ? ui->readImage : ui->destinationImage; wcscpy(path,target); if (gui_file(window,path,true,ui->mode == GUI_READ ? readFilter : L"ISO 镜像\0*.iso\0\0",L"iso")) { if (ui->mode == GUI_READ) { ui->readDestinationReady = ui->readDestinationAttempted = false; ui->readDestinationTotalBytes = ui->readDestinationFreeBytes = 0; } wcscpy(target,path); if (ui->destination) SetWindowTextW(ui->destination,path); gui_read_controls(ui); gui_menu(ui); gui_read_destination_query(ui); } break;
+            }
             case UI_CALCULATE: gui_start(ui,GUI_CALCULATE); break;
             case UI_BUILD: case UI_READ: case UI_WRITE: case UI_VERIFY: case UI_GO:
                 if (ui->mode == GUI_BUILD && !ui->outputDevice) gui_start(ui,GUI_BUILD_IMAGE); else if (ui->mode == GUI_READ) gui_start(ui,GUI_READ_DISC); else if (ui->mode == GUI_WRITE) gui_start(ui,GUI_WRITE_DISC); else if (ui->mode == GUI_VERIFY) gui_start(ui,GUI_VERIFY_DISC); else if (ui->mode == GUI_DISCOVERY) gui_start(ui,GUI_DISCOVERY_DISC); break;
