@@ -1355,6 +1355,65 @@ static void gui_tool_cue_create(GuiTool* tool) {
     SetWindowPos(cancel,HWND_TOP,0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); SetWindowPos(tool->ok,HWND_TOP,0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); SetWindowPos(tool->list,HWND_TOP,0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     gui_tool_list_state(tool);
 }
+typedef struct {
+    HWND main, window, list, ok;
+    GuiTool* tool;
+    GuiMode mode;
+    GuiOperation operation;
+    uint64_t activitySerial;
+    size_t count, listCount;
+    GuiPath* paths;
+    LRESULT selection;
+    bool complete, saving, bdDisableVnr;
+    BdWriteType bdWriteType;
+    GuiDiscConfirmControl controls[6];
+} GuiToolPickerContext;
+
+static void gui_tool_picker_values(const GuiWindow* ui, const GuiTool* tool, bool saving, GuiToolPickerContext* context) {
+    memset(context,0,sizeof(*context)); context->main = ui->window; context->window = tool->window; context->tool = (GuiTool*)tool; context->list = tool->list; context->ok = tool->ok;
+    context->mode = ui->mode; context->operation = tool->operation; context->activitySerial = ui->activitySerial; context->count = tool->count; context->saving = saving;
+    size_t maximum = tool->operation == GUI_CREATE_CUE ? MAX_AUDIO_TRACKS : MAX_MDS_FILES;
+    context->complete = (tool->operation == GUI_CREATE_CUE || tool->operation == GUI_CREATE_MDS) && ui->tool == tool && tool->parent == ui && !ui->job && tool->count <= maximum && (!tool->count || tool->sources);
+    if (saving) { context->bdWriteType = ui->bdWriteType; context->bdDisableVnr = ui->bdDisableVnr; }
+    if (tool->list) {
+        if (!IsWindow(tool->list)) context->complete = false;
+        else { LRESULT count = SendMessageW(tool->list,LB_GETCOUNT,0,0); if (count < 0 || (size_t)count > maximum) context->complete = false; else context->listCount = (size_t)count; if (!saving) context->selection = SendMessageW(tool->list,LB_GETCURSEL,0,0); }
+    }
+    if (tool->ok && !IsWindow(tool->ok)) context->complete = false;
+    if (tool->operation != GUI_CREATE_MDS) return;
+    HWND controls[] = {tool->mdsMedia,tool->lba,tool->layer,tool->otp,tool->ptp,tool->mdsPreservePaths};
+    for (size_t i = 0; i < ARRAYSIZE(controls); i++) {
+        GuiDiscConfirmControl* saved = &context->controls[i]; saved->window = controls[i]; if (!saved->window) continue;
+        if (!IsWindow(saved->window)) { context->complete = false; continue; }
+        if (i < 2) {
+            int capacity = i ? 16 : MAX_PATH, length = GetWindowTextLengthW(saved->window);
+            if (length >= capacity || GetWindowTextW(saved->window,saved->text,capacity) != length) context->complete = false;
+            if (!i) saved->value = SendMessageW(saved->window,CB_GETCURSEL,0,0);
+        } else saved->value = SendMessageW(saved->window,BM_GETCHECK,0,0);
+    }
+}
+
+static bool gui_tool_picker_context(const GuiWindow* ui, const GuiTool* tool, bool saving, GuiToolPickerContext* context) {
+    gui_tool_picker_values(ui,tool,saving,context); if (!context->complete || context->count > SIZE_MAX - context->listCount) return false;
+    size_t count = context->count + context->listCount; if (count > SIZE_MAX / sizeof(*context->paths)) return false;
+    if (count) { context->paths = (GuiPath*)calloc(count,sizeof(*context->paths)); if (!context->paths) return false; }
+    for (size_t i = 0; i < context->count; i++) { if (!wmemchr(tool->sources[i].path,0,MAX_PATH)) return false; wcscpy(context->paths[i].path,tool->sources[i].path); }
+    for (size_t i = 0; i < context->listCount; i++) if (!gui_build_list_path(context->list,i,&context->paths[context->count + i])) return false;
+    return true;
+}
+
+static bool gui_tool_picker_current(const GuiWindow* ui, const GuiToolPickerContext* context) {
+    if (!context->complete || (!context->paths && (context->count || context->listCount)) || !IsWindow(context->main) || GetWindowLongPtrW(context->main,GWLP_USERDATA) != (LONG_PTR)ui || !IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)context->tool) return false;
+    if (ui->window != context->main || ui->tool != context->tool || ui->job || ui->mode != context->mode || ui->activitySerial != context->activitySerial) return false;
+    GuiTool* tool = context->tool; if (tool->window != context->window || tool->parent != ui || tool->operation != context->operation) return false;
+    GuiToolPickerContext current; gui_tool_picker_values(ui,tool,context->saving,&current);
+    if (!current.complete || current.list != context->list || current.ok != context->ok || current.count != context->count || current.listCount != context->listCount || current.selection != context->selection || current.bdWriteType != context->bdWriteType || current.bdDisableVnr != context->bdDisableVnr) return false;
+    for (size_t i = 0; i < ARRAYSIZE(current.controls); i++) if (current.controls[i].window != context->controls[i].window || current.controls[i].value != context->controls[i].value || wcscmp(current.controls[i].text,context->controls[i].text)) return false;
+    for (size_t i = 0; i < context->count; i++) if (!wmemchr(tool->sources[i].path,0,MAX_PATH) || wcscmp(tool->sources[i].path,context->paths[i].path)) return false;
+    for (size_t i = 0; i < context->listCount; i++) { GuiPath path = {0}; if (!gui_build_list_path(current.list,i,&path) || wcscmp(path.path,context->paths[context->count + i].path)) return false; }
+    return true;
+}
+
 static void gui_options_order(GuiTool* tool) {
     const int read[] = {UI_READ_SPLIT,UI_READ_RETRIES,UI_READ_CDTEXT,UI_READ_RAW_MDS,UI_SESSION_PREGAPS,UI_READ_EJECT,UI_TOOL_OK,UI_TOOL_CLOSE};
     const int write[] = {UI_WRITE_LAYER,UI_BD_WRITE_TYPE,UI_BD_VNR_OFF,UI_TOOL_OK,UI_TOOL_CLOSE};
@@ -1532,10 +1591,12 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
         }
         switch (LOWORD(wp)) {
             case UI_TOOL_ADD: {
-                wchar_t path[MAX_PATH] = L""; bool cue = tool->operation == GUI_CREATE_CUE;
+                wchar_t path[MAX_PATH] = L""; bool cue = tool->operation == GUI_CREATE_CUE; GuiToolPickerContext context;
+                if (!gui_tool_picker_context(ui,tool,false,&context)) { free(context.paths); return 0; }
                 bool chosen = gui_file(window,path,false,cue ? L"音频文件\0*.wav;*.mp3;*.flac;*.aiff;*.aif;*.ogg;*.ape;*.wv\0所有文件\0*.*\0\0" : L"镜像、分卷及描述列表\0*.iso;*.bin;*.mdf;*.i00;*.i01;*.i02;*.dvd;*.lst;*.gi;*.pdi;*.di\0所有文件\0*.*\0\0",NULL);
-                if (!IsWindow(window) || GetWindowLongPtrW(window,GWLP_USERDATA) != (LONG_PTR)tool) return 0;
-                if (chosen && gui_paths_add(&tool->sources,&tool->count,path)) { gui_tool_fill(tool); SendMessageW(tool->list,LB_SETCURSEL,tool->count - 1,0); gui_tool_list_state(tool); }
+                if (!chosen || !wmemchr(path,0,MAX_PATH) || !path[0] || !gui_tool_picker_current(ui,&context)) { free(context.paths); return 0; }
+                free(context.paths);
+                if (gui_paths_add(&tool->sources,&tool->count,path)) { gui_tool_fill(tool); SendMessageW(tool->list,LB_SETCURSEL,tool->count - 1,0); gui_tool_list_state(tool); }
                 SetFocus(tool->list); break;
             }
             case UI_TOOL_REMOVE: { LRESULT at = SendMessageW(tool->list, LB_GETCURSEL, 0, 0); if (at >= 0 && (size_t)at < tool->count) { memmove(tool->sources + at, tool->sources + at + 1, (tool->count - (size_t)at - 1) * sizeof(*tool->sources)); tool->count--; gui_tool_fill(tool); } break; }
@@ -1551,10 +1612,12 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
                         if (!valid || value > UINT32_MAX || value % 16) { MessageBoxW(window,L"换层扇区数应在0至4294967295之间，并为16的倍数。",L"ImgBurn",MB_OK | MB_ICONERROR); break; } layerBreak = (uint32_t)value;
                     }
                 }
-                DWORD mdsFilter = 2;
-                if (!gui_file_filter(window,output,true,cue ? L"CUE 文件\0*.cue\0\0" : L"MDS 文件 - ANSI\0*.mds\0MDS 文件 - Unicode\0*.mds\0所有文件\0*.*\0\0",cue ? L"cue" : L"mds",cue ? NULL : &mdsFilter)) break;
-                if (!IsWindow(window) || GetWindowLongPtrW(window,GWLP_USERDATA) != (LONG_PTR)tool) return 0;
-                if (!cue && (mdsFilter < 1 || mdsFilter > 3)) { MessageBoxW(window,L"请选择MDS名称编码。",L"ImgBurn",MB_OK | MB_ICONERROR); break; }
+                DWORD mdsFilter = 2; GuiToolPickerContext context;
+                if (!gui_tool_picker_context(ui,tool,true,&context)) { free(context.paths); return 0; }
+                bool chosen = gui_file_filter(window,output,true,cue ? L"CUE 文件\0*.cue\0\0" : L"MDS 文件 - ANSI\0*.mds\0MDS 文件 - Unicode\0*.mds\0所有文件\0*.*\0\0",cue ? L"cue" : L"mds",cue ? NULL : &mdsFilter);
+                if (!chosen || !wmemchr(output,0,MAX_PATH) || !output[0] || !gui_tool_picker_current(ui,&context)) { free(context.paths); return 0; }
+                free(context.paths);
+                if (!cue && (mdsFilter < 1 || mdsFilter > 3)) { MessageBoxW(window,L"请选择MDS名称编码。",L"ImgBurn",MB_OK | MB_ICONERROR); return 0; }
                 GuiJob* job = gui_job(ui, tool->operation, tool->sources, tool->count); if (!job) break; wcscpy(job->destination, output);
                 if (!cue) { job->layerBreak = layerBreak; job->mdsLayerBreakOverride = SendMessageW(tool->layer,BM_GETCHECK,0,0) == BST_CHECKED; job->oppositeTrackPath = SendMessageW(tool->otp,BM_GETCHECK,0,0) == BST_CHECKED; job->mdsMedium = (MdsToolsMedium)medium; job->mdsPreservePaths = SendMessageW(tool->mdsPreservePaths,BM_GETCHECK,0,0) == BST_CHECKED; job->mdsAnsiFilenames = mdsFilter != 2; }
                 if (gui_launch(ui, job)) for (HWND child = GetWindow(window,GW_CHILD); child; child = GetWindow(child,GW_HWNDNEXT)) if (GetDlgCtrlID(child) != UI_TOOL_CLOSE) EnableWindow(child,FALSE); break;
