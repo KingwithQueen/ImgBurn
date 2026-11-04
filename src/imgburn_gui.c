@@ -1300,21 +1300,62 @@ static void gui_bd_format_open(GuiWindow* ui, bool bdr) {
     HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME,L"ImgBurnCommand",bdr ? L"新的空白BD-R带备用区格式化" : L"BD-RE格式化（与清零分开）",WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,CW_USEDEFAULT,CW_USEDEFAULT,rect.right - rect.left,rect.bottom - rect.top,ui->window,NULL,ui->instance,tool);
     if (!window) { ui->tool = NULL; free(tool); return; } EnableWindow(ui->window,FALSE); ShowWindow(window,SW_SHOW); gui_bd_format_query(tool);
 }
+typedef struct {
+    HWND main, window, formats, certification, ok, status, query;
+    GuiTool* tool;
+    GuiMode mode;
+    GuiOperation operation;
+    uint64_t activitySerial;
+    LRESULT selected, index, cert;
+    uint8_t formatCount;
+    bool loaded, closing, bdDisableVnr;
+    BdWriteType bdWriteType;
+    MmcFormattableCapacity format;
+    wchar_t drive[MAX_PATH], formatText[MAX_PATH], certText[MAX_PATH];
+} GuiBdFormatConfirmContext;
+
+static bool gui_bd_format_row(HWND combo, LRESULT selected, wchar_t* text) {
+    LRESULT count = SendMessageW(combo,CB_GETCOUNT,0,0); if (selected < 0 || selected >= count) return false;
+    LRESULT length = SendMessageW(combo,CB_GETLBTEXTLEN,(WPARAM)selected,0); if (length < 0 || length >= MAX_PATH) return false;
+    text[0] = 0; return SendMessageW(combo,CB_GETLBTEXT,(WPARAM)selected,(LPARAM)text) == length && !text[length];
+}
+/* 只保存本次所选描述符和真实选项，不借用跨确认框的工具内存。 */
+static bool gui_bd_format_context(const GuiWindow* ui, const GuiTool* tool, GuiBdFormatConfirmContext* context) {
+    memset(context,0,sizeof(*context));
+    if (!gui_tool_live(ui,tool) || ui->job || ui->completing || !tool->bdReLoaded || !gui_bd_format_list(tool->operation) || !wmemchr(tool->bdReDrive,0,MAX_PATH)) return false;
+    context->main = ui->window; context->window = tool->window; context->tool = (GuiTool*)tool; context->mode = ui->mode; context->operation = tool->operation; context->activitySerial = ui->activitySerial;
+    context->formats = tool->bdReFormats; context->certification = tool->operation == GUI_BD_RE_FORMAT_LIST ? tool->bdReCertification : NULL; context->ok = tool->ok; context->status = tool->candidateStatus; context->query = GetDlgItem(tool->window,UI_BD_RE_FORMAT_QUERY);
+    if (!IsWindow(context->formats) || !IsWindow(context->ok) || !IsWindow(context->status) || !IsWindow(context->query) || (context->certification && !IsWindow(context->certification))) return false;
+    context->selected = SendMessageW(context->formats,CB_GETCURSEL,0,0); context->index = context->selected >= 0 ? SendMessageW(context->formats,CB_GETITEMDATA,(WPARAM)context->selected,0) : -1;
+    /* ITEMDATA保持宽类型先验，防x64高位被unsigned截断后越界。 */
+    if (context->index < 0 || context->index >= MMC_MAX_FORMAT_CAPACITIES || context->index >= tool->bdReCapacities.formatCount || !gui_bd_format_row(context->formats,context->selected,context->formatText)) return false;
+    context->formatCount = tool->bdReCapacities.formatCount; context->format = tool->bdReCapacities.formats[context->index];
+    if (tool->operation == GUI_BD_R_FORMAT_LIST ? context->format.formatType != 0x32 : context->format.formatType != 0x30 && context->format.formatType != 0x31) return false;
+    if (tool->operation == GUI_BD_RE_FORMAT_LIST) {
+        if (!context->certification) return false; context->cert = SendMessageW(context->certification,CB_GETCURSEL,0,0);
+        if (context->cert < 0 || context->cert > 3 || !gui_bd_format_row(context->certification,context->cert,context->certText)) return false;
+    }
+    context->loaded = tool->bdReLoaded; context->closing = tool->bdReClosing; context->bdWriteType = ui->bdWriteType; context->bdDisableVnr = ui->bdDisableVnr; wcscpy(context->drive,tool->bdReDrive); return true;
+}
+static bool gui_bd_format_current(const GuiWindow* ui, const GuiBdFormatConfirmContext* context) {
+    if (!IsWindow(context->main) || GetWindowLongPtrW(context->main,GWLP_USERDATA) != (LONG_PTR)ui || !IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)context->tool) return false;
+    if (ui->window != context->main || ui->tool != context->tool || ui->job || ui->completing || ui->mode != context->mode || ui->activitySerial != context->activitySerial) return false;
+    GuiBdFormatConfirmContext current; if (!gui_bd_format_context(ui,context->tool,&current)) return false;
+    return current.window == context->window && current.formats == context->formats && current.certification == context->certification && current.ok == context->ok && current.status == context->status && current.query == context->query && current.operation == context->operation && current.loaded == context->loaded && current.closing == context->closing && current.formatCount == context->formatCount && current.selected == context->selected && current.index == context->index && current.cert == context->cert && current.format.blockCount == context->format.blockCount && current.format.typeDependentParameter == context->format.typeDependentParameter && current.format.formatType == context->format.formatType && current.bdWriteType == context->bdWriteType && current.bdDisableVnr == context->bdDisableVnr && !wcscmp(current.drive,context->drive) && !wcscmp(current.formatText,context->formatText) && !wcscmp(current.certText,context->certText);
+}
 static void gui_bd_format_submit(GuiTool* tool) {
-    GuiWindow* ui = tool->parent; if (ui->job || !tool->bdReLoaded) return; bool bdr = tool->operation == GUI_BD_R_FORMAT_LIST;
-    LRESULT selected = SendMessageW(tool->bdReFormats,CB_GETCURSEL,0,0), cert = bdr ? 0 : SendMessageW(tool->bdReCertification,CB_GETCURSEL,0,0);
-    LRESULT index = selected >= 0 ? SendMessageW(tool->bdReFormats,CB_GETITEMDATA,(WPARAM)selected,0) : -1;
-    if (index < 0 || (unsigned)index >= tool->bdReCapacities.formatCount || (unsigned)index >= MMC_MAX_FORMAT_CAPACITIES || cert < 0 || cert > 3) return;
-    const MmcFormattableCapacity* format = &tool->bdReCapacities.formats[index]; if (bdr ? format->formatType != 0x32 : format->formatType != 0x30 && format->formatType != 0x31) return; wchar_t confirm[850];
-    if (bdr) swprintf(confirm,850,L"目标：%ls\r\n原索引%u，FT=0x%02X，块数%u，原始TDP=0x%06X。\r\n仅允许新的空白、从未格式化的一次写BD-R。带备用区格式化一旦尝试就无法回滚；取消仍须等待设备结束。不会自动写入、回退或重试。是否继续？",tool->bdReDrive,(unsigned)index,format->formatType,format->blockCount,format->typeDependentParameter);
-    else swprintf(confirm,850,L"目标：%ls\r\n原索引%u，FT=0x%02X，块数%u，原始TDP=0x%06X，认证%u。\r\n格式化会破坏已有文件布局；这不是安全擦除，也不会自动写入镜像。开始后取消仍须等待设备结束。是否继续？",tool->bdReDrive,(unsigned)index,format->formatType,format->blockCount,format->typeDependentParameter,(unsigned)cert);
-    if (MessageBoxW(tool->window,confirm,bdr ? L"再次确认一次写BD-R格式化" : L"再次确认BD-RE格式化",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
-    GuiPath path = {0}; wcscpy(path.path,tool->bdReDrive); GuiJob* job = gui_job(ui,bdr ? GUI_BD_R_FORMAT : GUI_BD_RE_FORMAT,&path,1); if (!job) return;
-    wcscpy(job->drive,tool->bdReDrive);
-    if (bdr) { job->bdRFormat.formatIndex = (uint8_t)index; job->bdRFormat.expected = *format; job->bdRFormat.confirmFormat = true; }
-    else { job->bdReFormat.formatIndex = (uint8_t)index; job->bdReFormat.certification = (uint8_t)cert; job->bdReFormat.expected = *format; job->bdReFormat.confirmErase = true; }
-    tool->bdReLoaded = false;
-    if (gui_launch(ui,job)) { EnableWindow(tool->ok,FALSE); EnableWindow(tool->bdReFormats,FALSE); if (tool->bdReCertification) EnableWindow(tool->bdReCertification,FALSE); EnableWindow(GetDlgItem(tool->window,UI_BD_RE_FORMAT_QUERY),FALSE); SetWindowTextW(tool->candidateStatus,L"正在执行明确选择的格式化；取消不回滚已开始的设备命令。"); }
+    GuiWindow* ui = tool->parent; GuiBdFormatConfirmContext context; if (!gui_bd_format_context(ui,tool,&context)) return;
+    bool bdr = context.operation == GUI_BD_R_FORMAT_LIST; wchar_t confirm[850];
+    if (bdr) swprintf(confirm,850,L"目标：%ls\r\n原索引%u，FT=0x%02X，块数%u，原始TDP=0x%06X。\r\n仅允许新的空白、从未格式化的一次写BD-R。带备用区格式化一旦尝试就无法回滚；取消仍须等待设备结束。不会自动写入、回退或重试。是否继续？",context.drive,(unsigned)context.index,context.format.formatType,context.format.blockCount,context.format.typeDependentParameter);
+    else swprintf(confirm,850,L"目标：%ls\r\n原索引%u，FT=0x%02X，块数%u，原始TDP=0x%06X，认证%u。\r\n格式化会破坏已有文件布局；这不是安全擦除，也不会自动写入镜像。开始后取消仍须等待设备结束。是否继续？",context.drive,(unsigned)context.index,context.format.formatType,context.format.blockCount,context.format.typeDependentParameter,(unsigned)context.cert);
+    if (MessageBoxW(context.window,confirm,bdr ? L"再次确认一次写BD-R格式化" : L"再次确认BD-RE格式化",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+    if (!gui_bd_format_current(ui,&context)) return;
+    GuiPath path = {0}; wcscpy(path.path,context.drive); GuiJob* job = gui_job(ui,bdr ? GUI_BD_R_FORMAT : GUI_BD_RE_FORMAT,&path,1);
+    if (!job) { SetWindowTextW(context.status,L"无法启动格式化，请重试或重新查询。"); return; } wcscpy(job->drive,context.drive);
+    if (bdr) { job->bdRFormat.formatIndex = (uint8_t)context.index; job->bdRFormat.expected = context.format; job->bdRFormat.confirmFormat = true; }
+    else { job->bdReFormat.formatIndex = (uint8_t)context.index; job->bdReFormat.certification = (uint8_t)context.cert; job->bdReFormat.expected = context.format; job->bdReFormat.confirmErase = true; }
+    if (gui_launch(ui,job)) { tool->bdReLoaded = false; EnableWindow(context.ok,FALSE); EnableWindow(context.formats,FALSE); if (context.certification) EnableWindow(context.certification,FALSE); EnableWindow(context.query,FALSE); SetWindowTextW(context.status,L"正在执行明确选择的格式化；取消不回滚已开始的设备命令。"); }
+    else SetWindowTextW(context.status,L"无法启动格式化，请重试或重新查询。");
 }
 
 /* 两个创建窗口共用列表语义，控件ID、资源和条目上限仍各自维护。 */
