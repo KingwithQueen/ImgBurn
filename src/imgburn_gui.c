@@ -1596,13 +1596,67 @@ static void gui_options_order(GuiTool* tool) {
     const int* order = tool->operation == GUI_READ_OPTIONS ? read : write; size_t count = tool->operation == GUI_READ_OPTIONS ? ARRAYSIZE(read) : ARRAYSIZE(write);
     for (size_t i = count; i; i--) SetWindowPos(GetDlgItem(tool->window,order[i - 1]),HWND_TOP,0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
+typedef struct {
+    GuiWindow* ui;
+    GuiTool* tool;
+    HWND main, window, child, edit, focus;
+    GuiMode mode;
+    GuiOperation operation;
+    uint64_t activitySerial;
+    int control, kind, length, readKind, editId;
+    LONG_PTR style, editStyle;
+    LRESULT selection;
+    DWORD first, last;
+    wchar_t type[32], *text, *scratch;
+} GuiOptionsErrorContext;
+
+static int gui_options_read_kind(const GuiWindow* ui) {
+    if (!wmemchr(ui->readImage,0,MAX_PATH)) return -1;
+    const wchar_t* extension = wcsrchr(ui->readImage,L'.'); return extension && !_wcsicmp(extension,L".cue") ? 1 : extension && !_wcsicmp(extension,L".iso") ? 2 : 0;
+}
+/* 只保存错误控件的编辑意图；提示期间的新任务、焦点或草稿都不能由旧请求接管。 */
+static bool gui_options_error_capture(HWND window, int control, GuiOptionsErrorContext* context) {
+    memset(context,0,sizeof(*context)); GuiTool* tool = (GuiTool*)GetWindowLongPtrW(window,GWLP_USERDATA); if (!tool) return false; GuiWindow* ui = tool->parent;
+    if (!gui_tool_live(ui,tool) || ui->job || ui->completing || (tool->operation != GUI_READ_OPTIONS && tool->operation != GUI_WRITE_OPTIONS)) return false;
+    context->ui = ui; context->tool = tool; context->main = ui->window; context->window = window; context->control = control; context->mode = ui->mode; context->operation = tool->operation; context->activitySerial = ui->activitySerial; context->readKind = -1;
+    context->child = GetDlgItem(window,control); if (!context->child || !IsWindow(context->child) || GetParent(context->child) != window || GetDlgCtrlID(context->child) != control || !IsWindowEnabled(context->child)) return false;
+    context->style = GetWindowLongPtrW(context->child,GWL_STYLE); if (!GetClassNameW(context->child,context->type,ARRAYSIZE(context->type))) return false;
+    if (!_wcsicmp(context->type,L"Edit")) { context->kind = 1; context->edit = context->child; }
+    else if (!_wcsicmp(context->type,L"ComboBox")) {
+        LONG_PTR style = context->style & 3; if (style != CBS_DROPDOWN && style != CBS_DROPDOWNLIST) return false; context->kind = style == CBS_DROPDOWN ? 2 : 3; context->selection = SendMessageW(context->child,CB_GETCURSEL,0,0);
+        if (context->kind == 2) { COMBOBOXINFO info = {0}; info.cbSize = (DWORD)sizeof(info); if (!GetComboBoxInfo(context->child,&info)) return false; context->edit = info.hwndItem; }
+    } else return false;
+    if (context->edit) {
+        wchar_t type[32] = L""; if (!IsWindow(context->edit) || GetParent(context->edit) != (context->kind == 1 ? window : context->child) || !GetClassNameW(context->edit,type,ARRAYSIZE(type)) || _wcsicmp(type,L"Edit")) return false;
+        context->editId = GetDlgCtrlID(context->edit); context->editStyle = GetWindowLongPtrW(context->edit,GWL_STYLE); SendMessageW(context->edit,EM_GETSEL,(WPARAM)&context->first,(LPARAM)&context->last);
+    }
+    if (control == UI_READ_SPLIT && tool->operation == GUI_READ_OPTIONS) { context->readKind = gui_options_read_kind(ui); if (context->readKind < 0) return false; }
+    context->length = GetWindowTextLengthW(context->child); if (context->length < 0 || context->length == INT_MAX) return false;
+    size_t capacity = (size_t)context->length + 1; if (capacity > SIZE_MAX / 2 || capacity * 2 > SIZE_MAX / sizeof(wchar_t)) return false;
+    context->text = calloc(capacity * 2,sizeof(wchar_t)); if (!context->text) return false; context->scratch = context->text + capacity;
+    if (GetWindowTextW(context->child,context->text,context->length + 1) != context->length || context->text[context->length] || GetWindowTextLengthW(context->child) != context->length) return false;
+    context->focus = GetFocus(); return true;
+}
+static bool gui_options_error_current(const GuiOptionsErrorContext* context, bool focused) {
+    if (!IsWindow(context->main) || GetWindowLongPtrW(context->main,GWLP_USERDATA) != (LONG_PTR)context->ui || !IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)context->tool) return false;
+    GuiWindow* ui = context->ui; GuiTool* tool = context->tool;
+    if (ui->window != context->main || ui->tool != tool || ui->job || ui->completing || ui->mode != context->mode || ui->activitySerial != context->activitySerial || tool->window != context->window || tool->operation != context->operation || !gui_tool_live(ui,tool)) return false;
+    HWND child = context->child; wchar_t type[32] = L"";
+    if (!IsWindow(child) || GetDlgItem(context->window,context->control) != child || GetParent(child) != context->window || GetDlgCtrlID(child) != context->control || !IsWindowEnabled(child) || GetWindowLongPtrW(child,GWL_STYLE) != context->style || !GetClassNameW(child,type,ARRAYSIZE(type)) || wcscmp(type,context->type)) return false;
+    if (context->kind != 1 && SendMessageW(child,CB_GETCURSEL,0,0) != context->selection) return false;
+    if (context->kind == 2) { COMBOBOXINFO info = {0}; info.cbSize = (DWORD)sizeof(info); if (!GetComboBoxInfo(child,&info) || info.hwndItem != context->edit) return false; }
+    if (context->edit) {
+        DWORD first = 0, last = 0; if (!IsWindow(context->edit) || GetParent(context->edit) != (context->kind == 1 ? context->window : child) || GetDlgCtrlID(context->edit) != context->editId || GetWindowLongPtrW(context->edit,GWL_STYLE) != context->editStyle || !GetClassNameW(context->edit,type,ARRAYSIZE(type)) || _wcsicmp(type,L"Edit")) return false;
+        SendMessageW(context->edit,EM_GETSEL,(WPARAM)&first,(LPARAM)&last); if (first != context->first || last != context->last) return false;
+    }
+    if (context->readKind >= 0 && gui_options_read_kind(ui) != context->readKind) return false;
+    if (GetWindowTextLengthW(child) != context->length || GetWindowTextW(child,context->scratch,context->length + 1) != context->length || context->scratch[context->length] || GetWindowTextLengthW(child) != context->length || wcscmp(context->text,context->scratch)) return false;
+    HWND focus = GetFocus(); return focused ? focus == child || (context->edit && focus == context->edit) : focus == context->focus;
+}
 static void gui_options_error(HWND window, int control, const wchar_t* message) {
-    LONG_PTR identity = GetWindowLongPtrW(window,GWLP_USERDATA); MessageBoxW(window,message,L"ImgBurn",MB_OK | MB_ICONINFORMATION);
-    if (!IsWindow(window) || GetWindowLongPtrW(window,GWLP_USERDATA) != identity) return;
-    HWND child = GetDlgItem(window,control); if (!child || !IsWindowEnabled(child)) return;
-    SetFocus(child); wchar_t type[32] = L""; GetClassNameW(child,type,ARRAYSIZE(type));
-    if (!_wcsicmp(type,L"Edit")) SendMessageW(child,EM_SETSEL,0,-1);
-    else if (!_wcsicmp(type,L"ComboBox") && (GetWindowLongPtrW(child,GWL_STYLE) & 3) == CBS_DROPDOWN) SendMessageW(child,CB_SETEDITSEL,0,MAKELPARAM(0,-1));
+    GuiOptionsErrorContext context; bool captured = gui_options_error_capture(window,control,&context); MessageBoxW(window,message,L"ImgBurn",MB_OK | MB_ICONINFORMATION);
+    if (captured && gui_options_error_current(&context,false)) { SetFocus(context.child); if (context.edit && gui_options_error_current(&context,true)) SendMessageW(context.edit,EM_SETSEL,0,-1); }
+    free(context.text);
 }
 static void gui_read_options_state(GuiTool* tool) {
     const wchar_t* extension = wcsrchr(tool->parent->readImage,L'.'); bool cue = extension && !_wcsicmp(extension,L".cue"), mds = extension && !_wcsicmp(extension,L".mds");
