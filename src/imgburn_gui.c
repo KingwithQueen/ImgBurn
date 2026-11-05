@@ -762,7 +762,7 @@ static bool gui_cd_iso_start(GuiWindow* ui, bool writing) {
     if (writing && (!ui->cdPlanSelected || !gui_cd_plan_current(ui))) { gui_cd_plan_clear(ui); SetWindowTextW(tool->candidateStatus,L"请先只读规划并明确使用此计划。"); gui_cd_plan_fill(tool); return false; }
     if (!writing) gui_cd_plan_clear(ui);
     GuiPath path = {0}; wcscpy(path.path,ui->sourceImage); GuiJob* job = gui_job(ui,writing ? GUI_CD_ISO_WRITE : GUI_CD_ISO_PLAN,&path,1);
-    if (!job) { gui_cd_plan_clear(ui); return false; }
+    if (!job) { gui_cd_plan_clear(ui); SetWindowTextW(tool->candidateStatus,L"无法启动后台操作，请重新规划。"); gui_cd_plan_fill(tool); return false; }
     if (writing) {
         job->cdPlan = ui->cdPlan; job->cdPlanSelected = true; job->cdIsoSource = ui->cdIsoLock; job->cdIsoSource.cancelEvent = job->cancel; memset(&ui->cdIsoLock,0,sizeof(ui->cdIsoLock));
         ui->cdPlanValid = ui->cdPlanSelected = false;
