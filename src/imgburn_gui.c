@@ -37,7 +37,7 @@ enum {
     UI_TOOL_LAYER, UI_TOOL_LBA, UI_TOOL_OTP, UI_TOOL_PTP, UI_TOOL_OK, UI_TOOL_CLOSE, UI_IMAGE_INFO, UI_REMOVE_SOURCE, UI_VERIFY_COMPARE, UI_READ_CDTEXT,
     UI_DISCOVERY_ALL, UI_DISCOVERY_CUSTOM, UI_DISCOVERY_SECTORS, UI_DISCOVERY_CAPACITY, UI_DISCOVERY_SPEED, UI_DISCOVERY_SIZE, UI_READ_SPLIT, UI_READ_RAW_MDS, UI_SESSION_PREGAPS, UI_READ_SPEED, UI_READ_AUDIO_SPEED, UI_READ_RETRIES, UI_READ_EJECT, UI_WRITE_LAYER, UI_DVD_CANDIDATES, UI_DVD_CANDIDATE_LIST,
     UI_CD_ISO_OPEN, UI_CD_ALLOW_BLANK, UI_CD_FINALIZE, UI_CD_PLAN, UI_CD_SELECT, UI_CD_WRITE, UI_CD_PLAN_LIST, UI_CD_SOURCE, UI_CD_DRIVE,
-    UI_BD_RE_FORMAT_OPEN = 1400, UI_BD_RE_FORMAT_QUERY, UI_BD_RE_FORMAT_LIST, UI_BD_RE_CERTIFICATION, UI_BD_R_FORMAT_OPEN, UI_BD_WRITE_TYPE, UI_BD_VNR_OFF, UI_WRITE_EJECT = 1410, UI_WRITE_CYCLE = 1411, UI_WRITE_OPC = 1412,
+    UI_BD_RE_FORMAT_OPEN = 1400, UI_BD_RE_FORMAT_QUERY, UI_BD_RE_FORMAT_LIST, UI_BD_RE_CERTIFICATION, UI_BD_R_FORMAT_OPEN, UI_BD_WRITE_TYPE, UI_BD_VNR_OFF, UI_WRITE_EJECT = 1410, UI_WRITE_CYCLE = 1411, UI_WRITE_OPC = 1412, UI_DISCOVERY_EJECT = 1413,
     UI_EZ_FIRST = 1100,
     UI_WRITE_SOURCE_GROUP = 1200, UI_WRITE_DEST_GROUP, UI_WRITE_SETTINGS_GROUP, UI_WRITE_INFO, UI_WRITE_OPEN,
     UI_WRITE_SPEED, UI_WRITE_COPIES, UI_WRITE_SPEED_EFFECTIVE, UI_WRITE_LABEL, UI_WRITE_IMPLEMENTATION, UI_WRITE_FILESYSTEM,
@@ -107,6 +107,7 @@ struct GuiWindow {
     bool writeEjectWhenDone; /* 独立保存写入流程成功后的弹盘偏好。 */
     bool skipWriteVerifyCycle; /* 默认重新装载；仅保存普通Write的跳过偏好。 */
     bool writePerformOpc; /* 默认关闭；仅保存普通Write的显式功率校准请求。 */
+    bool discoveryEjectWhenDone; /* 品质测试独立保存成功后弹盘偏好。 */
     uint32_t discoveryCapacity;
     wchar_t discoveryCount[32], discoveryRate[24], writeLayerValue[16];
     DvdLayerBreakCandidate* dvdCandidates;
@@ -444,6 +445,7 @@ static void gui_read_controls(GuiWindow* ui) {
     if (ui->readRetries) GetWindowTextW(ui->readRetries,ui->readRetryText,8);
     if (ui->readEject) ui->readEjectWhenDone = SendMessageW(ui->readEject,BM_GETCHECK,0,0) == BST_CHECKED;
     if (ui->mode == GUI_DISCOVERY && ui->discoverySectors) { ui->discoveryAll = SendMessageW(GetDlgItem(ui->window,UI_DISCOVERY_ALL),BM_GETCHECK,0,0) == BST_CHECKED; GetWindowTextW(ui->discoverySectors,ui->discoveryCount,32); GetWindowTextW(ui->discoverySpeed,ui->discoveryRate,24); }
+    if (ui->mode == GUI_DISCOVERY) { HWND eject = GetDlgItem(ui->window,UI_DISCOVERY_EJECT); if (eject) ui->discoveryEjectWhenDone = SendMessageW(eject,BM_GETCHECK,0,0) == BST_CHECKED; }
     if (ui->writeLayer) { wchar_t layer[16]; GetWindowTextW(ui->writeLayer,layer,16); if (ui->dvdLayerDerived && wcscmp(layer,ui->writeLayerValue)) gui_dvd_candidates_clear(ui,false); wcscpy(ui->writeLayerValue,layer); }
     if (ui->drives) ui->selectedDrive = (int)SendMessageW(ui->drives, CB_GETCURSEL, 0, 0);
 }
@@ -470,7 +472,7 @@ static void gui_menu(GuiWindow* ui) {
     if (ui->sessionPregaps) { const wchar_t* extension = wcsrchr(ui->sourceImage,L'.'); EnableWindow(ui->sessionPregaps,idle && (read ? readExtension && !_wcsicmp(readExtension,L".cue") : !ui->verifyAgainstImage || (extension && !_wcsicmp(extension,L".cue")))); }
     if (verify) { EnableWindow(ui->compare,idle); EnableWindow(ui->destination,idle && ui->verifyAgainstImage); EnableWindow(GetDlgItem(ui->window,UI_SOURCE_FILE),idle && ui->verifyAgainstImage); }
     if (discovery) {
-        EnableWindow(GetDlgItem(ui->window,UI_DISCOVERY_ALL),idle); EnableWindow(GetDlgItem(ui->window,UI_DISCOVERY_CUSTOM),idle); EnableWindow(ui->discoverySectors,idle && !ui->discoveryAll); EnableWindow(ui->discoverySpeed,idle); EnableWindow(GetDlgItem(ui->window,UI_DISCOVERY_CAPACITY),idle && ui->discoveryCapacity != 0);
+        EnableWindow(GetDlgItem(ui->window,UI_DISCOVERY_ALL),idle); EnableWindow(GetDlgItem(ui->window,UI_DISCOVERY_CUSTOM),idle); EnableWindow(ui->discoverySectors,idle && !ui->discoveryAll); EnableWindow(ui->discoverySpeed,idle); EnableWindow(GetDlgItem(ui->window,UI_DISCOVERY_CAPACITY),idle && ui->discoveryCapacity != 0); EnableWindow(GetDlgItem(ui->window,UI_DISCOVERY_EJECT),idle);
         wchar_t size[80]; uint64_t sectors = ui->discoveryAll ? ui->discoveryCapacity : _wcstoui64(ui->discoveryCount,NULL,10); swprintf(size,80,L"数据大小：%.2f MiB",(double)sectors / 512.0); SetWindowTextW(GetDlgItem(ui->window,UI_DISCOVERY_SIZE),size);
     }
     if (ui->writeLayer) EnableWindow(ui->writeLayer,idle);
@@ -634,7 +636,11 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
         SetWindowPos(ui->tabs, HWND_BOTTOM, 0,0,0,0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         ctl(ui, ui->window, L"BUTTON", L"计算", WS_TABSTOP, UI_CALCULATE, 450, 326, 90, 30);
     }
-    if (mode == GUI_DISCOVERY) { ui->verify = ctl(ui, ui->window, L"BUTTON", L"验证", WS_TABSTOP | BS_AUTOCHECKBOX, UI_VERIFY_CHECK, 110, 246, 65, 22); ctl(ui, ui->window, L"BUTTON", L"测试模式", WS_TABSTOP | BS_AUTOCHECKBOX, UI_TEST, 16, 246, 85, 22); gui_write_checks(ui); }
+    if (mode == GUI_DISCOVERY) { ui->verify = ctl(ui, ui->window, L"BUTTON", L"验证", WS_TABSTOP | BS_AUTOCHECKBOX, UI_VERIFY_CHECK, 110, 246, 65, 22); ctl(ui, ui->window, L"BUTTON", L"测试模式", WS_TABSTOP | BS_AUTOCHECKBOX, UI_TEST, 16, 246, 85, 22);
+        HWND eject = ctl(ui,ui->window,L"BUTTON",L"成功后弹盘",WS_TABSTOP | BS_AUTOCHECKBOX,UI_DISCOVERY_EJECT,184,246,134,22); SendMessageW(eject,BM_SETCHECK,ui->discoveryEjectWhenDone ? BST_CHECKED : BST_UNCHECKED,0);
+        ui->tips = CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,NULL,WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,ui->window,NULL,ui->instance,NULL);
+        gui_tip(ui,eject,L"仅在品质测试流程成功时尝试弹出；启用验证时先验证，设备测试模式成功也适用。失败或取消不执行成功后弹盘；仅本次运行保存。"); gui_write_checks(ui);
+    }
     if (mode == GUI_DISCOVERY) {
         ctl(ui,ui->window,L"STATIC",L"写入速度：",0,0,344,332,76,24); ui->discoverySpeed = ctl(ui,ui->window,L"COMBOBOX",L"",WS_TABSTOP | CBS_DROPDOWN | WS_VSCROLL | CBS_AUTOHSCROLL,UI_DISCOVERY_SPEED,424,328,130,220);
         const wchar_t* speeds[] = {L"MAX",L"1x",L"2x",L"4x",L"6x",L"8x",L"10x",L"12x",L"16x",L"20x",L"24x",L"32x",L"40x",L"48x",L"52x",L"56x",L"64x",L"72x"}; for (unsigned i = 0; i < sizeof(speeds) / sizeof(*speeds); i++) SendMessageW(ui->discoverySpeed,CB_ADDSTRING,0,(LPARAM)speeds[i]); SetWindowTextW(ui->discoverySpeed,ui->discoveryRate);
@@ -646,6 +652,7 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
     EnableWindow(ui->go, mode != GUI_READ && mode != GUI_DISCOVERY && !(build && ui->outputDevice));
     if (ui->drives) for (int i = 0; i < ui->driveCount; i++) { wchar_t text[128]; swprintf(text, 128, L"%c:  %hs %hs", ui->devices[i].driveLetter ? ui->devices[i].driveLetter : L'?', ui->devices[i].vendorId, ui->devices[i].productId); SendMessageW(ui->drives, CB_ADDSTRING, 0, (LPARAM)text); }
     if (ui->drives) SendMessageW(ui->drives, CB_SETCURSEL, ui->selectedDrive, 0);
+    if (mode == GUI_DISCOVERY) SetWindowPos(GetDlgItem(ui->window,UI_DISCOVERY_EJECT),ui->verify,0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     gui_status(ui, build && ui->outputDevice ? L"直接构建到光盘尚未接通；可选择输出镜像文件" : L"Ready"); gui_menu(ui);
     if (ui->drives && ui->selectedDrive >= 0) gui_start(ui, GUI_DRIVE_INFO);
 }
@@ -705,6 +712,7 @@ static GuiJob* gui_job(GuiWindow* ui, GuiOperation operation, const GuiPath* pat
     job->cdAllowBlank = ui->cdAllowBlank; job->cdFinalize = ui->cdFinalize;
     /* 新意图只进入这个普通Write任务；其他任务也清空待用值，不传入扩展CD/格式化。 */
     if (operation == GUI_WRITE_DISC) { job->bdWriteType = ui->bdWriteType; job->bdDisableVnr = ui->bdDisableVnr; job->keepCurrentWriteSpeed = ui->keepCurrentWriteSpeed; job->writeEject = ui->writeEjectWhenDone; job->skipWriteVerifyCycle = ui->skipWriteVerifyCycle; job->writePerformOpc = ui->writePerformOpc; }
+    if (operation == GUI_DISCOVERY_DISC) job->discoveryEject = ui->discoveryEjectWhenDone;
     gui_bd_write_clear(ui);
     if (ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount) wcscpy(job->drive, ui->devices[ui->selectedDrive].devicePath); return job;
 }
@@ -880,10 +888,10 @@ typedef struct {
     uint64_t activitySerial;
     int driveCount, selectedDrive;
     uint32_t discoveryCapacity;
-    bool complete, all, mediaReady, testMode, testWriteSupported, verifyAfter, bdDisableVnr;
+    bool complete, all, mediaReady, testMode, testWriteSupported, verifyAfter, bdDisableVnr, discoveryEjectWhenDone;
     BdWriteType bdWriteType;
     wchar_t drive[MAX_PATH], count[32], rate[24];
-    GuiDiscConfirmControl controls[7];
+    GuiDiscConfirmControl controls[8];
 } GuiDiscoveryConfirmContext;
 
 /* 只读绑定品质测试确认的范围、速度和目标；保留原入口资格与解析规则。 */
@@ -893,9 +901,9 @@ static void gui_discovery_confirm_context(const GuiWindow* ui, GuiDiscoveryConfi
     context->complete = !ui->job && ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount;
     if (context->complete) wcscpy(context->drive,ui->devices[ui->selectedDrive].devicePath);
     context->all = ui->discoveryAll; wcscpy(context->count,ui->discoveryCount); wcscpy(context->rate,ui->discoveryRate);
-    context->discoveryCapacity = ui->discoveryCapacity; context->mediaReady = ui->mediaReady; context->testMode = ui->testMode; context->testWriteSupported = ui->testWriteSupported; context->verifyAfter = ui->verifyAfter;
+    context->discoveryCapacity = ui->discoveryCapacity; context->mediaReady = ui->mediaReady; context->testMode = ui->testMode; context->testWriteSupported = ui->testWriteSupported; context->verifyAfter = ui->verifyAfter; context->discoveryEjectWhenDone = ui->discoveryEjectWhenDone;
     context->bdWriteType = ui->bdWriteType; context->bdDisableVnr = ui->bdDisableVnr;
-    HWND controls[] = {ui->drives,ui->discoverySectors,ui->discoverySpeed,GetDlgItem(ui->window,UI_TEST),ui->verify,GetDlgItem(ui->window,UI_DISCOVERY_ALL),GetDlgItem(ui->window,UI_DISCOVERY_CUSTOM)};
+    HWND controls[] = {ui->drives,ui->discoverySectors,ui->discoverySpeed,GetDlgItem(ui->window,UI_TEST),ui->verify,GetDlgItem(ui->window,UI_DISCOVERY_ALL),GetDlgItem(ui->window,UI_DISCOVERY_CUSTOM),GetDlgItem(ui->window,UI_DISCOVERY_EJECT)};
     const int capacities[] = {MAX_PATH,32,24};
     for (size_t i = 0; i < ARRAYSIZE(controls); i++) {
         GuiDiscConfirmControl* saved = &context->controls[i]; saved->window = controls[i]; if (!saved->window) continue;
@@ -913,7 +921,7 @@ static bool gui_discovery_confirm_current(const GuiWindow* ui, const GuiDiscover
     if (ui->window != context->window || ui->mode != context->mode || ui->job || ui->activitySerial != context->activitySerial || ui->driveCount != context->driveCount || ui->selectedDrive != context->selectedDrive) return false;
     GuiDiscoveryConfirmContext current; gui_discovery_confirm_context(ui,&current);
     if (!current.complete || wcscmp(current.drive,context->drive) || current.all != context->all || wcscmp(current.count,context->count) || wcscmp(current.rate,context->rate)) return false;
-    if (current.discoveryCapacity != context->discoveryCapacity || current.mediaReady != context->mediaReady || current.testMode != context->testMode || current.testWriteSupported != context->testWriteSupported || current.verifyAfter != context->verifyAfter || current.bdWriteType != context->bdWriteType || current.bdDisableVnr != context->bdDisableVnr) return false;
+    if (current.discoveryCapacity != context->discoveryCapacity || current.mediaReady != context->mediaReady || current.testMode != context->testMode || current.testWriteSupported != context->testWriteSupported || current.verifyAfter != context->verifyAfter || current.bdWriteType != context->bdWriteType || current.bdDisableVnr != context->bdDisableVnr || current.discoveryEjectWhenDone != context->discoveryEjectWhenDone) return false;
     for (size_t i = 0; i < ARRAYSIZE(current.controls); i++) if (current.controls[i].window != context->controls[i].window || current.controls[i].value != context->controls[i].value || wcscmp(current.controls[i].text,context->controls[i].text)) return false;
     return true;
 }
@@ -1196,7 +1204,8 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
     }
     if (discovery) {
         GuiDiscoveryConfirmContext context; gui_discovery_confirm_context(ui,&context);
-        if (MessageBoxW(context.window,ui->testMode ? L"将以设备测试模式执行品质测试，是否继续？" : L"品质测试将向所选光盘写入零数据，是否继续？",L"ImgBurn",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+        wchar_t confirm[256]; wcscpy(confirm,ui->testMode ? L"将以设备测试模式执行品质测试，是否继续？" : L"品质测试将向所选光盘写入零数据，是否继续？"); if (ui->discoveryEjectWhenDone) wcscat(confirm,L"\r\n流程成功后将尝试弹出光盘；已启用验证时先完成验证。");
+        if (MessageBoxW(context.window,confirm,L"ImgBurn",MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
         if (!gui_discovery_confirm_current(ui,&context)) return;
     }
     if (bdReErase) {
@@ -2221,6 +2230,7 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
             case UI_TEST: ui->testMode = ui->testWriteSupported && SendMessageW(GetDlgItem(window,UI_TEST),BM_GETCHECK,0,0) == BST_CHECKED; gui_write_checks(ui); break;
             case UI_VERIFY_CHECK: gui_read_controls(ui); gui_write_checks(ui); break;
             case UI_DISCOVERY_ALL: case UI_DISCOVERY_CUSTOM: gui_read_controls(ui); gui_menu(ui); break;
+            case UI_DISCOVERY_EJECT: if (ui->mode == GUI_DISCOVERY && HIWORD(wp) == BN_CLICKED) { gui_read_controls(ui); gui_menu(ui); } break;
             case UI_DISCOVERY_SECTORS: if (HIWORD(wp) == EN_CHANGE) { gui_read_controls(ui); gui_menu(ui); } break;
             case UI_DISCOVERY_CAPACITY:
                 ui->discoveryAll = false; SendMessageW(GetDlgItem(window,UI_DISCOVERY_ALL),BM_SETCHECK,BST_UNCHECKED,0); SendMessageW(GetDlgItem(window,UI_DISCOVERY_CUSTOM),BM_SETCHECK,BST_CHECKED,0); swprintf(ui->discoveryCount,32,L"%u",ui->discoveryCapacity); SetWindowTextW(ui->discoverySectors,ui->discoveryCount); gui_menu(ui); break;
