@@ -23,6 +23,7 @@ typedef struct {
     UdfRevision revision;
     bool dvdVideo, bluray, optimize, verify, seamless, oppositeTrackPath, replaceExisting, testMode, testWriteSupported, readCdText, rawCdMds, includeSessionPregaps;
     uint32_t speed, discoverySectors, discoveryCapacity;
+    bool keepCurrentWriteSpeed; /* 仅普通Write携带MAX/KEEP偏好。 */
     uint32_t readSplitSectors;
     unsigned readRetries;
     bool readAutoSplit, readEject, setReadSpeeds;

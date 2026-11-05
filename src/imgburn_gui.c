@@ -103,6 +103,7 @@ struct GuiWindow {
     wchar_t readSplitText[40], readRate[24], readAudioRate[24], readRetryText[8];
     BdWriteType bdWriteType;
     bool bdDisableVnr; /* 只暂存下一次明确BD-R写入，任一任务消费或上下文改变后清除。 */
+    bool keepCurrentWriteSpeed; /* 持久选择MAX或KEEP，不随任务消费。 */
     uint32_t discoveryCapacity;
     wchar_t discoveryCount[32], discoveryRate[24], writeLayerValue[16];
     DvdLayerBreakCandidate* dvdCandidates;
@@ -427,6 +428,7 @@ static void gui_read_controls(GuiWindow* ui) {
     if (ui->dvd) ui->dvdVideo = SendMessageW(ui->dvd, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (ui->bd) ui->bluray = SendMessageW(ui->bd, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (ui->optimize) ui->deduplicate = SendMessageW(ui->optimize, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    if (ui->mode == GUI_WRITE) { HWND speed = GetDlgItem(ui->window,UI_WRITE_SPEED); if (speed) { LRESULT selected = SendMessageW(speed,CB_GETCURSEL,0,0); if (selected == 0 || selected == 1) ui->keepCurrentWriteSpeed = selected == 1; } }
     if ((ui->mode == GUI_WRITE || ui->mode == GUI_DISCOVERY) && GetDlgItem(ui->window,UI_TEST)) ui->testMode = ui->testWriteSupported && SendMessageW(GetDlgItem(ui->window,UI_TEST),BM_GETCHECK,0,0) == BST_CHECKED;
     if (ui->verify && !ui->testMode) ui->verifyAfter = SendMessageW(ui->verify, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (ui->compare) ui->verifyAgainstImage = SendMessageW(ui->compare, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -470,6 +472,7 @@ static void gui_menu(GuiWindow* ui) {
     }
     if (ui->writeLayer) EnableWindow(ui->writeLayer,idle);
     if (write) {
+        EnableWindow(GetDlgItem(ui->window,UI_WRITE_SPEED),idle);
         EnableWindow(GetDlgItem(ui->window,UI_SOURCE_FILE),idle); EnableWindow(GetDlgItem(ui->window,UI_WRITE_OPEN),idle && ui->sourceImage[0]); EnableWindow(GetDlgItem(ui->window,UI_IMAGE_INFO),idle && ui->sourceImage[0]); EnableWindow(GetDlgItem(ui->window,UI_TOOL_CUE),idle);
         EnableWindow(ui->drives,idle && drive); EnableWindow(ui->info,drive && ui->mediaReady); EnableWindow(GetDlgItem(ui->window,UI_DEVICE_ERASE_QUICK),idle && drive && ui->mediaReady && ui->eraseSupported);
         bool transfer = busy && ui->job->operation != GUI_DRIVE_INFO && ui->job->operation != GUI_INSPECT && !ui->tool; ShowWindow(ui->progress,transfer ? SW_SHOW : SW_HIDE); ShowWindow(ui->cancel,transfer ? SW_SHOW : SW_HIDE);
@@ -534,7 +537,7 @@ static void gui_write_page(GuiWindow* ui) {
     HWND export = ctl(ui,ui->window,L"BUTTON",L"导出图表",WS_TABSTOP,UI_GRAPH_EXPORT,283,249,23,22); EnableWindow(export,FALSE); ShowWindow(export,SW_HIDE);
     ui->info = ctl(ui,ui->window,L"EDIT",L"",ES_MULTILINE | ES_READONLY | WS_VSCROLL,UI_WRITE_INFO,336,8,321,289);
     ctl(ui,ui->window,L"BUTTON",L"设置",BS_GROUPBOX,UI_WRITE_SETTINGS_GROUP,336,304,321,73); ctl(ui,ui->window,L"STATIC",L"写入速度：",0,0,344,324,78,13); ctl(ui,ui->window,L"STATIC",L"份数：",0,0,344,351,78,13);
-    HWND speed = ctl(ui,ui->window,L"COMBOBOX",L"",CBS_DROPDOWNLIST,UI_WRITE_SPEED,424,320,65,140); gui_combo_height(ui,speed,21); SendMessageW(speed,CB_ADDSTRING,0,(LPARAM)L"MAX"); SendMessageW(speed,CB_SETCURSEL,0,0); EnableWindow(speed,FALSE);
+    HWND speed = ctl(ui,ui->window,L"COMBOBOX",L"",WS_TABSTOP | CBS_DROPDOWNLIST,UI_WRITE_SPEED,424,320,65,140); gui_combo_height(ui,speed,21); SendMessageW(speed,CB_ADDSTRING,0,(LPARAM)L"MAX"); SendMessageW(speed,CB_ADDSTRING,0,(LPARAM)L"KEEP"); SendMessageW(speed,CB_SETCURSEL,ui->keepCurrentWriteSpeed ? 1 : 0,0); gui_tip(ui,speed,L"MAX 请求最高写入速度；KEEP 不设置速度，沿用设备当前值。BD-RE覆写始终沿用当前速度。");
     HWND copies = ctl(ui,ui->window,L"COMBOBOX",L"",CBS_DROPDOWNLIST,UI_WRITE_COPIES,424,347,65,140); gui_combo_height(ui,copies,21); SendMessageW(copies,CB_ADDSTRING,0,(LPARAM)L"1"); SendMessageW(copies,CB_SETCURSEL,0,0); EnableWindow(copies,FALSE);
     HWND effective = ctl(ui,ui->window,L"STATIC",L"(未知)",0,UI_WRITE_SPEED_EFFECTIVE,496,324,70,13); ShowWindow(effective,SW_HIDE);
     const int settingsIds[] = {UI_SETTINGS,UI_DEVICE_ADVANCED,UI_DEVICE_BOOKTYPE}; const int settingX[] = {624,601,624}, settingY[] = {320,345,345}; const wchar_t* settingsNames[] = {L"自动写入速度",L"高级设置",L"Book Type"};
@@ -698,7 +701,7 @@ static GuiJob* gui_job(GuiWindow* ui, GuiOperation operation, const GuiPath* pat
     wcscpy(job->destination, ui->mode == GUI_READ ? ui->readImage : ui->destinationImage); wcscpy(job->label, ui->volumeLabel); job->fsTypes = ui->fsTypes; job->revision = ui->revision; job->dvdVideo = ui->dvdVideo; job->bluray = ui->bluray; job->optimize = ui->deduplicate; job->testMode = (operation == GUI_WRITE_DISC || operation == GUI_DISCOVERY_DISC) && ui->testMode; job->verify = ui->verifyAfter && !job->testMode; job->speed = 0xFFFF; job->oppositeTrackPath = true;
     job->cdAllowBlank = ui->cdAllowBlank; job->cdFinalize = ui->cdFinalize;
     /* 新意图只进入这个普通Write任务；其他任务也清空待用值，不传入扩展CD/格式化。 */
-    if (operation == GUI_WRITE_DISC) { job->bdWriteType = ui->bdWriteType; job->bdDisableVnr = ui->bdDisableVnr; }
+    if (operation == GUI_WRITE_DISC) { job->bdWriteType = ui->bdWriteType; job->bdDisableVnr = ui->bdDisableVnr; job->keepCurrentWriteSpeed = ui->keepCurrentWriteSpeed; }
     gui_bd_write_clear(ui);
     if (ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount) wcscpy(job->drive, ui->devices[ui->selectedDrive].devicePath); return job;
 }
@@ -829,10 +832,10 @@ typedef struct {
     GuiMode mode;
     uint64_t activitySerial;
     int driveCount, selectedDrive;
-    bool complete, writing, bdReMedia, bdReWritable, bdDisableVnr, testMode, testWriteSupported, verifyAfter;
+    bool complete, writing, bdReMedia, bdReWritable, bdDisableVnr, testMode, testWriteSupported, verifyAfter, keepCurrentWriteSpeed;
     BdWriteType bdWriteType;
     wchar_t drive[MAX_PATH], source[MAX_PATH], layer[16];
-    GuiDiscConfirmControl controls[5];
+    GuiDiscConfirmControl controls[6];
 } GuiDiscConfirmContext;
 
 /* 写入与擦除各绑定实际消费的意图；擦除也不能消费弹框期间新设的BD临时值。 */
@@ -842,18 +845,18 @@ static void gui_disc_confirm_context(const GuiWindow* ui, bool writing, GuiDiscC
     context->complete = !ui->job && ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount;
     if (context->complete) wcscpy(context->drive,ui->devices[ui->selectedDrive].devicePath);
     context->bdReMedia = ui->bdReMedia; context->bdReWritable = ui->bdReWritable; context->bdWriteType = ui->bdWriteType; context->bdDisableVnr = ui->bdDisableVnr;
-    HWND controls[] = {ui->drives,NULL,NULL,NULL,NULL};
+    HWND controls[] = {ui->drives,NULL,NULL,NULL,NULL,NULL};
     if (writing) {
         wcscpy(context->source,ui->sourceImage); wcscpy(context->layer,ui->writeLayerValue); context->testMode = ui->testMode; context->testWriteSupported = ui->testWriteSupported; context->verifyAfter = ui->verifyAfter;
-        controls[1] = ui->sourceEdit; controls[2] = ui->writeLayer; controls[3] = GetDlgItem(ui->window,UI_TEST); controls[4] = ui->verify;
+        controls[1] = ui->sourceEdit; controls[2] = ui->writeLayer; controls[3] = GetDlgItem(ui->window,UI_TEST); controls[4] = ui->verify; controls[5] = GetDlgItem(ui->window,UI_WRITE_SPEED); context->keepCurrentWriteSpeed = ui->keepCurrentWriteSpeed;
     }
     for (size_t i = 0; i < ARRAYSIZE(controls); i++) {
         GuiDiscConfirmControl* saved = &context->controls[i]; saved->window = controls[i]; if (!saved->window) continue;
         if (!IsWindow(saved->window)) { context->complete = false; continue; }
-        if (i < 3) {
+        if (i < 3 || i == 5) {
             int capacity = i == 2 ? (int)ARRAYSIZE(context->layer) : MAX_PATH, length = GetWindowTextLengthW(saved->window);
-            if (length >= capacity || GetWindowTextW(saved->window,saved->text,capacity) != length) context->complete = false;
-            if (!i) saved->value = SendMessageW(saved->window,CB_GETCURSEL,0,0);
+            if (length < 0 || length >= capacity || GetWindowTextW(saved->window,saved->text,capacity) != length) context->complete = false;
+            if (!i || i == 5) saved->value = SendMessageW(saved->window,CB_GETCURSEL,0,0);
         } else saved->value = SendMessageW(saved->window,BM_GETCHECK,0,0);
     }
 }
@@ -863,7 +866,7 @@ static bool gui_disc_confirm_current(const GuiWindow* ui, const GuiDiscConfirmCo
     if (ui->window != context->window || ui->mode != context->mode || ui->job || ui->activitySerial != context->activitySerial || ui->driveCount != context->driveCount || ui->selectedDrive != context->selectedDrive) return false;
     GuiDiscConfirmContext current; gui_disc_confirm_context(ui,context->writing,&current);
     if (!current.complete || wcscmp(current.drive,context->drive) || current.bdReMedia != context->bdReMedia || current.bdReWritable != context->bdReWritable || current.bdWriteType != context->bdWriteType || current.bdDisableVnr != context->bdDisableVnr) return false;
-    if (wcscmp(current.source,context->source) || wcscmp(current.layer,context->layer) || current.testMode != context->testMode || current.testWriteSupported != context->testWriteSupported || current.verifyAfter != context->verifyAfter) return false;
+    if (wcscmp(current.source,context->source) || wcscmp(current.layer,context->layer) || current.testMode != context->testMode || current.testWriteSupported != context->testWriteSupported || current.verifyAfter != context->verifyAfter || current.keepCurrentWriteSpeed != context->keepCurrentWriteSpeed) return false;
     for (size_t i = 0; i < ARRAYSIZE(current.controls); i++) if (current.controls[i].window != context->controls[i].window || current.controls[i].value != context->controls[i].value || wcscmp(current.controls[i].text,context->controls[i].text)) return false;
     return true;
 }
@@ -1140,6 +1143,7 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
     bool erase = operation == GUI_ERASE_QUICK || operation == GUI_ERASE_FULL, discovery = operation == GUI_DISCOVERY_DISC;
     bool bdReOverwrite = operation == GUI_WRITE_DISC && ui->bdReWritable, bdReErase = erase && ui->bdReMedia;
     uint32_t discoverySectors = 0, writeLayer = 0; double discoverySpeed = 0;
+    if (operation == GUI_WRITE_DISC && ui->mode == GUI_WRITE) { HWND speed = GetDlgItem(ui->window,UI_WRITE_SPEED); LRESULT selected = speed ? SendMessageW(speed,CB_GETCURSEL,0,0) : CB_ERR; if (selected < 0 || selected > 1) { MessageBoxW(ui->window,L"请选择 MAX 或 KEEP 写入速度。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; } }
     if (operation == GUI_WRITE_DISC && !gui_write_layer_parse(ui->writeLayerValue,&writeLayer)) { MessageBoxW(ui->window,L"L0容量应为非零的16扇区倍数；留空自动选择。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
     if (discovery) {
         wchar_t* end;
@@ -2201,6 +2205,7 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
             case UI_SOURCE_FILE: gui_source(ui,false); break; case UI_SOURCE_FOLDER: gui_source(ui,true); break;
             case UI_VERIFY_COMPARE: case UI_READ_CDTEXT: case UI_READ_RAW_MDS: case UI_SESSION_PREGAPS: gui_read_controls(ui); gui_menu(ui); break;
             case UI_READ_SPLIT: if (HIWORD(wp) == CBN_SELCHANGE) { gui_read_controls(ui); gui_menu(ui); } break;
+            case UI_WRITE_SPEED: if (ui->mode == GUI_WRITE && HIWORD(wp) == CBN_SELCHANGE) { gui_read_controls(ui); gui_menu(ui); } break;
             case UI_TEST: ui->testMode = ui->testWriteSupported && SendMessageW(GetDlgItem(window,UI_TEST),BM_GETCHECK,0,0) == BST_CHECKED; gui_write_checks(ui); break;
             case UI_VERIFY_CHECK: gui_read_controls(ui); gui_write_checks(ui); break;
             case UI_DISCOVERY_ALL: case UI_DISCOVERY_CUSTOM: gui_read_controls(ui); gui_menu(ui); break;
