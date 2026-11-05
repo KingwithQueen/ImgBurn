@@ -37,7 +37,7 @@ enum {
     UI_TOOL_LAYER, UI_TOOL_LBA, UI_TOOL_OTP, UI_TOOL_PTP, UI_TOOL_OK, UI_TOOL_CLOSE, UI_IMAGE_INFO, UI_REMOVE_SOURCE, UI_VERIFY_COMPARE, UI_READ_CDTEXT,
     UI_DISCOVERY_ALL, UI_DISCOVERY_CUSTOM, UI_DISCOVERY_SECTORS, UI_DISCOVERY_CAPACITY, UI_DISCOVERY_SPEED, UI_DISCOVERY_SIZE, UI_READ_SPLIT, UI_READ_RAW_MDS, UI_SESSION_PREGAPS, UI_READ_SPEED, UI_READ_AUDIO_SPEED, UI_READ_RETRIES, UI_READ_EJECT, UI_WRITE_LAYER, UI_DVD_CANDIDATES, UI_DVD_CANDIDATE_LIST,
     UI_CD_ISO_OPEN, UI_CD_ALLOW_BLANK, UI_CD_FINALIZE, UI_CD_PLAN, UI_CD_SELECT, UI_CD_WRITE, UI_CD_PLAN_LIST, UI_CD_SOURCE, UI_CD_DRIVE,
-    UI_BD_RE_FORMAT_OPEN = 1400, UI_BD_RE_FORMAT_QUERY, UI_BD_RE_FORMAT_LIST, UI_BD_RE_CERTIFICATION, UI_BD_R_FORMAT_OPEN, UI_BD_WRITE_TYPE, UI_BD_VNR_OFF,
+    UI_BD_RE_FORMAT_OPEN = 1400, UI_BD_RE_FORMAT_QUERY, UI_BD_RE_FORMAT_LIST, UI_BD_RE_CERTIFICATION, UI_BD_R_FORMAT_OPEN, UI_BD_WRITE_TYPE, UI_BD_VNR_OFF, UI_WRITE_EJECT = 1410,
     UI_EZ_FIRST = 1100,
     UI_WRITE_SOURCE_GROUP = 1200, UI_WRITE_DEST_GROUP, UI_WRITE_SETTINGS_GROUP, UI_WRITE_INFO, UI_WRITE_OPEN,
     UI_WRITE_SPEED, UI_WRITE_COPIES, UI_WRITE_SPEED_EFFECTIVE, UI_WRITE_LABEL, UI_WRITE_IMPLEMENTATION, UI_WRITE_FILESYSTEM,
@@ -104,6 +104,7 @@ struct GuiWindow {
     BdWriteType bdWriteType;
     bool bdDisableVnr; /* 只暂存下一次明确BD-R写入，任一任务消费或上下文改变后清除。 */
     bool keepCurrentWriteSpeed; /* 持久选择MAX或KEEP，不随任务消费。 */
+    bool writeEjectWhenDone; /* 独立保存写入流程成功后的弹盘偏好。 */
     uint32_t discoveryCapacity;
     wchar_t discoveryCount[32], discoveryRate[24], writeLayerValue[16];
     DvdLayerBreakCandidate* dvdCandidates;
@@ -509,7 +510,7 @@ static void gui_menu(GuiWindow* ui) {
     item(device, UI_DEVICE_ADVANCED, L"更改高级设置(&A)...", false); item(device, UI_DEVICE_BOOKTYPE, L"更改 Book Type(&B)...", false); item(device, UI_DEVICE_SECTORS, L"扇区查看器(&V)...", idle && drive); item(device, UI_DEVICE_REGION, L"地区码(&R)...", false); item(device, UI_DEVICE_CAPABILITIES, L"功能(&C)...", idle && drive); item(device, UI_DEVICE_FAMILY, L"设备关系(&F)...", false); item(device, UI_DEVICE_FIRMWARE, L"检查固件更新(&U)...", false); popup(tools, device, L"驱动器(&V)");
     HMENU changer = CreatePopupMenu(); item(changer, 180, L"状态", false); item(changer, 181, L"装载", false); item(changer, 182, L"卸载", false); popup(tools, changer, L"换盘器(&W)"); separator(tools);
     item(tools, UI_TOOL_CUE, L"生成 CUE 文件(&C)...", idle); item(tools, UI_TOOL_DVD, L"创建 DVD 文件(&D)...", false); item(tools, UI_TOOL_MDS, L"生成 MDS 文件(&M)...", idle); separator(tools); item(tools, UI_SEARCH, L"寻找 SCSI / ATAPI 设备(&S)", idle); item(tools, 151, L"自动判断刻录速度(&X)...", false); item(tools, 152, L"驱动程序载入规则(&Y)...", false); item(tools, 153, L"重置 DMA(&A)", false); separator(tools); item(tools, UI_SETTINGS, L"选项(&Z)...", false);
-    if (write) { HMENU extensions = CreatePopupMenu(); const wchar_t* extension = wcsrchr(ui->sourceImage,L'.'); bool image = extension && (!_wcsicmp(extension,L".iso") || !_wcsicmp(extension,L".bin") || !_wcsicmp(extension,L".mds")); item(extensions,UI_WRITE_OPTIONS,L"本次 BD-R 写入 / DVD双层 L0...",idle); item(extensions,UI_DVD_CANDIDATES,L"查询视频换层单元...",idle && image); item(extensions,UI_CD_ISO_OPEN,L"CD-R 独立 ISO 追加（扩展）...",idle && drive && extension && !_wcsicmp(extension,L".iso")); separator(tools); popup(tools,extensions,L"Write 扩展"); }
+    if (write) { HMENU extensions = CreatePopupMenu(); const wchar_t* extension = wcsrchr(ui->sourceImage,L'.'); bool image = extension && (!_wcsicmp(extension,L".iso") || !_wcsicmp(extension,L".bin") || !_wcsicmp(extension,L".mds")); item(extensions,UI_WRITE_OPTIONS,L"写入扩展设置...",idle); item(extensions,UI_DVD_CANDIDATES,L"查询视频换层单元...",idle && image); item(extensions,UI_CD_ISO_OPEN,L"CD-R 独立 ISO 追加（扩展）...",idle && drive && extension && !_wcsicmp(extension,L".iso")); separator(tools); popup(tools,extensions,L"Write 扩展"); }
     if (read) { separator(tools); item(tools,UI_READ_OPTIONS,L"读取选项...",idle); }
     item(help, UI_HELP_GUIDES, L"查看 ImgBurn 使用指南(&G)", true); item(help, UI_HELP_SITE, L"访问 ImgBurn 网站(&W)", true); item(help, UI_HELP_FORUM, L"访问 ImgBurn 支持论坛(&F)", true); separator(help); item(help, UI_ABOUT, L"关于 ImgBurn(&A)...", true);
     popup(bar, tools, L"工具(&T)"); popup(bar, help, L"帮助(&H)"); HMENU old = GetMenu(ui->window); SetMenu(ui->window, bar); if (old) DestroyMenu(old); DrawMenuBar(ui->window);
@@ -701,7 +702,7 @@ static GuiJob* gui_job(GuiWindow* ui, GuiOperation operation, const GuiPath* pat
     wcscpy(job->destination, ui->mode == GUI_READ ? ui->readImage : ui->destinationImage); wcscpy(job->label, ui->volumeLabel); job->fsTypes = ui->fsTypes; job->revision = ui->revision; job->dvdVideo = ui->dvdVideo; job->bluray = ui->bluray; job->optimize = ui->deduplicate; job->testMode = (operation == GUI_WRITE_DISC || operation == GUI_DISCOVERY_DISC) && ui->testMode; job->verify = ui->verifyAfter && !job->testMode; job->speed = 0xFFFF; job->oppositeTrackPath = true;
     job->cdAllowBlank = ui->cdAllowBlank; job->cdFinalize = ui->cdFinalize;
     /* 新意图只进入这个普通Write任务；其他任务也清空待用值，不传入扩展CD/格式化。 */
-    if (operation == GUI_WRITE_DISC) { job->bdWriteType = ui->bdWriteType; job->bdDisableVnr = ui->bdDisableVnr; job->keepCurrentWriteSpeed = ui->keepCurrentWriteSpeed; }
+    if (operation == GUI_WRITE_DISC) { job->bdWriteType = ui->bdWriteType; job->bdDisableVnr = ui->bdDisableVnr; job->keepCurrentWriteSpeed = ui->keepCurrentWriteSpeed; job->writeEject = ui->writeEjectWhenDone; }
     gui_bd_write_clear(ui);
     if (ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount) wcscpy(job->drive, ui->devices[ui->selectedDrive].devicePath); return job;
 }
@@ -832,7 +833,7 @@ typedef struct {
     GuiMode mode;
     uint64_t activitySerial;
     int driveCount, selectedDrive;
-    bool complete, writing, bdReMedia, bdReWritable, bdDisableVnr, testMode, testWriteSupported, verifyAfter, keepCurrentWriteSpeed;
+    bool complete, writing, bdReMedia, bdReWritable, bdDisableVnr, testMode, testWriteSupported, verifyAfter, keepCurrentWriteSpeed, writeEjectWhenDone;
     BdWriteType bdWriteType;
     wchar_t drive[MAX_PATH], source[MAX_PATH], layer[16];
     GuiDiscConfirmControl controls[6];
@@ -848,7 +849,7 @@ static void gui_disc_confirm_context(const GuiWindow* ui, bool writing, GuiDiscC
     HWND controls[] = {ui->drives,NULL,NULL,NULL,NULL,NULL};
     if (writing) {
         wcscpy(context->source,ui->sourceImage); wcscpy(context->layer,ui->writeLayerValue); context->testMode = ui->testMode; context->testWriteSupported = ui->testWriteSupported; context->verifyAfter = ui->verifyAfter;
-        controls[1] = ui->sourceEdit; controls[2] = ui->writeLayer; controls[3] = GetDlgItem(ui->window,UI_TEST); controls[4] = ui->verify; controls[5] = GetDlgItem(ui->window,UI_WRITE_SPEED); context->keepCurrentWriteSpeed = ui->keepCurrentWriteSpeed;
+        controls[1] = ui->sourceEdit; controls[2] = ui->writeLayer; controls[3] = GetDlgItem(ui->window,UI_TEST); controls[4] = ui->verify; controls[5] = GetDlgItem(ui->window,UI_WRITE_SPEED); context->keepCurrentWriteSpeed = ui->keepCurrentWriteSpeed; context->writeEjectWhenDone = ui->writeEjectWhenDone;
     }
     for (size_t i = 0; i < ARRAYSIZE(controls); i++) {
         GuiDiscConfirmControl* saved = &context->controls[i]; saved->window = controls[i]; if (!saved->window) continue;
@@ -866,7 +867,7 @@ static bool gui_disc_confirm_current(const GuiWindow* ui, const GuiDiscConfirmCo
     if (ui->window != context->window || ui->mode != context->mode || ui->job || ui->activitySerial != context->activitySerial || ui->driveCount != context->driveCount || ui->selectedDrive != context->selectedDrive) return false;
     GuiDiscConfirmContext current; gui_disc_confirm_context(ui,context->writing,&current);
     if (!current.complete || wcscmp(current.drive,context->drive) || current.bdReMedia != context->bdReMedia || current.bdReWritable != context->bdReWritable || current.bdWriteType != context->bdWriteType || current.bdDisableVnr != context->bdDisableVnr) return false;
-    if (wcscmp(current.source,context->source) || wcscmp(current.layer,context->layer) || current.testMode != context->testMode || current.testWriteSupported != context->testWriteSupported || current.verifyAfter != context->verifyAfter || current.keepCurrentWriteSpeed != context->keepCurrentWriteSpeed) return false;
+    if (wcscmp(current.source,context->source) || wcscmp(current.layer,context->layer) || current.testMode != context->testMode || current.testWriteSupported != context->testWriteSupported || current.verifyAfter != context->verifyAfter || current.keepCurrentWriteSpeed != context->keepCurrentWriteSpeed || current.writeEjectWhenDone != context->writeEjectWhenDone) return false;
     for (size_t i = 0; i < ARRAYSIZE(current.controls); i++) if (current.controls[i].window != context->controls[i].window || current.controls[i].value != context->controls[i].value || wcscmp(current.controls[i].text,context->controls[i].text)) return false;
     return true;
 }
@@ -1232,7 +1233,7 @@ static void gui_tool_open(GuiWindow* ui, GuiOperation operation) {
     if (ui->tool || ui->job) return; gui_read_controls(ui);
     GuiTool* tool = (GuiTool*)calloc(1, sizeof(*tool)); if (!tool) return; tool->parent = ui; tool->operation = operation; ui->tool = tool;
     const wchar_t* title = operation == GUI_CREATE_CUE ? L"生成 CUE 文件" : operation == GUI_WRITE_OPTIONS ? L"写入扩展设置" : operation == GUI_READ_OPTIONS ? L"读取选项" : L"创建 MDS 文件";
-    RECT rect = {0,0,px(ui,operation == GUI_WRITE_OPTIONS ? 464 : operation == GUI_READ_OPTIONS ? 464 : operation == GUI_CREATE_MDS ? 527 : 649),px(ui,operation == GUI_WRITE_OPTIONS ? 248 : operation == GUI_READ_OPTIONS ? 248 : operation == GUI_CREATE_MDS ? 356 : 548)}; AdjustWindowRectEx(&rect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
+    RECT rect = {0,0,px(ui,operation == GUI_WRITE_OPTIONS ? 464 : operation == GUI_READ_OPTIONS ? 464 : operation == GUI_CREATE_MDS ? 527 : 649),px(ui,operation == GUI_WRITE_OPTIONS ? 276 : operation == GUI_READ_OPTIONS ? 248 : operation == GUI_CREATE_MDS ? 356 : 548)}; AdjustWindowRectEx(&rect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
     HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, L"ImgBurnCommand", title, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top, ui->window, NULL, ui->instance, tool);
     if (!window) { ui->tool = NULL; free(tool); return; } EnableWindow(ui->window, FALSE); ShowWindow(window, SW_SHOW); if (operation == GUI_CREATE_MDS || operation == GUI_CREATE_CUE) SetFocus(tool->list);
     else if (operation == GUI_READ_OPTIONS || operation == GUI_WRITE_OPTIONS) { HWND first = GetNextDlgTabItem(window,GetDlgItem(window,UI_TOOL_CLOSE),FALSE); if (first && IsWindowEnabled(first)) SetFocus(first); }
@@ -1596,7 +1597,7 @@ static bool gui_tool_picker_current(const GuiWindow* ui, const GuiToolPickerCont
 
 static void gui_options_order(GuiTool* tool) {
     const int read[] = {UI_READ_SPLIT,UI_READ_RETRIES,UI_READ_CDTEXT,UI_READ_RAW_MDS,UI_SESSION_PREGAPS,UI_READ_EJECT,UI_TOOL_OK,UI_TOOL_CLOSE};
-    const int write[] = {UI_WRITE_LAYER,UI_BD_WRITE_TYPE,UI_BD_VNR_OFF,UI_TOOL_OK,UI_TOOL_CLOSE};
+    const int write[] = {UI_WRITE_LAYER,UI_BD_WRITE_TYPE,UI_BD_VNR_OFF,UI_WRITE_EJECT,UI_TOOL_OK,UI_TOOL_CLOSE};
     const int* order = tool->operation == GUI_READ_OPTIONS ? read : write; size_t count = tool->operation == GUI_READ_OPTIONS ? ARRAYSIZE(read) : ARRAYSIZE(write);
     for (size_t i = count; i; i--) SetWindowPos(GetDlgItem(tool->window,order[i - 1]),HWND_TOP,0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
@@ -1707,8 +1708,11 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
             ctl(ui,window,L"STATIC",L"仅下一次BD-R写入：",0,0,12,102,144,22); tool->bdWriteType = ctl(ui,window,L"COMBOBOX",L"",WS_TABSTOP | CBS_DROPDOWNLIST,UI_BD_WRITE_TYPE,160,98,288,160);
             const wchar_t* types[] = {L"保持当前（默认）",L"Incremental",L"SAO"}; for (unsigned i = 0; i < 3; i++) SendMessageW(tool->bdWriteType,CB_ADDSTRING,0,(LPARAM)types[i]); SendMessageW(tool->bdWriteType,CB_SETCURSEL,ui->bdWriteType,0); gui_combo_height(ui,tool->bdWriteType,24);
             tool->bdVnrOff = ctl(ui,window,L"BUTTON",L"仅本次关闭BD-R VNR",WS_TABSTOP | BS_AUTOCHECKBOX,UI_BD_VNR_OFF,12,134,436,22); SendMessageW(tool->bdVnrOff,BM_SETCHECK,ui->bdDisableVnr ? BST_CHECKED : BST_UNCHECKED,0);
-            ctl(ui,window,L"STATIC",L"不追加旧文件；这些选项不会自动建立备用区。\r\n任务执行、换盘或切换来源后恢复默认。",0,0,12,164,436,40);
-            tool->ok = ctl(ui,window,L"BUTTON",L"应用",WS_TABSTOP | BS_DEFPUSHBUTTON,UI_TOOL_OK,286,208,76,28); ctl(ui,window,L"BUTTON",L"取消",WS_TABSTOP,UI_TOOL_CLOSE,372,208,76,28); gui_options_order(tool); return 0;
+            ctl(ui,window,L"STATIC",L"不追加旧文件；这些选项不会自动建立备用区。\r\nBD-R临时选项在任务执行、换盘或切换来源后恢复默认。",0,0,12,164,436,40);
+            HWND eject = ctl(ui,window,L"BUTTON",L"写入流程成功后弹出光盘",WS_TABSTOP | BS_AUTOCHECKBOX,UI_WRITE_EJECT,12,208,436,22); SendMessageW(eject,BM_SETCHECK,ui->writeEjectWhenDone ? BST_CHECKED : BST_UNCHECKED,0);
+            tool->listTips = CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,NULL,WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,window,NULL,ui->instance,NULL);
+            if (tool->listTips && eject) { TOOLINFOW tip = {0}; tip.cbSize = sizeof(tip); tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS; tip.hwnd = window; tip.uId = (UINT_PTR)eject; tip.lpszText = L"流程成功后尝试弹出光盘；已启用验证时先完成验证。此选项在本次运行中保存。"; SendMessageW(tool->listTips,TTM_ADDTOOLW,0,(LPARAM)&tip); }
+            tool->ok = ctl(ui,window,L"BUTTON",L"应用",WS_TABSTOP | BS_DEFPUSHBUTTON,UI_TOOL_OK,286,236,76,28); ctl(ui,window,L"BUTTON",L"取消",WS_TABSTOP,UI_TOOL_CLOSE,372,236,76,28); gui_options_order(tool); return 0;
         }
         if (tool->operation == GUI_CD_ISO_PLAN) {
             ctl(ui,window,L"STATIC",L"独立纯 ISO9660，不合并旧文件树。默认只读规划；写入后完整回读。",0,0,10,10,634,22);
@@ -1805,8 +1809,8 @@ static LRESULT CALLBACK gui_tool_proc(HWND window, UINT message, WPARAM wp, LPAR
                 if (GetWindowTextLengthW(tool->lba) >= (int)ARRAYSIZE(value) || !gui_write_layer_parse(value,&layer)) { gui_options_error(window,UI_WRITE_LAYER,L"L0容量应为非零的16扇区倍数；留空自动选择。"); return 0; }
                 LRESULT selected = SendMessageW(tool->bdWriteType,CB_GETCURSEL,0,0);
                 if (selected < BD_WRITE_TYPE_CURRENT || selected > BD_WRITE_TYPE_SAO) { gui_options_error(window,UI_BD_WRITE_TYPE,L"请选择本次BD-R写入模式。"); return 0; }
-                bool vnr = SendMessageW(tool->bdVnrOff,BM_GETCHECK,0,0) == BST_CHECKED;
-                if (wcscmp(value,ui->writeLayerValue)) gui_dvd_candidates_clear(ui,false); wcscpy(ui->writeLayerValue,value); ui->bdWriteType = (BdWriteType)selected; ui->bdDisableVnr = vnr; DestroyWindow(window);
+                bool vnr = SendMessageW(tool->bdVnrOff,BM_GETCHECK,0,0) == BST_CHECKED, eject = SendDlgItemMessageW(window,UI_WRITE_EJECT,BM_GETCHECK,0,0) == BST_CHECKED;
+                if (wcscmp(value,ui->writeLayerValue)) gui_dvd_candidates_clear(ui,false); wcscpy(ui->writeLayerValue,value); ui->bdWriteType = (BdWriteType)selected; ui->bdDisableVnr = vnr; ui->writeEjectWhenDone = eject; DestroyWindow(window);
             }
             else if (LOWORD(wp) == UI_TOOL_CLOSE || LOWORD(wp) == IDCANCEL) SendMessageW(window,WM_CLOSE,0,0); return 0;
         }
