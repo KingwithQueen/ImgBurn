@@ -26,6 +26,7 @@ typedef struct {
     bool keepCurrentWriteSpeed; /* 仅普通Write携带MAX/KEEP偏好。 */
     bool writeEject; /* 仅普通Write携带成功后弹盘偏好。 */
     bool skipWriteVerifyCycle; /* 仅普通Write携带跳过验证前重装的偏好。 */
+    bool writePerformOpc; /* 仅普通Write携带显式OPC功率校准请求。 */
     uint32_t readSplitSectors;
     unsigned readRetries;
     bool readAutoSplit, readEject, setReadSpeeds;
