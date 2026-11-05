@@ -1972,6 +1972,7 @@ static void gui_complete(GuiWindow* ui, GuiJob* job) {
         }
         gui_log(ui,job->result); if (formatting) { ui->bdReMedia = ui->bdReWritable = ui->writeMediaReady = ui->eraseSupported = false; ui->writeNeedsRefresh = true; }
         if (current && (formatting || tool->bdReClosing)) DestroyWindow(tool->window);
+        if (ui->cancel) EnableWindow(ui->cancel,FALSE);
         imgburn_gui_job_free(job); gui_write_checks(ui); gui_menu(ui); gui_completion_end(ui); return;
     }
     if (job->operation == GUI_READ_DEST_INFO) {
