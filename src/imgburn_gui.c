@@ -38,6 +38,7 @@ enum {
     UI_DISCOVERY_ALL, UI_DISCOVERY_CUSTOM, UI_DISCOVERY_SECTORS, UI_DISCOVERY_CAPACITY, UI_DISCOVERY_SPEED, UI_DISCOVERY_SIZE, UI_READ_SPLIT, UI_READ_RAW_MDS, UI_SESSION_PREGAPS, UI_READ_SPEED, UI_READ_AUDIO_SPEED, UI_READ_RETRIES, UI_READ_EJECT, UI_WRITE_LAYER, UI_DVD_CANDIDATES, UI_DVD_CANDIDATE_LIST,
     UI_CD_ISO_OPEN, UI_CD_ALLOW_BLANK, UI_CD_FINALIZE, UI_CD_PLAN, UI_CD_SELECT, UI_CD_WRITE, UI_CD_PLAN_LIST, UI_CD_SOURCE, UI_CD_DRIVE,
     UI_BD_RE_FORMAT_OPEN = 1400, UI_BD_RE_FORMAT_QUERY, UI_BD_RE_FORMAT_LIST, UI_BD_RE_CERTIFICATION, UI_BD_R_FORMAT_OPEN, UI_BD_WRITE_TYPE, UI_BD_VNR_OFF, UI_WRITE_EJECT = 1410, UI_WRITE_CYCLE = 1411, UI_WRITE_OPC = 1412, UI_DISCOVERY_EJECT = 1413, UI_DISCOVERY_CYCLE = 1414, UI_DISCOVERY_OPC = 1415, UI_WRITE_RESERVE = 1416, UI_BDR_NO_RESERVE = 1417, UI_WRITE_BUFFER = 1418, UI_DISCOVERY_BUFFER = 1419,
+    UI_READ_EDIT_OPEN = 1320, UI_READ_CAPACITY_LABEL = 1321, UI_READ_FREE_LABEL = 1322,
     UI_EZ_FIRST = 1100,
     UI_WRITE_SOURCE_GROUP = 1200, UI_WRITE_DEST_GROUP, UI_WRITE_SETTINGS_GROUP, UI_WRITE_INFO, UI_WRITE_OPEN,
     UI_WRITE_SPEED, UI_WRITE_COPIES, UI_WRITE_SPEED_EFFECTIVE, UI_WRITE_LABEL, UI_WRITE_IMPLEMENTATION, UI_WRITE_FILESYSTEM,
@@ -91,7 +92,7 @@ struct GuiWindow {
     bool refreshQueued, completing; /* 刷新意图保留到查询成功启动，队列只负责唤醒。 */
     int taskPercent;
     wchar_t taskStatus[256];
-    uint64_t activitySerial; /* 接受任务和工具开关均标记新活动，避免旧错误提示接管新意图。 */
+    uint64_t activitySerial; /* 任务、工具和目标编辑均标记新活动，避免旧提示接管新意图。 */
     GuiPath* paths;
     size_t pathCount;
     wchar_t sourceImage[MAX_PATH], destinationImage[MAX_PATH], readImage[MAX_PATH], volumeLabel[127];
@@ -131,6 +132,7 @@ struct GuiWindow {
     wchar_t sourceVolume[128], sourceImplementation[128], sourceFileSystems[64];
     HWND hotControl, tips;
     bool readDestinationReady, readDestinationAttempted;
+    bool readEditing; /* 目标草稿仅留在编辑器，确认前不回采到readImage。 */
     uint64_t readDestinationTotalBytes, readDestinationFreeBytes;
     wchar_t readDestinationQuery[MAX_PATH], readDiscText[8192];
     OpticalDriveInfo devices[MAX_OPTICAL_DRIVES];
@@ -162,7 +164,7 @@ static bool gui_tool_owns_job(const GuiWindow* ui, const GuiTool* tool, const Gu
 static bool gui_refresh_target(const GuiWindow* ui) { return ui->driveCount > 0 && ui->driveCount <= MAX_OPTICAL_DRIVES && ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount; }
 /* 唤醒不消费刷新意图；忙碌、工具或收尾挡住时，由下一次结束重新排队。 */
 static void gui_pending_refresh(GuiWindow* ui) {
-    if (!ui->writeNeedsRefresh || ui->refreshQueued || ui->job || ui->tool || ui->completing || !gui_refresh_target(ui)) return;
+    if (!ui->writeNeedsRefresh || ui->refreshQueued || ui->job || ui->tool || ui->readEditing || ui->completing || !gui_refresh_target(ui)) return;
     if (!IsWindow(ui->window) || GetWindowLongPtrW(ui->window,GWLP_USERDATA) != (LONG_PTR)ui) return;
     ui->refreshQueued = true; if (!PostMessageW(ui->window,GUI_REFRESH_PENDING,0,0)) ui->refreshQueued = false;
 }
@@ -187,6 +189,8 @@ static bool gui_cd_iso_start(GuiWindow* ui, bool writing);
 static void gui_write_source_info(GuiWindow* ui);
 static void gui_read_destination_info(GuiWindow* ui);
 static void gui_read_destination_query(GuiWindow* ui);
+static void gui_read_edit_cancel(GuiWindow* ui, bool quiet);
+static LRESULT CALLBACK gui_read_edit_proc(HWND window, UINT message, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR data);
 
 static int px(const GuiWindow* ui, int value) { return MulDiv(value, (int)ui->dpi, 96); }
 static void gui_fonts(GuiWindow* ui) {
@@ -436,8 +440,89 @@ static bool gui_path_text(HWND window, wchar_t* path) {
     return GetWindowTextW(window,path,MAX_PATH) == length && path[(size_t)length] == 0;
 }
 
+/* 编辑是独立的空闲事务；所有路径提交仍只落在readImage。 */
+static bool gui_read_edit_entry(const GuiWindow* ui) {
+    return IsWindow(ui->window) && GetWindowLongPtrW(ui->window,GWLP_USERDATA) == (LONG_PTR)ui && ui->mode == GUI_READ && IsWindowEnabled(ui->window) && !ui->job && !ui->tool && !ui->completing;
+}
+static void gui_read_edit_view(GuiWindow* ui) {
+    if (ui->mode != GUI_READ) return; bool editing = ui->readEditing, active = editing && gui_read_edit_entry(ui);
+    const int normal[] = {UI_READ_DEST_LABEL,UI_DESTINATION,UI_READ_OPEN,UI_READ_CAPACITY_LABEL,UI_READ_FREE_LABEL,UI_READ_CAPACITY,UI_READ_FREE_SPACE};
+    for (size_t i = 0; i < ARRAYSIZE(normal); i++) ShowWindow(GetDlgItem(ui->window,normal[i]),editing ? SW_HIDE : SW_SHOW);
+    const int controls[] = {UI_DEST_EDIT,UI_READ_EDIT_OK,UI_READ_EDIT_CANCEL};
+    for (size_t i = 0; i < ARRAYSIZE(controls); i++) { HWND child = GetDlgItem(ui->window,controls[i]); EnableWindow(child,active); ShowWindow(child,editing ? SW_SHOW : SW_HIDE); }
+    EnableWindow(GetDlgItem(ui->window,UI_READ_DEST_LABEL),!editing && !ui->job);
+}
+static void gui_read_edit_begin(GuiWindow* ui) {
+    if (!gui_read_edit_entry(ui) || ui->readEditing || !wmemchr(ui->readImage,0,MAX_PATH)) return;
+    HWND child = ui->destination; wchar_t type[32] = L"";
+    if (!IsWindow(child) || GetDlgItem(ui->window,UI_DEST_EDIT) != child || GetParent(child) != ui->window || GetDlgCtrlID(child) != UI_DEST_EDIT || !GetClassNameW(child,type,ARRAYSIZE(type)) || _wcsicmp(type,L"ComboBox") || (GetWindowLongPtrW(child,GWL_STYLE) & 3) != CBS_DROPDOWN || !IsWindow(GetDlgItem(ui->window,UI_READ_EDIT_OK)) || !IsWindow(GetDlgItem(ui->window,UI_READ_EDIT_CANCEL))) return;
+    ui->readEditing = true; ui->activitySerial++; SetWindowTextW(child,ui->readImage); gui_menu(ui);
+    COMBOBOXINFO info = {0}; info.cbSize = (DWORD)sizeof(info); if (GetComboBoxInfo(child,&info) && IsWindow(info.hwndItem)) SendMessageW(info.hwndItem,EM_SETSEL,0,-1);
+    SetFocus(child);
+}
+static void gui_read_edit_end(GuiWindow* ui, bool quiet) {
+    SetWindowTextW(ui->destination,ui->readImage); ui->readEditing = false; ui->activitySerial++;
+    if (!quiet) gui_menu(ui);
+}
+static void gui_read_edit_focus(GuiWindow* ui, HWND window, HWND browse) {
+    if (!IsWindow(window) || GetWindowLongPtrW(window,GWLP_USERDATA) != (LONG_PTR)ui) return;
+    if (ui->window != window || ui->mode != GUI_READ || ui->readEditing || ui->job || ui->tool || ui->completing) return;
+    if (IsWindow(browse) && GetDlgItem(window,UI_DESTINATION) == browse && GetParent(browse) == window && IsWindowEnabled(browse)) SetFocus(browse);
+}
+static void gui_read_edit_cancel(GuiWindow* ui, bool quiet) {
+    if (!ui->readEditing || (!quiet && !gui_read_edit_entry(ui))) return; HWND window = ui->window, browse = GetDlgItem(window,UI_DESTINATION);
+    gui_read_edit_end(ui,quiet); if (quiet) return;
+    gui_pending_refresh(ui); gui_read_edit_focus(ui,window,browse);
+}
+/* Win32设备别名按末组件扩展前的stem核对，先去掉尾随空格和点。 */
+static bool gui_read_edit_device(const wchar_t* name) {
+    const wchar_t* end = wcschr(name,L'.'); if (!end) end = name + wcslen(name);
+    while (end > name && (end[-1] == L' ' || end[-1] == L'.')) end--; size_t length = (size_t)(end - name);
+    if (length == 3 && (!_wcsnicmp(name,L"CON",3) || !_wcsnicmp(name,L"PRN",3) || !_wcsnicmp(name,L"AUX",3) || !_wcsnicmp(name,L"NUL",3))) return true;
+    return length == 4 && (!_wcsnicmp(name,L"COM",3) || !_wcsnicmp(name,L"LPT",3)) && name[3] >= L'1' && name[3] <= L'9';
+}
+static bool gui_read_edit_path(HWND child, wchar_t* full) {
+    int length = child ? GetWindowTextLengthW(child) : 0; wchar_t text[MAX_PATH] = L"";
+    if (length < 1 || length >= MAX_PATH || GetWindowTextW(child,text,MAX_PATH) != length || text[length] || GetWindowTextLengthW(child) != length || text[length - 1] == L'\\' || text[length - 1] == L'/') return false;
+    wchar_t* name = NULL; DWORD count = GetFullPathNameW(text,MAX_PATH,full,&name);
+    if (!count || count >= MAX_PATH || !wmemchr(full,0,MAX_PATH) || full[count] || !name || !name[0] || full[count - 1] == L'\\' || full[count - 1] == L'/' || !wcsncmp(full,L"\\\\.\\",4) || !wcsncmp(full,L"\\\\?\\",4)) return false;
+    for (const wchar_t* at = full; *at; at++) if (*at < 32 || wcschr(L"\"<>|?*",*at) || (*at == L':' && at != full + 1)) return false;
+    const wchar_t* extension = wcsrchr(name,L'.'); return !gui_read_edit_device(name) && extension && (!_wcsicmp(extension,L".iso") || !_wcsicmp(extension,L".cue") || !_wcsicmp(extension,L".mds"));
+}
+static void gui_read_edit_confirm(GuiWindow* ui) {
+    if (!gui_read_edit_entry(ui) || !ui->readEditing) return; wchar_t path[MAX_PATH] = L"";
+    if (!IsWindow(ui->destination) || GetDlgItem(ui->window,UI_DEST_EDIT) != ui->destination || !gui_read_edit_path(ui->destination,path)) { MessageBoxW(ui->window,L"请输入 ISO、CUE 或 MDS 目标文件路径（1至259字符）。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
+    bool cached = !wcscmp(path,ui->readImage) && ui->readDestinationReady && !_wcsicmp(path,ui->readDestinationQuery);
+    wcscpy(ui->readImage,path);
+    if (!cached) { ui->readDestinationReady = ui->readDestinationAttempted = false; ui->readDestinationTotalBytes = ui->readDestinationFreeBytes = 0; ui->readDestinationQuery[0] = 0; }
+    HWND window = ui->window, browse = GetDlgItem(window,UI_DESTINATION); gui_read_edit_end(ui,false); gui_pending_refresh(ui);
+    if (cached) { gui_read_edit_focus(ui,window,browse); return; }
+    gui_read_destination_query(ui);
+}
+static LRESULT CALLBACK gui_read_edit_proc(HWND window, UINT message, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR data) {
+    if (message == WM_NCDESTROY) { RemoveWindowSubclass(window,gui_read_edit_proc,id); return DefSubclassProc(window,message,wp,lp); }
+    if (message == WM_CHAR && (wp == VK_RETURN || wp == VK_ESCAPE)) return 0;
+    GuiWindow* ui = (GuiWindow*)data; HWND main = GetAncestor(window,GA_ROOT);
+    if (!IsWindow(main) || GetWindowLongPtrW(main,GWLP_USERDATA) != (LONG_PTR)ui || !gui_read_edit_entry(ui) || !ui->readEditing) return DefSubclassProc(window,message,wp,lp);
+    HWND child = ui->destination, ok = GetDlgItem(main,UI_READ_EDIT_OK), cancel = GetDlgItem(main,UI_READ_EDIT_CANCEL); COMBOBOXINFO info = {0}; info.cbSize = (DWORD)sizeof(info);
+    bool current = GetDlgItem(main,UI_DEST_EDIT) == child && (window == child || window == ok || window == cancel || (GetComboBoxInfo(child,&info) && window == info.hwndItem));
+    if (!current) return DefSubclassProc(window,message,wp,lp);
+    if (message == WM_GETDLGCODE && lp && ((MSG*)lp)->message == WM_KEYDOWN && (((MSG*)lp)->wParam == VK_RETURN || ((MSG*)lp)->wParam == VK_ESCAPE)) return DefSubclassProc(window,message,wp,lp) | DLGC_WANTMESSAGE;
+    if (message == WM_KEYDOWN && (wp == VK_RETURN || wp == VK_ESCAPE)) { SendMessageW(main,WM_COMMAND,wp == VK_ESCAPE || window == cancel ? UI_READ_EDIT_CANCEL : UI_READ_EDIT_OK,0); return 0; }
+    return DefSubclassProc(window,message,wp,lp);
+}
+static void gui_read_edit_popup(GuiWindow* ui, LPARAM point) {
+    if (!gui_read_edit_entry(ui) || ui->readEditing) return; HWND window = ui->window, label = GetDlgItem(window,UI_READ_DEST_LABEL), destination = ui->destination; uint64_t serial = ui->activitySerial;
+    if (!IsWindow(label) || !IsWindow(destination)) return; HMENU menu = CreatePopupMenu(); if (!menu) return; AppendMenuW(menu,MF_STRING,UI_READ_EDIT_OPEN,L"编辑目标(&E)...");
+    POINT position = {(short)LOWORD(point),(short)HIWORD(point)}; if (position.x == -1 && position.y == -1) { RECT rect; if (!GetWindowRect(label,&rect)) { DestroyMenu(menu); return; } position.x = rect.left; position.y = rect.bottom; }
+    UINT command = (UINT)TrackPopupMenuEx(menu,TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,position.x,position.y,window,NULL); DestroyMenu(menu);
+    if (command != UI_READ_EDIT_OPEN || !IsWindow(window) || GetWindowLongPtrW(window,GWLP_USERDATA) != (LONG_PTR)ui) return;
+    if (!gui_read_edit_entry(ui) || ui->readEditing || ui->activitySerial != serial || ui->destination != destination || GetDlgItem(window,UI_DEST_EDIT) != destination || GetDlgItem(window,UI_READ_DEST_LABEL) != label) return;
+    gui_read_edit_begin(ui);
+}
+
 static void gui_read_controls(GuiWindow* ui) {
-    if (ui->destination) { if (ui->mode == GUI_VERIFY) { wchar_t path[MAX_PATH]; if (gui_path_text(ui->destination,path)) gui_dvd_source_set(ui,path); } else if (ui->mode == GUI_READ) { wchar_t path[MAX_PATH]; GetWindowTextW(ui->destination,path,MAX_PATH); if (wcscmp(path,ui->readImage)) { wcscpy(ui->readImage,path); ui->readDestinationReady = ui->readDestinationAttempted = false; ui->readDestinationTotalBytes = ui->readDestinationFreeBytes = 0; } gui_read_destination_info(ui); } else GetWindowTextW(ui->destination,ui->destinationImage,MAX_PATH); }
+    if (ui->destination) { if (ui->mode == GUI_VERIFY) { wchar_t path[MAX_PATH]; if (gui_path_text(ui->destination,path)) gui_dvd_source_set(ui,path); } else if (ui->mode == GUI_READ) { if (!ui->readEditing) { wchar_t path[MAX_PATH]; GetWindowTextW(ui->destination,path,MAX_PATH); if (wcscmp(path,ui->readImage)) { wcscpy(ui->readImage,path); ui->readDestinationReady = ui->readDestinationAttempted = false; ui->readDestinationTotalBytes = ui->readDestinationFreeBytes = 0; } } gui_read_destination_info(ui); } else GetWindowTextW(ui->destination,ui->destinationImage,MAX_PATH); }
     if (ui->label) GetWindowTextW(ui->label, ui->volumeLabel, 127);
     if (ui->fs) { static const FsTypeFlags flags[] = {FS_TYPE_ISO9660,FS_TYPE_ISO_JOLIET,FS_TYPE_ISO_UDF,FS_TYPE_ALL,FS_TYPE_UDF}; LRESULT i = SendMessageW(ui->fs, CB_GETCURSEL, 0, 0); if (i >= 0 && i < 5) ui->fsTypes = flags[i]; }
     if (ui->udf) ui->revision = SendMessageW(ui->udf, CB_GETCURSEL, 0, 0) == 1 ? UDF_REV_250 : UDF_REV_102;
@@ -472,7 +557,7 @@ static void gui_write_checks(GuiWindow* ui) {
 
 static void gui_menu(GuiWindow* ui) {
     bool build = ui->mode == GUI_BUILD, write = ui->mode == GUI_WRITE, read = ui->mode == GUI_READ, verify = ui->mode == GUI_VERIFY, discovery = ui->mode == GUI_DISCOVERY;
-    bool busy = ui->job != NULL, idle = !busy, source = ui->pathCount != 0, drive = ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount;
+    bool busy = ui->job != NULL, idle = !busy && !ui->readEditing, source = ui->pathCount != 0, drive = ui->selectedDrive >= 0 && ui->selectedDrive < ui->driveCount;
     bool discAction = idle && drive && ui->mediaReady && ((verify && !ui->verifyAgainstImage) || ui->sourceImage[0]);
     bool writeAction = discAction && (ui->writeMediaReady || ui->bdReWritable || (ui->bdRNoReserveTrack && ui->bdRReservedCandidate));
     bool readAction = idle && drive && ui->mediaReady;
@@ -499,23 +584,23 @@ static void gui_menu(GuiWindow* ui) {
     if (read) {
         EnableWindow(ui->drives,idle && drive); EnableWindow(ui->info,drive && ui->mediaReady); EnableWindow(GetDlgItem(ui->window,UI_DESTINATION),idle); EnableWindow(GetDlgItem(ui->window,UI_READ_OPEN),idle && ui->readImage[0]);
         EnableWindow(GetDlgItem(ui->window,UI_READ_SECTOR_VIEWER),idle && drive && ui->mediaReady); EnableWindow(GetDlgItem(ui->window,UI_READ_IMAGE_INFO),idle && drive && ui->mediaReady && ui->readDiscText[0]);
-        bool transfer = busy && ui->job->operation != GUI_DRIVE_INFO; ShowWindow(ui->progress,transfer ? SW_SHOW : SW_HIDE); ShowWindow(ui->cancel,transfer ? SW_SHOW : SW_HIDE); InvalidateRect(ui->go,NULL,TRUE); gui_read_destination_info(ui);
+        bool transfer = busy && ui->job->operation != GUI_DRIVE_INFO; ShowWindow(ui->progress,transfer ? SW_SHOW : SW_HIDE); ShowWindow(ui->cancel,transfer ? SW_SHOW : SW_HIDE); InvalidateRect(ui->go,NULL,TRUE); gui_read_destination_info(ui); gui_read_edit_view(ui);
     }
     if (ui->go) EnableWindow(ui->go, build ? idle && source && !ui->outputDevice : read ? readAction : discovery ? discoveryAction : write ? writeAction : verify && discAction);
     HMENU bar = CreateMenu(), file = CreatePopupMenu(), view = CreatePopupMenu(), mode = CreatePopupMenu(), tools = CreatePopupMenu(), help = CreatePopupMenu();
     if (build || write || verify) item(file, UI_SOURCE_FILE, build ? L"浏览文件(&M)..." : L"浏览来源文件(&M)...\tCtrl+O", idle && (!verify || ui->verifyAgainstImage));
     if (build) { item(file, UI_SOURCE_FOLDER, L"浏览文件夹(&N)...", idle); item(file, UI_CLEAR, L"移除所有的项目(&O)", idle && source); separator(file); }
-    if (build || read) { item(file, UI_DESTINATION, L"打开目标文件(&P)...", idle && (read || !ui->outputDevice)); separator(file); }
+    if (build || read) { item(file, UI_DESTINATION, L"打开目标文件(&P)...", idle && (read || !ui->outputDevice)); if (read) item(file,UI_READ_EDIT_OPEN,L"编辑目标(&E)...\tF2",idle); separator(file); }
     if (build) { item(file, UI_CALCULATE, L"计算(&Q)", idle && source); item(file, UI_BUILD, L"构建(&R)", idle && source && !ui->outputDevice); separator(file); item(file, UI_NEW, L"新方案(&S)", idle); item(file, UI_LOAD_RECENT, L"载入最近的方案(&T)", false); item(file, UI_LOAD, L"载入方案(&U)...", false); item(file, UI_SAVE, L"储存方案(&V)...", false); separator(file); }
     if (read) { item(file, UI_READ, L"读取(&R)", readAction); separator(file); }
     if (write || discovery) { item(file, UI_WRITE, L"刻录(&R)", discovery ? discoveryAction : writeAction); separator(file); }
     if (verify) { item(file, UI_VERIFY, L"验证(&R)", discAction); separator(file); }
-    item(file, UI_GRAPH_EXPORT, L"导出记录图表(&Y)...", false); item(file, UI_GRAPH_SHOW, L"显示记录图表(&Z)...", false); separator(file); item(file, UI_EXIT, L"退出(&X)", idle);
+    item(file, UI_GRAPH_EXPORT, L"导出记录图表(&Y)...", false); item(file, UI_GRAPH_SHOW, L"显示记录图表(&Z)...", false); separator(file); item(file, UI_EXIT, L"退出(&X)", !busy);
     item(view, UI_LAYOUT, L"光盘布局编辑器(&L)...", false); item(view, UI_DROP, L"拖放区域(&D)", false); separator(view); item(view, UI_LOG, L"日志(&L)", true); CheckMenuItem(view, UI_LOG, MF_BYCOMMAND | (ui->logVisible ? MF_CHECKED : MF_UNCHECKED));
     if (write) item(view, UI_QUEUE, L"刻录队列(&Q)...", false); item(view, UI_REFRESH, L"刷新(&R)\tF5", idle);
     const wchar_t* modes[] = {L"快速向导(&U)...\tCtrl+Shift+P",L"读取(&V)\tCtrl+Shift+R",L"构建(&W)\tCtrl+Shift+B",L"刻录(&X)\tCtrl+Shift+W",L"验证(&Y)\tCtrl+Shift+V",L"品质测试(&Z)\tCtrl+Shift+D"};
     const UINT ids[] = {UI_MODE_EZ,UI_MODE_READ,UI_MODE_BUILD,UI_MODE_WRITE,UI_MODE_VERIFY,UI_MODE_DISCOVERY};
-    for (unsigned i = 0; i < 6; i++) { item(mode, ids[i], modes[i], idle); if (!i) separator(mode); if (ui->mode == (GuiMode)i) CheckMenuItem(mode, ids[i], MF_CHECKED); }
+    for (unsigned i = 0; i < 6; i++) { item(mode, ids[i], modes[i], !busy); if (!i) separator(mode); if (ui->mode == (GuiMode)i) CheckMenuItem(mode, ids[i], MF_CHECKED); }
     popup(bar, file, L"文件(&F)"); popup(bar, view, L"查看(&V)"); popup(bar, mode, L"模式(&M)");
     if (build) { HMENU input = CreatePopupMenu(), output = CreatePopupMenu(); item(input, UI_INPUT_STANDARD, L"标准(&S)", idle); CheckMenuItem(input, UI_INPUT_STANDARD, MF_CHECKED); item(input, UI_INPUT_ADVANCED, L"高级(&A)", false); item(output, UI_OUTPUT_DEVICE, L"驱动器(&D)", idle); item(output, UI_OUTPUT_IMAGE, L"镜像文件(&I)", idle); CheckMenuItem(output, ui->outputDevice ? UI_OUTPUT_DEVICE : UI_OUTPUT_IMAGE, MF_CHECKED); popup(bar, input, L"输入(&I)"); popup(bar, output, L"输出(&O)"); }
     HMENU iso = CreatePopupMenu(), device = CreatePopupMenu(), erase = CreatePopupMenu(), close = CreatePopupMenu();
@@ -564,7 +649,7 @@ static void gui_write_page(GuiWindow* ui) {
     ui->cancel = ctl(ui,ui->window,L"BUTTON",L"取消",WS_TABSTOP,UI_CANCEL,16,334,64,30); EnableWindow(ui->cancel,FALSE); ShowWindow(ui->cancel,SW_HIDE);
     ui->progress = ctl(ui,ui->window,PROGRESS_CLASSW,L"",0,0,16,280,305,14); ShowWindow(ui->progress,SW_HIDE);
     for (int i = 0; i < ui->driveCount; i++) { wchar_t text[128]; swprintf(text,128,L"%c:  %hs %hs",ui->devices[i].driveLetter ? ui->devices[i].driveLetter : L'?',ui->devices[i].vendorId,ui->devices[i].productId); SendMessageW(ui->drives,CB_ADDSTRING,0,(LPARAM)text); } SendMessageW(ui->drives,CB_SETCURSEL,ui->selectedDrive,0);
-    gui_write_source_info(ui); gui_write_checks(ui); gui_menu(ui); if (ui->selectedDrive >= 0) gui_start(ui,GUI_DRIVE_INFO); else if (ui->sourceImage[0] && !ui->sourceInfoAttempted) gui_start(ui,GUI_INSPECT);
+    gui_write_source_info(ui); gui_write_checks(ui); gui_menu(ui); gui_pending_refresh(ui); if (ui->selectedDrive >= 0) gui_start(ui,GUI_DRIVE_INFO); else if (ui->sourceImage[0] && !ui->sourceInfoAttempted) gui_start(ui,GUI_INSPECT);
 }
 
 static void gui_read_page(GuiWindow* ui) {
@@ -581,12 +666,12 @@ static void gui_read_page(GuiWindow* ui) {
     gui_tip(ui,ctl(ui,ui->window,L"BUTTON",L"光盘信息",WS_TABSTOP,UI_READ_IMAGE_INFO,298,107,23,22),L"查看已载入的光盘信息");
     ctl(ui,ui->window,L"BUTTON",L"目标",BS_GROUPBOX,UI_READ_DEST_GROUP,8,144,321,89);
     gui_tip(ui,ctl(ui,ui->window,L"BUTTON",L"打开文件夹",WS_TABSTOP,UI_READ_OPEN,16,157,23,22),L"打开目标所在文件夹");
-    ctl(ui,ui->window,L"STATIC",L"",SS_PATHELLIPSIS | SS_CENTERIMAGE | SS_NOPREFIX,UI_READ_DEST_LABEL,44,160,253,17);
+    ctl(ui,ui->window,L"STATIC",L"",SS_PATHELLIPSIS | SS_CENTERIMAGE | SS_NOPREFIX | SS_NOTIFY,UI_READ_DEST_LABEL,44,160,253,17);
     gui_tip(ui,ctl(ui,ui->window,L"BUTTON",L"浏览",WS_TABSTOP,UI_DESTINATION,298,157,23,22),L"选择目标镜像文件");
     /* 原主页以标签显示目标；隐藏编辑器只保存真实路径，不把提示文字当作文件名。 */
-    ui->destination = ctl(ui,ui->window,L"COMBOBOX",ui->readImage,CBS_DROPDOWN | CBS_AUTOHSCROLL,UI_DEST_EDIT,16,160,305,140); gui_combo_height(ui,ui->destination,21); EnableWindow(ui->destination,FALSE); ShowWindow(ui->destination,SW_HIDE);
-    HWND ok = ctl(ui,ui->window,L"BUTTON",L"确定",BS_DEFPUSHBUTTON,UI_READ_EDIT_OK,91,195,75,23), cancel = ctl(ui,ui->window,L"BUTTON",L"取消",0,UI_READ_EDIT_CANCEL,171,195,75,23); EnableWindow(ok,FALSE); EnableWindow(cancel,FALSE); ShowWindow(ok,SW_HIDE); ShowWindow(cancel,SW_HIDE);
-    ctl(ui,ui->window,L"STATIC",L"",SS_ETCHEDHORZ,0,16,184,305,3); ctl(ui,ui->window,L"STATIC",L"容量：",0,0,16,194,78,13); ctl(ui,ui->window,L"STATIC",L"空余空间：",0,0,16,210,78,13);
+    ui->destination = ctl(ui,ui->window,L"COMBOBOX",ui->readImage,WS_TABSTOP | CBS_DROPDOWN | CBS_AUTOHSCROLL,UI_DEST_EDIT,16,160,305,140); gui_combo_height(ui,ui->destination,21); EnableWindow(ui->destination,FALSE); ShowWindow(ui->destination,SW_HIDE);
+    HWND ok = ctl(ui,ui->window,L"BUTTON",L"确定",WS_TABSTOP | BS_DEFPUSHBUTTON,UI_READ_EDIT_OK,91,195,75,23), cancel = ctl(ui,ui->window,L"BUTTON",L"取消",WS_TABSTOP,UI_READ_EDIT_CANCEL,171,195,75,23); EnableWindow(ok,FALSE); EnableWindow(cancel,FALSE); ShowWindow(ok,SW_HIDE); ShowWindow(cancel,SW_HIDE);
+    ctl(ui,ui->window,L"STATIC",L"",SS_ETCHEDHORZ,0,16,184,305,3); ctl(ui,ui->window,L"STATIC",L"容量：",0,UI_READ_CAPACITY_LABEL,16,194,78,13); ctl(ui,ui->window,L"STATIC",L"空余空间：",0,UI_READ_FREE_LABEL,16,210,78,13);
     ctl(ui,ui->window,L"STATIC",L"未知",SS_PATHELLIPSIS,UI_READ_CAPACITY,96,194,225,13); ctl(ui,ui->window,L"STATIC",L"未知",SS_PATHELLIPSIS,UI_READ_FREE_SPACE,96,210,225,13);
     HWND graph = ctl(ui,ui->window,L"BUTTON",L"图表",WS_TABSTOP,UI_GRAPH_SHOW,306,233,23,22), exportGraph = ctl(ui,ui->window,L"BUTTON",L"导出图表",WS_TABSTOP,UI_GRAPH_EXPORT,283,233,23,22); EnableWindow(graph,FALSE); EnableWindow(exportGraph,FALSE); ShowWindow(exportGraph,SW_HIDE); gui_tip(ui,graph,L"图表尚未接通");
     ui->info = ctl(ui,ui->window,L"EDIT",L"",ES_MULTILINE | ES_READONLY | WS_VSCROLL,UI_READ_INFO,336,8,321,265); EnableWindow(ui->info,FALSE);
@@ -599,12 +684,16 @@ static void gui_read_page(GuiWindow* ui) {
     ui->go = ctl(ui,ui->window,L"BUTTON",L"读取",WS_TABSTOP | BS_DEFPUSHBUTTON,UI_GO,92,312,153,63); EnableWindow(ui->go,FALSE);
     ui->cancel = ctl(ui,ui->window,L"BUTTON",L"取消",WS_TABSTOP,UI_CANCEL,16,334,64,30); EnableWindow(ui->cancel,FALSE); ShowWindow(ui->cancel,SW_HIDE); ui->progress = ctl(ui,ui->window,PROGRESS_CLASSW,L"",0,0,16,280,305,14); ShowWindow(ui->progress,SW_HIDE);
     for (int i = 0; i < ui->driveCount; i++) { wchar_t text[128]; swprintf(text,128,L"%c:  %hs %hs",ui->devices[i].driveLetter ? ui->devices[i].driveLetter : L'?',ui->devices[i].vendorId,ui->devices[i].productId); SendMessageW(ui->drives,CB_ADDSTRING,0,(LPARAM)text); } SendMessageW(ui->drives,CB_SETCURSEL,ui->selectedDrive,0);
+    const int editOrder[] = {UI_DEST_EDIT,UI_READ_EDIT_OK,UI_READ_EDIT_CANCEL};
+    for (size_t i = ARRAYSIZE(editOrder); i; i--) { HWND child = GetDlgItem(ui->window,editOrder[i - 1]); SetWindowPos(child,HWND_TOP,0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); SetWindowSubclass(child,gui_read_edit_proc,1,(DWORD_PTR)ui); }
+    COMBOBOXINFO editInfo = {0}; editInfo.cbSize = (DWORD)sizeof(editInfo); if (GetComboBoxInfo(ui->destination,&editInfo) && editInfo.hwndItem) SetWindowSubclass(editInfo.hwndItem,gui_read_edit_proc,1,(DWORD_PTR)ui);
     /* 组合框创建文本不会恢复编辑区；控件就绪后在回采前写回已存目标。 */
     SetWindowTextW(ui->destination,ui->readImage);
-    gui_read_destination_info(ui); gui_menu(ui); if (ui->selectedDrive >= 0) gui_start(ui,GUI_DRIVE_INFO); else gui_read_destination_query(ui);
+    gui_read_destination_info(ui); gui_menu(ui); gui_pending_refresh(ui); if (ui->selectedDrive >= 0) gui_start(ui,GUI_DRIVE_INFO); else gui_read_destination_query(ui);
 }
 
 static void gui_mode(GuiWindow* ui, GuiMode mode) {
+    if (ui->readEditing) gui_read_edit_cancel(ui,true);
     if (ui->mode != mode) gui_bd_write_clear(ui);
     gui_read_controls(ui); if (mode != GUI_WRITE) gui_cd_plan_clear(ui); HWND child = GetWindow(ui->window, GW_CHILD);
     if (ui->tips) { DestroyWindow(ui->tips); ui->tips = NULL; }
@@ -615,7 +704,7 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
         ctl(ui, ui->window, L"BUTTON", L"您打算做什么？", BS_GROUPBOX, 0, 8, 8, 649, 369);
         const wchar_t* texts[] = {L"刻录镜像至光盘",L"刻录文件/文件夹至光盘",L"将光盘抓取成镜像文件",L"从文件/文件夹制作镜像",L"验证光盘",L"品质测试"};
         for (int i = 0; i < 6; i++) ctl(ui, ui->window, L"BUTTON", texts[i], WS_TABSTOP | BS_OWNERDRAW, UI_EZ_FIRST + i, 16 + i % 2 * 320, 24 + i / 2 * 120, 313, 105);
-        gui_status(ui, L"Ready"); gui_menu(ui); return;
+        gui_status(ui, L"Ready"); gui_menu(ui); gui_pending_refresh(ui); return;
     }
     if (mode == GUI_WRITE) { gui_write_page(ui); return; }
     if (mode == GUI_READ) { gui_read_page(ui); return; }
@@ -672,7 +761,7 @@ static void gui_mode(GuiWindow* ui, GuiMode mode) {
     if (ui->drives) for (int i = 0; i < ui->driveCount; i++) { wchar_t text[128]; swprintf(text, 128, L"%c:  %hs %hs", ui->devices[i].driveLetter ? ui->devices[i].driveLetter : L'?', ui->devices[i].vendorId, ui->devices[i].productId); SendMessageW(ui->drives, CB_ADDSTRING, 0, (LPARAM)text); }
     if (ui->drives) SendMessageW(ui->drives, CB_SETCURSEL, ui->selectedDrive, 0);
     if (mode == GUI_DISCOVERY) { SetWindowPos(GetDlgItem(ui->window,UI_DISCOVERY_EJECT),ui->verify,0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); SetWindowPos(GetDlgItem(ui->window,UI_DISCOVERY_CYCLE),GetDlgItem(ui->window,UI_DISCOVERY_CAPACITY),0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); SetWindowPos(GetDlgItem(ui->window,UI_DISCOVERY_OPC),GetDlgItem(ui->window,UI_DISCOVERY_CAPACITY),0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); SetWindowPos(GetDlgItem(ui->window,UI_DISCOVERY_BUFFER),GetDlgItem(ui->window,UI_DISCOVERY_EJECT),0,0,0,0,SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); }
-    gui_status(ui, build && ui->outputDevice ? L"直接构建到光盘尚未接通；可选择输出镜像文件" : L"Ready"); gui_menu(ui);
+    gui_status(ui, build && ui->outputDevice ? L"直接构建到光盘尚未接通；可选择输出镜像文件" : L"Ready"); gui_menu(ui); gui_pending_refresh(ui);
     if (ui->drives && ui->selectedDrive >= 0) gui_start(ui, GUI_DRIVE_INFO);
 }
 
@@ -699,7 +788,7 @@ static void gui_build_page(GuiWindow* ui) {
 }
 
 static void gui_refresh(GuiWindow* ui) {
-    gui_bd_write_clear(ui);
+    if (ui->readEditing) return; gui_bd_write_clear(ui);
     gui_cd_plan_clear(ui);
     if (ui->mode == GUI_READ) { ui->readDiscText[0] = 0; ui->readDestinationReady = ui->readDestinationAttempted = false; if (ui->info) SetWindowTextW(ui->info,L""); gui_read_destination_info(ui); }
     ui->driveCount = spti_enumerate_drives(ui->devices, MAX_OPTICAL_DRIVES); ui->selectedDrive = ui->driveCount > 0 ? 0 : -1; ui->mediaReady = ui->writeMediaReady = ui->bdRReservedCandidate = ui->eraseSupported = ui->testWriteSupported = ui->bdReMedia = ui->bdReWritable = false; ui->discoveryCapacity = 0;
@@ -709,6 +798,7 @@ static void gui_refresh(GuiWindow* ui) {
 }
 
 static void gui_source(GuiWindow* ui, bool folder) {
+    if (ui->readEditing) return;
     if (ui->mode == GUI_DISCOVERY || (ui->mode == GUI_VERIFY && !ui->verifyAgainstImage)) return;
     if (ui->mode == GUI_BUILD) { gui_build_source(ui,folder); return; }
     gui_image_source(ui,folder);
@@ -781,7 +871,7 @@ static bool gui_launch(GuiWindow* ui, GuiJob* job) {
 }
 
 static void gui_read_destination_query(GuiWindow* ui) {
-    if (ui->mode != GUI_READ || ui->job || ui->tool || !ui->readImage[0] || ui->readDestinationAttempted) return;
+    if (ui->mode != GUI_READ || ui->job || ui->tool || ui->readEditing || !ui->readImage[0] || ui->readDestinationAttempted) return;
     GuiPath path = {0}; wcscpy(path.path,ui->readImage); wcscpy(ui->readDestinationQuery,ui->readImage); ui->readDestinationAttempted = true;
     if (!gui_launch(ui,gui_job(ui,GUI_READ_DEST_INFO,&path,1))) { ui->readDestinationAttempted = false; gui_status(ui,L"无法查询目标空间"); }
 }
@@ -1154,7 +1244,7 @@ static void gui_build_enter(GuiWindow* ui, HWND editor) {
 
 static void gui_drop_sources(GuiWindow* ui, HDROP drop) {
     HWND window = ui->window; GuiMode mode = GUI_EZ; uint64_t serial = 0; bool accepted = false; wchar_t path[MAX_PATH] = L"";
-    if (IsWindow(window) && GetWindowLongPtrW(window,GWLP_USERDATA) == (LONG_PTR)ui && !ui->job && !ui->tool) {
+    if (IsWindow(window) && GetWindowLongPtrW(window,GWLP_USERDATA) == (LONG_PTR)ui && !ui->job && !ui->tool && !ui->readEditing) {
         mode = ui->mode; serial = ui->activitySerial; UINT count = DragQueryFileW(drop,0xFFFFFFFF,NULL,0);
         for (UINT i = 0; i < count; i++) {
             UINT length = DragQueryFileW(drop,i,NULL,0); if (!length || length >= MAX_PATH) continue;
@@ -1332,7 +1422,7 @@ static void gui_read_split_error(GuiWindow* ui, const wchar_t* message) {
 }
 
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
-    if (ui->job) return; gui_read_controls(ui);
+    if (ui->job || ui->readEditing) return; gui_read_controls(ui);
     bool erase = operation == GUI_ERASE_QUICK || operation == GUI_ERASE_FULL, discovery = operation == GUI_DISCOVERY_DISC;
     bool bdReOverwrite = operation == GUI_WRITE_DISC && ui->bdReWritable, bdReErase = erase && ui->bdReMedia;
     uint32_t discoverySectors = 0, discoveryBufferMiB = 0, writeLayer = 0; double discoverySpeed = 0;
@@ -1439,7 +1529,7 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
 }
 
 static void gui_tool_open(GuiWindow* ui, GuiOperation operation) {
-    if (ui->tool || ui->job) return; gui_read_controls(ui);
+    if (ui->tool || ui->job || ui->readEditing) return; gui_read_controls(ui);
     GuiTool* tool = (GuiTool*)calloc(1, sizeof(*tool)); if (!tool) return; tool->parent = ui; tool->operation = operation; ui->tool = tool;
     const wchar_t* title = operation == GUI_CREATE_CUE ? L"生成 CUE 文件" : operation == GUI_WRITE_OPTIONS ? L"写入扩展设置" : operation == GUI_READ_OPTIONS ? L"读取选项" : L"创建 MDS 文件";
     RECT rect = {0,0,px(ui,operation == GUI_WRITE_OPTIONS ? 464 : operation == GUI_READ_OPTIONS ? 464 : operation == GUI_CREATE_MDS ? 527 : 649),px(ui,operation == GUI_WRITE_OPTIONS ? 416 : operation == GUI_READ_OPTIONS ? 248 : operation == GUI_CREATE_MDS ? 356 : 548)}; AdjustWindowRectEx(&rect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
@@ -1508,6 +1598,7 @@ static void gui_bd_format_query(GuiTool* tool) {
     else { EnableWindow(GetDlgItem(tool->window,UI_BD_RE_FORMAT_QUERY),FALSE); SetWindowTextW(tool->candidateStatus,L"正在后台只读查询介质与格式列表..."); }
 }
 static void gui_bd_format_open(GuiWindow* ui, bool bdr) {
+    if (ui->readEditing) return;
     if (ui->tool || ui->job || ui->selectedDrive < 0 || ui->selectedDrive >= ui->driveCount) return;
     GuiTool* tool = calloc(1,sizeof(*tool)); if (!tool) return; tool->parent = ui; tool->operation = bdr ? GUI_BD_R_FORMAT_LIST : GUI_BD_RE_FORMAT_LIST; wcscpy(tool->bdReDrive,ui->devices[ui->selectedDrive].devicePath); ui->tool = tool;
     RECT rect = {0,0,px(ui,654),px(ui,310)}; AdjustWindowRectEx(&rect,WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,FALSE,WS_EX_DLGMODALFRAME);
@@ -2416,18 +2507,28 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
     if (message == GUI_JOB_STATUS) { if (ui->job && ui->job == (GuiJob*)wp) { if (lp && ((const wchar_t*)lp)[0]) wcsncpy_s(ui->taskStatus,ARRAYSIZE(ui->taskStatus),(const wchar_t*)lp,_TRUNCATE); gui_task_status(ui); if (lp) gui_log(ui,(const wchar_t*)lp); } free((void*)lp); return 0; }
     if (message == GUI_REFRESH_PENDING) {
         ui->refreshQueued = false;
-        if (!ui->writeNeedsRefresh || ui->job || ui->tool || ui->completing || !gui_refresh_target(ui)) return 0;
+        if (!ui->writeNeedsRefresh || ui->job || ui->tool || ui->readEditing || ui->completing || !gui_refresh_target(ui)) return 0;
         SendMessageW(window,WM_COMMAND,UI_DEVICE_REFRESH,0); return 0;
     }
     if (message == GUI_JOB_DONE) { gui_complete(ui,(GuiJob*)lp); return 0; }
     if (message == WM_DROPFILES) { gui_drop_sources(ui,(HDROP)wp); return 0; }
+    if (message == WM_CONTEXTMENU && (HWND)wp == GetDlgItem(window,UI_READ_DEST_LABEL)) { gui_read_edit_popup(ui,lp); return 0; }
     if (message == WM_COMMAND) {
         UINT command = LOWORD(wp);
+        if (ui->readEditing) {
+            if (!lp && !HIWORD(wp)) { if (command == IDOK) command = UI_READ_EDIT_OK; else if (command == IDCANCEL) command = UI_READ_EDIT_CANCEL; }
+            if (command == UI_READ_EDIT_OK) { if (!lp || (HWND)lp == GetDlgItem(window,UI_READ_EDIT_OK)) gui_read_edit_confirm(ui); return 0; }
+            if (command == UI_READ_EDIT_CANCEL) { if (!lp || (HWND)lp == GetDlgItem(window,UI_READ_EDIT_CANCEL)) gui_read_edit_cancel(ui,false); return 0; }
+            bool mode = command == UI_MODE_EZ || command == UI_MODE_READ || command == UI_MODE_BUILD || command == UI_MODE_WRITE || command == UI_MODE_VERIFY || command == UI_MODE_DISCOVERY;
+            if (!mode && command != UI_EXIT && command != UI_LOG) return 0;
+        }
         if (command >= UI_EZ_FIRST && command < UI_EZ_FIRST + 6) { static const GuiMode modes[] = {GUI_WRITE,GUI_BUILD,GUI_READ,GUI_BUILD,GUI_VERIFY,GUI_DISCOVERY}; ui->outputDevice = command == UI_EZ_FIRST + 1; gui_mode(ui,modes[command - UI_EZ_FIRST]); return 0; }
         if (command == UI_LOG) { ui->logVisible = !ui->logVisible; ShowWindow(ui->logWindow,ui->logVisible ? SW_SHOWNOACTIVATE : SW_HIDE); gui_menu(ui); return 0; }
         if (ui->job) { if (command == UI_CANCEL) { if (!ui->cancelRequested && (ui->job->operation == GUI_CD_ISO_PLAN || ui->job->operation == GUI_CD_ISO_WRITE)) gui_cd_plan_clear(ui); gui_task_cancel(ui); } return 0; }
         switch (command) {
             case UI_MODE_EZ: gui_mode(ui,GUI_EZ); break; case UI_MODE_READ: gui_mode(ui,GUI_READ); break; case UI_MODE_BUILD: gui_mode(ui,GUI_BUILD); break; case UI_MODE_WRITE: gui_mode(ui,GUI_WRITE); break; case UI_MODE_VERIFY: gui_mode(ui,GUI_VERIFY); break; case UI_MODE_DISCOVERY: gui_mode(ui,GUI_DISCOVERY); break;
+            case UI_READ_EDIT_OPEN: gui_read_edit_begin(ui); break;
+            case UI_READ_DEST_LABEL: if (HIWORD(wp) == STN_DBLCLK && (HWND)lp == GetDlgItem(window,UI_READ_DEST_LABEL)) gui_read_edit_begin(ui); break;
             case UI_SOURCE_FILE: gui_source(ui,false); break; case UI_SOURCE_FOLDER: gui_source(ui,true); break;
             case UI_VERIFY_COMPARE: case UI_READ_CDTEXT: case UI_READ_RAW_MDS: case UI_SESSION_PREGAPS: gui_read_controls(ui); gui_menu(ui); break;
             case UI_READ_SPLIT: if (HIWORD(wp) == CBN_SELCHANGE) { gui_read_controls(ui); gui_menu(ui); } break;
@@ -2443,7 +2544,7 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
                 ui->discoveryAll = false; SendMessageW(GetDlgItem(window,UI_DISCOVERY_ALL),BM_SETCHECK,BST_UNCHECKED,0); SendMessageW(GetDlgItem(window,UI_DISCOVERY_CUSTOM),BM_SETCHECK,BST_CHECKED,0); swprintf(ui->discoveryCount,32,L"%u",ui->discoveryCapacity); SetWindowTextW(ui->discoverySectors,ui->discoveryCount); gui_menu(ui); break;
             case UI_DEST_EDIT:
                 if (ui->mode == GUI_VERIFY) { if (HIWORD(wp) == EN_CHANGE && lp && (HWND)lp == ui->destination) { gui_read_controls(ui); gui_menu(ui); } }
-                else if (ui->mode == GUI_READ && HIWORD(wp) == EN_CHANGE && ui->destination) { gui_read_controls(ui); gui_menu(ui); } break;
+                else if (ui->mode == GUI_READ && !ui->readEditing && HIWORD(wp) == EN_CHANGE && ui->destination) { gui_read_controls(ui); gui_menu(ui); } break;
             case UI_CLEAR: free(ui->paths); ui->paths = NULL; ui->pathCount = 0; gui_mode(ui,ui->mode); break;
             case UI_REMOVE_SOURCE: if (ui->sources) { for (size_t i = ui->pathCount; i > 0; i--) if (SendMessageW(ui->sources,LB_GETSEL,i - 1,0) > 0) { memmove(ui->paths + i - 1,ui->paths + i,(ui->pathCount - i) * sizeof(*ui->paths)); ui->pathCount--; } gui_mode(ui,GUI_BUILD); } break;
             case UI_NEW:
@@ -2494,7 +2595,7 @@ static LRESULT CALLBACK gui_proc(HWND window, UINT message, WPARAM wp, LPARAM lp
             case UI_EXIT: SendMessageW(window,WM_CLOSE,0,0); break;
         } return 0;
     }
-    if (message == WM_CLOSE) { if (ui->job) { MessageBoxW(window,L"操作正在进行。请先取消或等待其完成。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return 0; } if (ui->tool) { SetForegroundWindow(ui->tool->window); return 0; } DestroyWindow(window); return 0; }
+    if (message == WM_CLOSE) { if (ui->job) { MessageBoxW(window,L"操作正在进行。请先取消或等待其完成。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return 0; } if (ui->tool) { SetForegroundWindow(ui->tool->window); return 0; } if (ui->readEditing) gui_read_edit_cancel(ui,true); DestroyWindow(window); return 0; }
     if (message == WM_DESTROY) { if (ui->logWindow) DestroyWindow(ui->logWindow); PostQuitMessage(0); return 0; }
     return DefWindowProcW(window,message,wp,lp);
 }
@@ -2515,7 +2616,7 @@ int imgburn_gui_show(HINSTANCE instance, int show) {
         if (ui->assets.largeIcon) SendMessageW(window,WM_SETICON,ICON_BIG,(LPARAM)ui->assets.largeIcon); if (ui->assets.smallIcon) SendMessageW(window,WM_SETICON,ICON_SMALL,(LPARAM)ui->assets.smallIcon);
         RECT main; GetWindowRect(window,&main); RECT log = {0,0,px(ui,GUI_LOG_CLIENT_WIDTH),px(ui,GUI_LOG_CLIENT_HEIGHT)}; AdjustWindowRect(&log,WS_OVERLAPPEDWINDOW,TRUE); ui->logWindow = CreateWindowW(L"ImgBurnLogWindow",L"ImgBurn 日志",WS_OVERLAPPEDWINDOW,main.left,main.bottom,log.right - log.left,log.bottom - log.top,window,NULL,instance,ui);
         ui->logVisible = true; ShowWindow(window,show); ShowWindow(ui->logWindow,SW_SHOWNOACTIVATE); gui_log(ui,L"ImgBurn C17 桌面界面已启动。"); gui_refresh(ui);
-        ACCEL keys[] = {{FVIRTKEY | FCONTROL | FSHIFT,'P',UI_MODE_EZ},{FVIRTKEY | FCONTROL | FSHIFT,'R',UI_MODE_READ},{FVIRTKEY | FCONTROL | FSHIFT,'B',UI_MODE_BUILD},{FVIRTKEY | FCONTROL | FSHIFT,'W',UI_MODE_WRITE},{FVIRTKEY | FCONTROL | FSHIFT,'V',UI_MODE_VERIFY},{FVIRTKEY | FCONTROL | FSHIFT,'D',UI_MODE_DISCOVERY},{FVIRTKEY | FCONTROL,'O',UI_SOURCE_FILE},{FVIRTKEY,VK_F5,UI_REFRESH}};
+        ACCEL keys[] = {{FVIRTKEY | FCONTROL | FSHIFT,'P',UI_MODE_EZ},{FVIRTKEY | FCONTROL | FSHIFT,'R',UI_MODE_READ},{FVIRTKEY | FCONTROL | FSHIFT,'B',UI_MODE_BUILD},{FVIRTKEY | FCONTROL | FSHIFT,'W',UI_MODE_WRITE},{FVIRTKEY | FCONTROL | FSHIFT,'V',UI_MODE_VERIFY},{FVIRTKEY | FCONTROL | FSHIFT,'D',UI_MODE_DISCOVERY},{FVIRTKEY | FCONTROL,'O',UI_SOURCE_FILE},{FVIRTKEY,VK_F5,UI_REFRESH},{FVIRTKEY,VK_F2,UI_READ_EDIT_OPEN}};
         HACCEL accel = CreateAcceleratorTableW(keys,(int)(sizeof(keys) / sizeof(*keys))); MSG msg;
         while (GetMessageW(&msg,NULL,0,0) > 0) { if (gui_log_message(ui,&msg)) { if (!gui_log_translate(ui,&msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); } continue; } if (!ui->tool && msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN && msg.hwnd == ui->sourceEdit && ui->mode == GUI_BUILD) { gui_build_enter(ui,msg.hwnd); continue; } if (ui->tool && IsDialogMessageW(ui->tool->window,&msg)) continue; if ((ui->tool || !TranslateAcceleratorW(window,accel,&msg)) && !IsDialogMessageW(window,&msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); } }
         if (accel) DestroyAcceleratorTable(accel);
