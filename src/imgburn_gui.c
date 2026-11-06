@@ -1167,6 +1167,74 @@ static void gui_drop_sources(GuiWindow* ui, HDROP drop) {
     gui_mode(ui,mode);
 }
 
+typedef struct {
+    GuiWindow* ui;
+    HWND window, child, edit, focus, allControl, customControl;
+    uint64_t activitySerial;
+    int control, kind, length, editId;
+    bool all;
+    LONG_PTR style, editStyle;
+    LRESULT selection, allCheck, customCheck;
+    DWORD first, last;
+    wchar_t type[32], model[32], *text, *scratch;
+} GuiDiscoveryErrorContext;
+
+/* 错误提示只借用当前编辑意图；完整长文本与真实32位选区独立保存。 */
+static bool gui_discovery_error_capture(GuiWindow* ui, int control, GuiDiscoveryErrorContext* context) {
+    memset(context,0,sizeof(*context)); context->ui = ui; context->window = ui->window; context->control = control;
+    if (!IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)ui || ui->mode != GUI_DISCOVERY || ui->job || ui->tool || ui->completing || !IsWindowEnabled(context->window)) return false;
+    context->activitySerial = ui->activitySerial;
+    const wchar_t* model; size_t capacity;
+    if (control == UI_DISCOVERY_BUFFER) { model = ui->discoveryBufferText; capacity = ARRAYSIZE(ui->discoveryBufferText); }
+    else if (control == UI_DISCOVERY_SECTORS) { model = ui->discoveryCount; capacity = ARRAYSIZE(ui->discoveryCount); }
+    else if (control == UI_DISCOVERY_SPEED) { model = ui->discoveryRate; capacity = ARRAYSIZE(ui->discoveryRate); }
+    else return false;
+    if (!wmemchr(model,0,capacity)) return false; wcscpy(context->model,model);
+    context->child = GetDlgItem(context->window,control);
+    if (!context->child || !IsWindow(context->child) || GetParent(context->child) != context->window || GetDlgCtrlID(context->child) != control || !IsWindowEnabled(context->child)) return false;
+    if ((control == UI_DISCOVERY_SECTORS && ui->discoverySectors != context->child) || (control == UI_DISCOVERY_SPEED && ui->discoverySpeed != context->child)) return false;
+    context->style = GetWindowLongPtrW(context->child,GWL_STYLE); if (!GetClassNameW(context->child,context->type,ARRAYSIZE(context->type))) return false;
+    if (control == UI_DISCOVERY_SPEED) {
+        if (_wcsicmp(context->type,L"ComboBox") || (context->style & 3) != CBS_DROPDOWN) return false; context->kind = 2; context->selection = SendMessageW(context->child,CB_GETCURSEL,0,0);
+        COMBOBOXINFO info = {0}; info.cbSize = (DWORD)sizeof(info); if (!GetComboBoxInfo(context->child,&info)) return false; context->edit = info.hwndItem;
+    } else { if (_wcsicmp(context->type,L"Edit")) return false; context->kind = 1; context->edit = context->child; }
+    wchar_t type[32] = L"";
+    if (!IsWindow(context->edit) || !IsWindowEnabled(context->edit) || GetParent(context->edit) != (context->kind == 1 ? context->window : context->child) || !GetClassNameW(context->edit,type,ARRAYSIZE(type)) || _wcsicmp(type,L"Edit")) return false;
+    context->editId = GetDlgCtrlID(context->edit); context->editStyle = GetWindowLongPtrW(context->edit,GWL_STYLE); SendMessageW(context->edit,EM_GETSEL,(WPARAM)&context->first,(LPARAM)&context->last);
+    if (control == UI_DISCOVERY_SECTORS) {
+        context->all = ui->discoveryAll; context->allControl = GetDlgItem(context->window,UI_DISCOVERY_ALL); context->customControl = GetDlgItem(context->window,UI_DISCOVERY_CUSTOM);
+        if (!IsWindow(context->allControl) || !IsWindow(context->customControl)) return false; context->allCheck = SendMessageW(context->allControl,BM_GETCHECK,0,0); context->customCheck = SendMessageW(context->customControl,BM_GETCHECK,0,0);
+    }
+    context->length = GetWindowTextLengthW(context->child); if (context->length < 0 || context->length == INT_MAX) return false;
+    size_t capacityText = (size_t)context->length + 1; if (capacityText > SIZE_MAX / 2 || capacityText * 2 > SIZE_MAX / sizeof(wchar_t)) return false;
+    context->text = calloc(capacityText * 2,sizeof(wchar_t)); if (!context->text) return false; context->scratch = context->text + capacityText;
+    if (GetWindowTextW(context->child,context->text,context->length + 1) != context->length || context->text[context->length] || GetWindowTextLengthW(context->child) != context->length) return false;
+    context->focus = GetFocus(); return true;
+}
+static bool gui_discovery_error_current(const GuiDiscoveryErrorContext* context, bool focused) {
+    if (!IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)context->ui) return false;
+    GuiWindow* ui = context->ui;
+    if (ui->window != context->window || ui->mode != GUI_DISCOVERY || ui->job || ui->completing || ui->activitySerial != context->activitySerial || ui->tool || !IsWindowEnabled(context->window)) return false;
+    const wchar_t* model = context->control == UI_DISCOVERY_BUFFER ? ui->discoveryBufferText : context->control == UI_DISCOVERY_SECTORS ? ui->discoveryCount : ui->discoveryRate;
+    size_t capacity = context->control == UI_DISCOVERY_BUFFER ? ARRAYSIZE(ui->discoveryBufferText) : context->control == UI_DISCOVERY_SECTORS ? ARRAYSIZE(ui->discoveryCount) : ARRAYSIZE(ui->discoveryRate);
+    if (!wmemchr(model,0,capacity) || wcscmp(model,context->model)) return false;
+    HWND child = context->child; wchar_t type[32] = L"";
+    if (!IsWindow(child) || GetDlgItem(context->window,context->control) != child || GetParent(child) != context->window || GetDlgCtrlID(child) != context->control || !IsWindowEnabled(child) || GetWindowLongPtrW(child,GWL_STYLE) != context->style || !GetClassNameW(child,type,ARRAYSIZE(type)) || wcscmp(type,context->type)) return false;
+    if ((context->control == UI_DISCOVERY_SECTORS && ui->discoverySectors != child) || (context->control == UI_DISCOVERY_SPEED && ui->discoverySpeed != child)) return false;
+    if (context->kind == 2) { COMBOBOXINFO info = {0}; info.cbSize = (DWORD)sizeof(info); if (SendMessageW(child,CB_GETCURSEL,0,0) != context->selection || !GetComboBoxInfo(child,&info) || info.hwndItem != context->edit) return false; }
+    DWORD first = 0, last = 0;
+    if (!IsWindow(context->edit) || !IsWindowEnabled(context->edit) || GetParent(context->edit) != (context->kind == 1 ? context->window : child) || GetDlgCtrlID(context->edit) != context->editId || GetWindowLongPtrW(context->edit,GWL_STYLE) != context->editStyle || !GetClassNameW(context->edit,type,ARRAYSIZE(type)) || _wcsicmp(type,L"Edit")) return false;
+    SendMessageW(context->edit,EM_GETSEL,(WPARAM)&first,(LPARAM)&last); if (first != context->first || last != context->last) return false;
+    if (context->control == UI_DISCOVERY_SECTORS && (ui->discoveryAll != context->all || GetDlgItem(context->window,UI_DISCOVERY_ALL) != context->allControl || GetDlgItem(context->window,UI_DISCOVERY_CUSTOM) != context->customControl || !IsWindow(context->allControl) || !IsWindow(context->customControl) || SendMessageW(context->allControl,BM_GETCHECK,0,0) != context->allCheck || SendMessageW(context->customControl,BM_GETCHECK,0,0) != context->customCheck)) return false;
+    if (GetWindowTextLengthW(child) != context->length || GetWindowTextW(child,context->scratch,context->length + 1) != context->length || context->scratch[context->length] || GetWindowTextLengthW(child) != context->length || wcscmp(context->text,context->scratch)) return false;
+    HWND focus = GetFocus(); return focused ? focus == child || focus == context->edit : focus == context->focus;
+}
+static void gui_discovery_error(GuiWindow* ui, int control, const wchar_t* message) {
+    HWND window = ui->window; GuiDiscoveryErrorContext context; bool captured = gui_discovery_error_capture(ui,control,&context); MessageBoxW(window,message,L"ImgBurn",MB_OK | MB_ICONINFORMATION);
+    if (captured && gui_discovery_error_current(&context,false)) { SetFocus(context.child); if (gui_discovery_error_current(&context,true)) SendMessageW(context.edit,EM_SETSEL,0,-1); }
+    free(context.text);
+}
+
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
     if (ui->job) return; gui_read_controls(ui);
     bool erase = operation == GUI_ERASE_QUICK || operation == GUI_ERASE_FULL, discovery = operation == GUI_DISCOVERY_DISC;
@@ -1177,10 +1245,10 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
     if (operation == GUI_WRITE_DISC && !gui_write_layer_parse(ui->writeLayerValue,&writeLayer)) { MessageBoxW(ui->window,L"L0容量应为非零的16扇区倍数；留空自动选择。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
     if (discovery) {
         wchar_t* end;
-        if (!ui->discoveryAll) { uint64_t count = _wcstoui64(ui->discoveryCount,&end,10); if (!ui->discoveryCount[0] || *end || !count || count > UINT32_MAX || ui->discoveryCount[0] == L'-') { MessageBoxW(ui->window,L"请输入有效的自定义扇区数。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; } discoverySectors = (uint32_t)count; }
-        if (_wcsicmp(ui->discoveryRate,L"MAX")) { discoverySpeed = wcstod(ui->discoveryRate,&end); if ((*end == L'x' || *end == L'X') && !end[1]) end++; if (!ui->discoveryRate[0] || *end || !isfinite(discoverySpeed) || discoverySpeed < 1 || discoverySpeed * 4495.5 + 0.5 >= UINT32_MAX) { MessageBoxW(ui->window,L"请输入有效的写入速度（例如 4x 或 MAX）。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; } }
+        if (!ui->discoveryAll) { uint64_t count = _wcstoui64(ui->discoveryCount,&end,10); if (!ui->discoveryCount[0] || *end || !count || count > UINT32_MAX || ui->discoveryCount[0] == L'-') { gui_discovery_error(ui,UI_DISCOVERY_SECTORS,L"请输入有效的自定义扇区数。"); return; } discoverySectors = (uint32_t)count; }
+        if (_wcsicmp(ui->discoveryRate,L"MAX")) { discoverySpeed = wcstod(ui->discoveryRate,&end); if ((*end == L'x' || *end == L'X') && !end[1]) end++; if (!ui->discoveryRate[0] || *end || !isfinite(discoverySpeed) || discoverySpeed < 1 || discoverySpeed * 4495.5 + 0.5 >= UINT32_MAX) { gui_discovery_error(ui,UI_DISCOVERY_SPEED,L"请输入有效的写入速度（例如 4x 或 MAX）。"); return; } }
         HWND buffer = GetDlgItem(ui->window,UI_DISCOVERY_BUFFER); int length = buffer ? GetWindowTextLengthW(buffer) : 0; wchar_t text[12] = L"";
-        if (length < 1 || length > 10 || GetWindowTextW(buffer,text,ARRAYSIZE(text)) != length || !wmemchr(ui->discoveryBufferText,0,ARRAYSIZE(ui->discoveryBufferText)) || wcscmp(text,ui->discoveryBufferText) || !gui_options_number(text,128,&discoveryBufferMiB) || discoveryBufferMiB < 10) { MessageBoxW(ui->window,L"品质测试缓冲区应为10至128 MiB的整数。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
+        if (length < 1 || length > 10 || GetWindowTextW(buffer,text,ARRAYSIZE(text)) != length || !wmemchr(ui->discoveryBufferText,0,ARRAYSIZE(ui->discoveryBufferText)) || wcscmp(text,ui->discoveryBufferText) || !gui_options_number(text,128,&discoveryBufferMiB) || discoveryBufferMiB < 10) { gui_discovery_error(ui,UI_DISCOVERY_BUFFER,L"品质测试缓冲区应为10至128 MiB的整数。"); return; }
     }
     if (ui->mode == GUI_VERIFY && ui->destination) {
         wchar_t path[MAX_PATH];
