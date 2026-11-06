@@ -77,6 +77,7 @@ typedef struct {
     size_t ringBufferBytes;         /* e.g. 32 MB or 64 MB */
     HANDLE cancelEvent;             /* 借用的取消事件；不打断设备正在执行的命令。 */
     bool reserveTrack;              /* DVD+R（含双层）可选；DVD-R DAO及默认BD-R SRM预留，bdNoReserve显式例外。 */
+    bool dvdPlusRReserveTrack;       /* 独立请求仅实际DVD+R（含双层）预留；默认false，不改变reserveTrack。 */
     bool cycleTrayBeforeVerify;     /* 写后校验前按原版默认流程重新装载介质。 */
     bool performOpc;                /* 显式请求写入前功率校准，默认关闭。 */
     uint32_t layerBreakLba;          /* DVD+R DL用户指定L0容量，覆盖MDS；0采用MDS或按ECC块平衡。 */

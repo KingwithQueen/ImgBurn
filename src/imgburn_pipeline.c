@@ -517,6 +517,10 @@ static bool burn_check_dvd_layers(OpticalDrive* drive, uint32_t sectors, uint32_
     if (layerBreak >= sectors) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
     if (!capacity->changeable && layerBreak != capacity->sectors) { SetLastError(ERROR_INVALID_DATA); return false; } return true;
 }
+/* 专用请求仅按锁下复核的DVD+R类型消费；通用及原自动预留规则保持。 */
+static bool burn_track_reservation_required(const BurnConfig* config, MmcProfile profile, bool discovery) {
+    return profile == MMC_PROFILE_DVD_R_SEQ || profile == MMC_PROFILE_DVD_R_DL_SEQ || (profile == MMC_PROFILE_BD_R_SRM && !discovery && !config->bdNoReserve) || config->reserveTrack || (config->dvdPlusRReserveTrack && !discovery && !config->bdReOverwrite && (profile == MMC_PROFILE_DVD_PLUS_R || profile == MMC_PROFILE_DVD_PLUS_R_DL));
+}
 static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32_t sectors, uint32_t bdReEraseCapacity, PipelineProgressCallback callback, void* userData) {
     PipelineStats stats = {0};
     if (!config || !config->drive || (!discovery && !config->imagePath)) return burn_failure(&stats,ERROR_INVALID_PARAMETER,"Invalid burn configuration.",callback,userData);
@@ -657,7 +661,7 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
     if (config->performOpc) { snprintf(stats.statusMessage,sizeof(stats.statusMessage),"Performing optimum power calibration..."); if (callback) callback(&stats,userData); if (burn_cancelled(config,&stats,callback,userData)) goto cleanup; if (!mmc_perform_opc(config->drive)) { pipeline_failure(&stats,"Optimum power calibration failed.",callback,userData); goto cleanup; } }
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
     if (profile == MMC_PROFILE_CD_R) { if (!(cdImage ? mmc_send_cd_cue(config->drive,cdImage->cue,cdImage->cueBytes) : mmc_send_cd_mode1_cue(config->drive,stats.totalSectors))) { pipeline_failure(&stats,"Cannot send the CD-R cue sheet.",callback,userData); goto cleanup; } }
-    else if ((profile == MMC_PROFILE_DVD_R_SEQ || profile == MMC_PROFILE_DVD_R_DL_SEQ || (profile == MMC_PROFILE_BD_R_SRM && !discovery && !config->bdNoReserve) || config->reserveTrack) && !mmc_reserve_track(config->drive,stats.totalSectors)) { burn_device_failure(config->drive,&stats,"Cannot reserve the recording track.",callback,userData); goto cleanup; }
+    else if (burn_track_reservation_required(config,profile,discovery) && !mmc_reserve_track(config->drive,stats.totalSectors)) { burn_device_failure(config->drive,&stats,"Cannot reserve the recording track.",callback,userData); goto cleanup; }
     stats.state = PIPELINE_STATE_WRITING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),config->testMode ? "Device test writing CD-R SAO / DVD-R DAO..." : cdImage ? "Writing CD-R CUE SAO..." : profile == MMC_PROFILE_CD_R ? "Writing CD-R MODE1 SAO..." : (profile == MMC_PROFILE_DVD_R_SEQ || profile == MMC_PROFILE_DVD_R_DL_SEQ) ? "Writing DVD-R DAO..." : profile == MMC_PROFILE_BD_R_SRM ? "Writing BD-R SRM track..." : profile == MMC_PROFILE_BD_RE ? "Overwriting BD-RE user blocks..." : "Writing DVD+R track..."); DWORD start = GetTickCount(), previousTime = start; uint32_t previousLba = 0;
     if (profile == MMC_PROFILE_CD_R) {
         if (textRequested && !burn_cd_write_text(config,cdImage,&textLeadIn,textBuffer,&writeAttempted,&stats,callback,userData)) goto cleanup;

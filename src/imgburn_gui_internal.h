@@ -27,6 +27,7 @@ typedef struct {
     bool writeEject; /* 仅普通Write携带成功后弹盘偏好。 */
     bool skipWriteVerifyCycle; /* 仅普通Write携带跳过验证前重装的偏好。 */
     bool writePerformOpc; /* 仅普通Write携带显式OPC功率校准请求。 */
+    bool dvdPlusRReserveTrack; /* 仅普通Write携带独立DVD+R预留请求。 */
     bool discoveryEject; /* 仅品质测试携带独立的成功后弹盘偏好。 */
     bool skipDiscoveryVerifyCycle; /* 仅品质测试携带跳过校验前重装的偏好。 */
     bool discoveryPerformOpc; /* 仅品质测试携带独立的显式OPC请求。 */
