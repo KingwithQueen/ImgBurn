@@ -402,7 +402,7 @@ static bool job_drive(GuiJob* job) {
         else if (job->error == ERROR_NOT_SUPPORTED) job_text(job,job->bdReErase ? L"BD-RE清零仅支持已格式化、具备2048字节逻辑用户区的受支持BD-RE；不会自动格式化。\r\n" : L"当前擦除流程支持 CD-RW 和单层 DVD-RW。\r\n");
     }
     else if (job->operation == GUI_DISCOVERY_DISC) {
-        DiscoveryConfig config = {0}; config.drive = &drive; config.sectors = job->discoverySectors; config.writeSpeedKbps = job->speed; config.testMode = job->testMode; config.verifyAfterWrite = job->verify; config.ejectWhenDone = job->discoveryEject; config.ringBufferBytes = 32 * 1024 * 1024; config.cancelEvent = job->cancel; config.cycleTrayBeforeVerify = true;
+        DiscoveryConfig config = {0}; config.drive = &drive; config.sectors = job->discoverySectors; config.writeSpeedKbps = job->speed; config.testMode = job->testMode; config.verifyAfterWrite = job->verify; config.ejectWhenDone = job->discoveryEject; config.ringBufferBytes = 32 * 1024 * 1024; config.cancelEvent = job->cancel; config.cycleTrayBeforeVerify = !job->skipDiscoveryVerifyCycle;
         if (job->discoverySpeedMultiplier > 0) { MmcProfile profile = mmc_get_current_profile(&drive); config.writeSpeedKbps = (uint32_t)(job->discoverySpeedMultiplier * (profile == MMC_PROFILE_BD_R_SRM ? 4495.5 : profile == MMC_PROFILE_CD_R ? 176.4 : 1385.0) + 0.5); }
         ok = pipeline_discover_disc(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
         if (ok && job->testMode) job_text(job,L"品质测试的设备测试写入完成；未执行记录数据的回读校验。\r\n");
