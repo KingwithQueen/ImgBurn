@@ -517,9 +517,13 @@ static bool burn_check_dvd_layers(OpticalDrive* drive, uint32_t sectors, uint32_
     if (layerBreak >= sectors) { SetLastError(ERROR_NOT_SUPPORTED); return false; }
     if (!capacity->changeable && layerBreak != capacity->sectors) { SetLastError(ERROR_INVALID_DATA); return false; } return true;
 }
+/* 独立请求不扩展Discovery或BD-RE；媒体检查内部仍只为BD-R开放空预留轨。 */
+static bool burn_bd_no_reserve_requested(const BurnConfig* config, bool discovery) {
+    return config->bdNoReserve || (config->bdRNoReserveTrack && !discovery && !config->bdReOverwrite);
+}
 /* 专用请求仅按锁下复核的DVD+R类型消费；通用及原自动预留规则保持。 */
 static bool burn_track_reservation_required(const BurnConfig* config, MmcProfile profile, bool discovery) {
-    return profile == MMC_PROFILE_DVD_R_SEQ || profile == MMC_PROFILE_DVD_R_DL_SEQ || (profile == MMC_PROFILE_BD_R_SRM && !discovery && !config->bdNoReserve) || config->reserveTrack || (config->dvdPlusRReserveTrack && !discovery && !config->bdReOverwrite && (profile == MMC_PROFILE_DVD_PLUS_R || profile == MMC_PROFILE_DVD_PLUS_R_DL));
+    return profile == MMC_PROFILE_DVD_R_SEQ || profile == MMC_PROFILE_DVD_R_DL_SEQ || (profile == MMC_PROFILE_BD_R_SRM && !discovery && !burn_bd_no_reserve_requested(config,discovery)) || config->reserveTrack || (config->dvdPlusRReserveTrack && !discovery && !config->bdReOverwrite && (profile == MMC_PROFILE_DVD_PLUS_R || profile == MMC_PROFILE_DVD_PLUS_R_DL));
 }
 static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32_t sectors, uint32_t bdReEraseCapacity, PipelineProgressCallback callback, void* userData) {
     PipelineStats stats = {0};
@@ -568,9 +572,11 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
     RingBuffer rb = {0}; HANDLE producer = NULL; uint8_t* buffers = NULL; ProducerContext context = {0}; context.hSourceFile = source; context.rb = &rb; context.expectedBytes = (uint64_t)stats.totalSectors * sectorBytes; context.cd = cdImage; context.chunkBytes = chunkBytes; context.zeroSource = discovery; context.data = discovery || cueInput ? NULL : &dataSource;
     stats.state = PIPELINE_STATE_INITIALIZING; snprintf(stats.statusMessage,sizeof(stats.statusMessage),config->bdReOverwrite ? "Checking formatted BD-RE and the explicit overwrite source..." : discovery ? "Preparing Discovery in-memory zero data and checking writable media..." : "Checking blank CD-R, DVD-R/+R, DVD+R DL or BD-R SRM and source image..."); if (callback) callback(&stats,userData);
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
-    if (!burn_check_media(config->drive,stats.totalSectors,&profile,!discovery && !config->bdNoReserve,config->bdNoReserve,config->bdReOverwrite,&bdReInitial)) { pipeline_failure(&stats,config->bdReOverwrite ? "Require explicitly selected formatted BD-RE with enough consistent random writable user blocks." : "Require supported blank CD-R, DVD-R/+R, DVD+R DL or BD-R SRM with enough writable sectors.",callback,userData); goto cleanup; }
+    bool bdNoReserve = burn_bd_no_reserve_requested(config,discovery);
+    if (!burn_check_media(config->drive,stats.totalSectors,&profile,!discovery && !bdNoReserve,bdNoReserve,config->bdReOverwrite,&bdReInitial)) { pipeline_failure(&stats,config->bdReOverwrite ? "Require explicitly selected formatted BD-RE with enough consistent random writable user blocks." : "Require supported blank CD-R, DVD-R/+R, DVD+R DL or BD-R SRM with enough writable sectors.",callback,userData); goto cleanup; }
     if (bdReEraseCapacity && (profile != MMC_PROFILE_BD_RE || bdReInitial.sectors != bdReEraseCapacity)) { burn_failure(&stats,ERROR_MEDIA_CHANGED,"BD-RE zeroing capacity changed before writing.",callback,userData); goto cleanup; }
     if (config->bdNoReserve && profile != MMC_PROFILE_BD_R_SRM) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"BD no-reserve requires BD-R SRM media.",callback,userData); goto cleanup; }
+    if (bdNoReserve && config->reserveTrack && profile == MMC_PROFILE_BD_R_SRM) { burn_failure(&stats,ERROR_INVALID_PARAMETER,"BD-R no-reserve cannot be combined with reservation.",callback,userData); goto cleanup; }
     if ((config->bdWriteType || config->bdDisableVnr) && profile != MMC_PROFILE_BD_R_SRM) { burn_failure(&stats,ERROR_NOT_SUPPORTED,"Explicit BD-R write type or VNR selection requires BD-R SRM media.",callback,userData); goto cleanup; }
     bool dualLayer = profile == MMC_PROFILE_DVD_PLUS_R_DL || profile == MMC_PROFILE_DVD_R_DL_SEQ; uint32_t layerBreak = 0;
     /* MDS的DVD层信息属于来源；BD目标按逻辑数据流写入，不用它设置目标层界。 */
@@ -627,7 +633,7 @@ static bool burn_image_internal(const BurnConfig* config, bool discovery, uint32
     if (!config->drive->isLocked) { if (!spti_lock_drive(config->drive,true)) { pipeline_failure(&stats,"Cannot lock the target volume.",callback,userData); goto cleanup; } ownedLock = true; }
     if (!mmc_prevent_removal(config->drive,true)) { pipeline_failure(&stats,"Cannot prevent medium removal.",callback,userData); goto cleanup; } prevented = true;
     if (burn_cancelled(config,&stats,callback,userData)) goto cleanup;
-    if (!burn_check_media(config->drive,stats.totalSectors,&profile,!discovery && !config->bdNoReserve,config->bdNoReserve,config->bdReOverwrite,&bdReChecked)) { pipeline_failure(&stats,"Target media changed before writing.",callback,userData); goto cleanup; }
+    if (!burn_check_media(config->drive,stats.totalSectors,&profile,!discovery && !bdNoReserve,bdNoReserve,config->bdReOverwrite,&bdReChecked)) { pipeline_failure(&stats,"Target media changed before writing.",callback,userData); goto cleanup; }
     if (profile == MMC_PROFILE_BD_RE && !bd_re_same_snapshot(&bdReInitial,&bdReChecked)) { burn_failure(&stats,ERROR_MEDIA_CHANGED,"BD-RE format or writable geometry changed under the volume lock.",callback,userData); goto cleanup; }
     if (dualLayer && !burn_check_dvd_layers(config->drive,stats.totalSectors,layerBreak,&layerCapacity)) { pipeline_failure(&stats,"DVD layer capacity changed before writing.",callback,userData); goto cleanup; }
     if (textRequested) {

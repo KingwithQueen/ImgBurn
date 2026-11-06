@@ -344,6 +344,10 @@ static void job_bd_format_capacities(GuiJob* job, OpticalDrive* drive) {
     for (unsigned i = 0; i < capacity.formatCount; i++) { const MmcFormattableCapacity* format = &capacity.formats[i]; job_text(job,L"可格式化 [%u]：FT=0x%02X，块数=%u，原始TDP=0x%06X\r\n",i,format->formatType,format->blockCount,format->typeDependentParameter); }
 }
 
+/* 已有空预留轨仅是界面候选；来源长度和轨道结构仍由写入流程复核。 */
+static bool job_bd_r_reserved_candidate(const MmcDiscInfo* disc) {
+    return disc->currentProfile == MMC_PROFILE_BD_R_SRM && disc->discStatus == DISC_STATUS_EMPTY && !disc->isErasable && !disc->lastSessionStatus && disc->numSessions == 1 && disc->firstTrack == 1 && disc->lastTrack == 2 && disc->firstTrackLastSession == 1;
+}
 static bool job_drive(GuiJob* job) {
     OpticalDrive drive; bool opened = job->operation == GUI_DRIVE_INFO || job->bdReOverwrite || job->bdReErase ? spti_open_drive_passive(&drive,job->drive) : spti_open_drive(&drive,job->drive,job->operation == GUI_WRITE_DISC || job->operation == GUI_DISCOVERY_DISC); if (!opened) return false;
     bool ok = false; uint32_t last = 0, bytes = 0; bool ready = mmc_test_unit_ready(&drive);
@@ -362,6 +366,7 @@ static bool job_drive(GuiJob* job) {
             if (bd) { job_bd_capacity(job,&drive,&disc); bdCapacityShown = true; }
             /* 只供原Write按钮显示空白介质候选；完整能力/布局仍由既有写入worker检查。 */
             job->writeMediaReady = disc.discStatus == DISC_STATUS_EMPTY && !disc.isErasable && !disc.lastSessionStatus && disc.numSessions == 1 && disc.firstTrack == 1 && disc.lastTrack == 1 && (disc.currentProfile == MMC_PROFILE_CD_R || disc.currentProfile == MMC_PROFILE_DVD_R_SEQ || disc.currentProfile == MMC_PROFILE_DVD_R_DL_SEQ || disc.currentProfile == MMC_PROFILE_DVD_PLUS_R || disc.currentProfile == MMC_PROFILE_DVD_PLUS_R_DL || disc.currentProfile == MMC_PROFILE_BD_R_SRM);
+            job->bdRReservedCandidate = job_bd_r_reserved_candidate(&disc);
             job->eraseSupported = disc.isErasable && (disc.currentProfile == MMC_PROFILE_CD_RW || disc.currentProfile == MMC_PROFILE_DVD_RW_SEQ || disc.currentProfile == MMC_PROFILE_DVD_RW_RO);
             if (disc.currentProfile >= MMC_PROFILE_CD_ROM && disc.currentProfile <= MMC_PROFILE_CD_RW && disc.numSessions > 1) {
                 MmcCdFullToc* toc = calloc(1,sizeof(*toc));
@@ -412,7 +417,7 @@ static bool job_drive(GuiJob* job) {
         else if (job->error == ERROR_DISK_FULL) job_text(job,L"所选扇区数超过光盘可写容量。\r\n");
     }
     else if (job->operation == GUI_WRITE_DISC) {
-        BurnConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.writeSpeedKbps = job->speed; config.keepCurrentWriteSpeed = job->keepCurrentWriteSpeed; config.verifyAfterWrite = job->verify; config.ejectWhenDone = job->writeEject; config.ringBufferBytes = 32 * 1024 * 1024; config.cancelEvent = job->cancel; config.cycleTrayBeforeVerify = !job->skipWriteVerifyCycle; config.performOpc = job->writePerformOpc; config.dvdPlusRReserveTrack = job->dvdPlusRReserveTrack; config.testMode = job->testMode; config.layerBreakLba = job->writeLayerBreak; config.bdReOverwrite = job->bdReOverwrite; config.bdWriteType = job->bdWriteType; config.bdDisableVnr = job->bdDisableVnr; if (job->bdReOverwrite) { config.keepCurrentWriteSpeed = true; config.cycleTrayBeforeVerify = false; }
+        BurnConfig config = {0}; config.drive = &drive; config.imagePath = job->sources[0].path; config.writeSpeedKbps = job->speed; config.keepCurrentWriteSpeed = job->keepCurrentWriteSpeed; config.verifyAfterWrite = job->verify; config.ejectWhenDone = job->writeEject; config.ringBufferBytes = 32 * 1024 * 1024; config.cancelEvent = job->cancel; config.cycleTrayBeforeVerify = !job->skipWriteVerifyCycle; config.performOpc = job->writePerformOpc; config.dvdPlusRReserveTrack = job->dvdPlusRReserveTrack; config.bdRNoReserveTrack = job->bdRNoReserveTrack; config.testMode = job->testMode; config.layerBreakLba = job->writeLayerBreak; config.bdReOverwrite = job->bdReOverwrite; config.bdWriteType = job->bdWriteType; config.bdDisableVnr = job->bdDisableVnr; if (job->bdReOverwrite) { config.keepCurrentWriteSpeed = true; config.cycleTrayBeforeVerify = false; }
         if (job->bdWriteType != BD_WRITE_TYPE_CURRENT || job->bdDisableVnr) job_text(job,L"本次BD-R选项：写类型%ls，VNR关闭%u；MODE页不改变BD物理写法，也不提供追加或多会话。备用区资格仍须单独复核。\r\n",job->bdWriteType == BD_WRITE_TYPE_INCREMENTAL ? L"Incremental" : job->bdWriteType == BD_WRITE_TYPE_SAO ? L"SAO" : L"保持当前",job->bdDisableVnr);
         ok = pipeline_burn_image(&config,job_pipeline_progress,job); if (!ok) job->error = GetLastError();
         if (ok && job->testMode) job_text(job,L"设备测试写入完成；未执行记录数据的回读校验。\r\n");
