@@ -397,6 +397,10 @@ static bool gui_read_rate(const wchar_t* text, double* value) {
     wchar_t* end; double rate = wcstod(text,&end); if ((*end == L'x' || *end == L'X') && !end[1]) end++;
     if (!text[0] || *end || !isfinite(rate) || rate < 1 || rate * 4495.5 + 0.5 >= UINT32_MAX) return false; *value = rate; return true;
 }
+/* 音频速度按目标格式参与校验，禁用控件仍保留旧草稿。 */
+static bool gui_read_audio_used(const GuiWindow* ui) {
+    const wchar_t* extension = wcsrchr(ui->readImage,L'.'); return extension && (!_wcsicmp(extension,L".cue") || (!_wcsicmp(extension,L".mds") && ui->rawCdMds));
+}
 static bool gui_options_number(const wchar_t* text, uint32_t maximum, uint32_t* value) {
     *value = 0; if (!text || !text[0]) return false; uint32_t result = 0;
     for (const wchar_t* p = text; *p; p++) { if (*p < L'0' || *p > L'9') return false; uint32_t digit = (uint32_t)(*p - L'0'); if (digit > maximum || result > (maximum - digit) / 10) return false; result = result * 10 + digit; }
@@ -477,7 +481,7 @@ static void gui_menu(GuiWindow* ui) {
     if (read && ui->readText) EnableWindow(ui->readText,idle && readExtension && !_wcsicmp(readExtension,L".cue"));
     if (read && ui->readRawMds) EnableWindow(ui->readRawMds,idle && readExtension && !_wcsicmp(readExtension,L".mds"));
     if (read && ui->readSplit) EnableWindow(ui->readSplit,idle && (!readExtension || _wcsicmp(readExtension,L".cue")));
-    if (read) { EnableWindow(ui->readSpeed,idle); EnableWindow(ui->readAudioSpeed,idle && readExtension && (!_wcsicmp(readExtension,L".cue") || (!_wcsicmp(readExtension,L".mds") && ui->rawCdMds))); EnableWindow(ui->readRetries,idle); EnableWindow(ui->readEject,idle); }
+    if (read) { EnableWindow(ui->readSpeed,idle); EnableWindow(ui->readAudioSpeed,idle && gui_read_audio_used(ui)); EnableWindow(ui->readRetries,idle); EnableWindow(ui->readEject,idle); }
     if (ui->sessionPregaps) { const wchar_t* extension = wcsrchr(ui->sourceImage,L'.'); EnableWindow(ui->sessionPregaps,idle && (read ? readExtension && !_wcsicmp(readExtension,L".cue") : !ui->verifyAgainstImage || (extension && !_wcsicmp(extension,L".cue")))); }
     if (verify) { EnableWindow(ui->compare,idle); EnableWindow(ui->destination,idle && ui->verifyAgainstImage); EnableWindow(GetDlgItem(ui->window,UI_SOURCE_FILE),idle && ui->verifyAgainstImage); }
     if (discovery) {
@@ -1428,7 +1432,7 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
         }
         if (!ui->readRetryText[0] || *end || retries > 20 || ui->readRetryText[0] == L'-') { MessageBoxW(ui->window,L"软件重试次数应为 0 至 20。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
         if (!gui_read_rate(ui->readRate,&rate)) { gui_read_rate_error(ui,UI_READ_SPEED); return; }
-        if (!gui_read_rate(ui->readAudioRate,&rate)) { gui_read_rate_error(ui,UI_READ_AUDIO_SPEED); return; }
+        if (gui_read_audio_used(ui) && !gui_read_rate(ui->readAudioRate,&rate)) { gui_read_rate_error(ui,UI_READ_AUDIO_SPEED); return; }
     }
     GuiJob* job = gui_job(ui,operation,sources,count); if (job) { job->bdReOverwrite = bdReOverwrite; job->bdReErase = bdReErase; job->writeLayerBreak = writeLayer; job->replaceExisting = replace; job->discoverySectors = discoverySectors; job->discoverySpeedMultiplier = discoverySpeed; job->discoveryBufferMiB = discoveryBufferMiB; }
     if (!gui_launch(ui,job)) MessageBoxW(ui->window, L"无法启动操作。", L"ImgBurn", MB_OK | MB_ICONERROR);
