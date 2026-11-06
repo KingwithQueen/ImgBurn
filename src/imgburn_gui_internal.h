@@ -33,6 +33,7 @@ typedef struct {
     bool discoveryEject; /* 仅品质测试携带独立的成功后弹盘偏好。 */
     bool skipDiscoveryVerifyCycle; /* 仅品质测试携带跳过校验前重装的偏好。 */
     bool discoveryPerformOpc; /* 仅品质测试携带独立的显式OPC请求。 */
+    uint32_t discoveryBufferMiB; /* 仅品质测试携带完整解析后的MiB大小。 */
     uint32_t readSplitSectors;
     unsigned readRetries;
     bool readAutoSplit, readEject, setReadSpeeds;
