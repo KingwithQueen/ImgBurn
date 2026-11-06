@@ -1235,6 +1235,58 @@ static void gui_discovery_error(GuiWindow* ui, int control, const wchar_t* messa
     free(context.text);
 }
 
+typedef struct {
+    GuiWindow* ui;
+    HWND window, child, edit, focus;
+    uint64_t activitySerial;
+    int control, length, editId;
+    LONG_PTR style, editStyle;
+    LRESULT selection;
+    DWORD first, last;
+    wchar_t type[32], model[24], *text, *scratch;
+} GuiReadRateErrorContext;
+
+/* 数据和音频分别保护自己的错误草稿，不接管提示期间的新焦点或任务。 */
+static bool gui_read_rate_error_capture(GuiWindow* ui, int control, GuiReadRateErrorContext* context) {
+    memset(context,0,sizeof(*context)); context->ui = ui; context->window = ui->window; context->control = control;
+    if (!IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)ui || ui->mode != GUI_READ || ui->job || ui->tool || ui->completing || !IsWindowEnabled(context->window)) return false;
+    if (control != UI_READ_SPEED && control != UI_READ_AUDIO_SPEED) return false;
+    const wchar_t* model = control == UI_READ_SPEED ? ui->readRate : ui->readAudioRate;
+    if (!wmemchr(model,0,ARRAYSIZE(context->model))) return false; wcscpy(context->model,model); context->activitySerial = ui->activitySerial;
+    context->child = GetDlgItem(context->window,control);
+    if (!context->child || !IsWindow(context->child) || context->child != (control == UI_READ_SPEED ? ui->readSpeed : ui->readAudioSpeed) || GetParent(context->child) != context->window || GetDlgCtrlID(context->child) != control || !IsWindowEnabled(context->child)) return false;
+    context->style = GetWindowLongPtrW(context->child,GWL_STYLE);
+    if (!GetClassNameW(context->child,context->type,ARRAYSIZE(context->type)) || _wcsicmp(context->type,L"ComboBox") || (context->style & 3) != CBS_DROPDOWN) return false;
+    context->selection = SendMessageW(context->child,CB_GETCURSEL,0,0); COMBOBOXINFO info = {0}; info.cbSize = (DWORD)sizeof(info); if (!GetComboBoxInfo(context->child,&info)) return false; context->edit = info.hwndItem;
+    wchar_t type[32] = L"";
+    if (!IsWindow(context->edit) || !IsWindowEnabled(context->edit) || GetParent(context->edit) != context->child || !GetClassNameW(context->edit,type,ARRAYSIZE(type)) || _wcsicmp(type,L"Edit")) return false;
+    context->editId = GetDlgCtrlID(context->edit); context->editStyle = GetWindowLongPtrW(context->edit,GWL_STYLE); SendMessageW(context->edit,EM_GETSEL,(WPARAM)&context->first,(LPARAM)&context->last);
+    context->length = GetWindowTextLengthW(context->child); if (context->length < 0 || context->length == INT_MAX) return false;
+    size_t capacity = (size_t)context->length + 1; if (capacity > SIZE_MAX / 2 || capacity * 2 > SIZE_MAX / sizeof(wchar_t)) return false;
+    context->text = calloc(capacity * 2,sizeof(wchar_t)); if (!context->text) return false; context->scratch = context->text + capacity;
+    if (GetWindowTextW(context->child,context->text,context->length + 1) != context->length || context->text[context->length] || GetWindowTextLengthW(context->child) != context->length) return false;
+    context->focus = GetFocus(); return true;
+}
+static bool gui_read_rate_error_current(const GuiReadRateErrorContext* context, bool focused) {
+    if (!IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)context->ui) return false;
+    GuiWindow* ui = context->ui;
+    if (ui->window != context->window || ui->mode != GUI_READ || ui->job || ui->tool || ui->completing || ui->activitySerial != context->activitySerial || !IsWindowEnabled(context->window)) return false;
+    const wchar_t* model = context->control == UI_READ_SPEED ? ui->readRate : ui->readAudioRate;
+    if (!wmemchr(model,0,ARRAYSIZE(context->model)) || wcscmp(model,context->model)) return false;
+    HWND child = context->child; wchar_t type[32] = L"";
+    if (!IsWindow(child) || GetDlgItem(context->window,context->control) != child || child != (context->control == UI_READ_SPEED ? ui->readSpeed : ui->readAudioSpeed) || GetParent(child) != context->window || GetDlgCtrlID(child) != context->control || !IsWindowEnabled(child) || GetWindowLongPtrW(child,GWL_STYLE) != context->style || !GetClassNameW(child,type,ARRAYSIZE(type)) || wcscmp(type,context->type) || SendMessageW(child,CB_GETCURSEL,0,0) != context->selection) return false;
+    COMBOBOXINFO info = {0}; info.cbSize = (DWORD)sizeof(info); if (!GetComboBoxInfo(child,&info) || info.hwndItem != context->edit) return false;
+    if (!IsWindow(context->edit) || !IsWindowEnabled(context->edit) || GetParent(context->edit) != child || GetDlgCtrlID(context->edit) != context->editId || GetWindowLongPtrW(context->edit,GWL_STYLE) != context->editStyle || !GetClassNameW(context->edit,type,ARRAYSIZE(type)) || _wcsicmp(type,L"Edit")) return false;
+    DWORD first = 0, last = 0; SendMessageW(context->edit,EM_GETSEL,(WPARAM)&first,(LPARAM)&last); if (first != context->first || last != context->last) return false;
+    if (GetWindowTextLengthW(child) != context->length || GetWindowTextW(child,context->scratch,context->length + 1) != context->length || context->scratch[context->length] || GetWindowTextLengthW(child) != context->length || wcscmp(context->text,context->scratch)) return false;
+    HWND focus = GetFocus(); return focused ? focus == child || focus == context->edit : focus == context->focus;
+}
+static void gui_read_rate_error(GuiWindow* ui, int control) {
+    HWND window = ui->window; GuiReadRateErrorContext context; bool captured = gui_read_rate_error_capture(ui,control,&context); MessageBoxW(window,L"请输入有效读取速度，例如 4x 或 MAX。",L"ImgBurn",MB_OK | MB_ICONINFORMATION);
+    if (captured && gui_read_rate_error_current(&context,false)) { SetFocus(context.child); if (gui_read_rate_error_current(&context,true)) SendMessageW(context.edit,EM_SETSEL,0,-1); }
+    free(context.text);
+}
+
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
     if (ui->job) return; gui_read_controls(ui);
     bool erase = operation == GUI_ERASE_QUICK || operation == GUI_ERASE_FULL, discovery = operation == GUI_DISCOVERY_DISC;
@@ -1332,7 +1384,8 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
         bool automatic; uint64_t bytes; double rate; wchar_t* end; unsigned long retries = wcstoul(ui->readRetryText,&end,10); const wchar_t* extension = wcsrchr(ui->readImage,L'.'); bool cue = extension && !_wcsicmp(extension,L".cue");
         if (!cue && (!gui_read_split(ui->readSplitText,&automatic,&bytes) || (extension && !_wcsicmp(extension,L".iso") && bytes))) { MessageBoxW(ui->window,L"请选择 Auto、不分卷，或为 MDS 输入有效的自定义 MiB 容量。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
         if (!ui->readRetryText[0] || *end || retries > 20 || ui->readRetryText[0] == L'-') { MessageBoxW(ui->window,L"软件重试次数应为 0 至 20。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
-        if (!gui_read_rate(ui->readRate,&rate) || !gui_read_rate(ui->readAudioRate,&rate)) { MessageBoxW(ui->window,L"请输入有效读取速度，例如 4x 或 MAX。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
+        if (!gui_read_rate(ui->readRate,&rate)) { gui_read_rate_error(ui,UI_READ_SPEED); return; }
+        if (!gui_read_rate(ui->readAudioRate,&rate)) { gui_read_rate_error(ui,UI_READ_AUDIO_SPEED); return; }
     }
     GuiJob* job = gui_job(ui,operation,sources,count); if (job) { job->bdReOverwrite = bdReOverwrite; job->bdReErase = bdReErase; job->writeLayerBreak = writeLayer; job->replaceExisting = replace; job->discoverySectors = discoverySectors; job->discoverySpeedMultiplier = discoverySpeed; job->discoveryBufferMiB = discoveryBufferMiB; }
     if (!gui_launch(ui,job)) MessageBoxW(ui->window, L"无法启动操作。", L"ImgBurn", MB_OK | MB_ICONERROR);
