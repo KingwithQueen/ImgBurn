@@ -1287,6 +1287,46 @@ static void gui_read_rate_error(GuiWindow* ui, int control) {
     free(context.text);
 }
 
+typedef struct {
+    GuiWindow* ui;
+    HWND window, destination, focus;
+    uint64_t activitySerial;
+    LONG_PTR style;
+    BOOL enabled;
+    wchar_t type[32], image[MAX_PATH], split[40];
+} GuiReadSplitErrorContext;
+
+/* 主页没有分卷编辑器；旧提示仅在原目标和偏好未变时引导到真实读取选项。 */
+static bool gui_read_split_error_capture(GuiWindow* ui, GuiReadSplitErrorContext* context) {
+    memset(context,0,sizeof(*context)); context->ui = ui; context->window = ui->window;
+    if (!IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)ui || ui->mode != GUI_READ || ui->job || ui->tool || ui->completing || !IsWindowEnabled(context->window)) return false;
+    if (!wmemchr(ui->readImage,0,MAX_PATH) || !wmemchr(ui->readSplitText,0,ARRAYSIZE(context->split))) return false;
+    wcscpy(context->image,ui->readImage); wcscpy(context->split,ui->readSplitText); context->activitySerial = ui->activitySerial; context->destination = ui->destination;
+    HWND child = context->destination;
+    if (!IsWindow(child) || GetDlgItem(context->window,UI_DEST_EDIT) != child || GetParent(child) != context->window || GetDlgCtrlID(child) != UI_DEST_EDIT) return false;
+    context->style = GetWindowLongPtrW(child,GWL_STYLE); context->enabled = IsWindowEnabled(child);
+    if (!GetClassNameW(child,context->type,ARRAYSIZE(context->type)) || _wcsicmp(context->type,L"ComboBox") || (context->style & 3) != CBS_DROPDOWN) return false;
+    int length = GetWindowTextLengthW(child); wchar_t actual[MAX_PATH] = L"";
+    if (length < 0 || length >= MAX_PATH || GetWindowTextW(child,actual,MAX_PATH) != length || actual[length] || GetWindowTextLengthW(child) != length || wcscmp(actual,context->image)) return false;
+    context->focus = GetFocus(); return true;
+}
+static bool gui_read_split_error_current(const GuiReadSplitErrorContext* context) {
+    if (!IsWindow(context->window) || GetWindowLongPtrW(context->window,GWLP_USERDATA) != (LONG_PTR)context->ui) return false;
+    GuiWindow* ui = context->ui;
+    if (ui->window != context->window || ui->mode != GUI_READ || ui->job || ui->tool || ui->completing || ui->activitySerial != context->activitySerial || !IsWindowEnabled(context->window)) return false;
+    if (!wmemchr(ui->readImage,0,MAX_PATH) || !wmemchr(ui->readSplitText,0,ARRAYSIZE(context->split)) || wcscmp(ui->readImage,context->image) || wcscmp(ui->readSplitText,context->split)) return false;
+    HWND child = context->destination; wchar_t type[32] = L"";
+    if (!IsWindow(child) || ui->destination != child || GetDlgItem(context->window,UI_DEST_EDIT) != child || GetParent(child) != context->window || GetDlgCtrlID(child) != UI_DEST_EDIT || IsWindowEnabled(child) != context->enabled || GetWindowLongPtrW(child,GWL_STYLE) != context->style || !GetClassNameW(child,type,ARRAYSIZE(type)) || wcscmp(type,context->type)) return false;
+    int length = GetWindowTextLengthW(child); wchar_t actual[MAX_PATH] = L"";
+    if (length < 0 || length >= MAX_PATH || GetWindowTextW(child,actual,MAX_PATH) != length || actual[length] || GetWindowTextLengthW(child) != length || wcscmp(actual,context->image)) return false;
+    return GetFocus() == context->focus;
+}
+static void gui_read_split_error(GuiWindow* ui, const wchar_t* message) {
+    HWND window = ui->window; GuiReadSplitErrorContext context; bool captured = gui_read_split_error_capture(ui,&context); MessageBoxW(window,message,L"ImgBurn",MB_OK | MB_ICONINFORMATION);
+    if (!captured || !gui_read_split_error_current(&context)) return;
+    gui_tool_open(ui,GUI_READ_OPTIONS);
+}
+
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
     if (ui->job) return; gui_read_controls(ui);
     bool erase = operation == GUI_ERASE_QUICK || operation == GUI_ERASE_FULL, discovery = operation == GUI_DISCOVERY_DISC;
@@ -1382,7 +1422,10 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
     }
     if (operation == GUI_READ_DISC) {
         bool automatic; uint64_t bytes; double rate; wchar_t* end; unsigned long retries = wcstoul(ui->readRetryText,&end,10); const wchar_t* extension = wcsrchr(ui->readImage,L'.'); bool cue = extension && !_wcsicmp(extension,L".cue");
-        if (!cue && (!gui_read_split(ui->readSplitText,&automatic,&bytes) || (extension && !_wcsicmp(extension,L".iso") && bytes))) { MessageBoxW(ui->window,L"请选择 Auto、不分卷，或为 MDS 输入有效的自定义 MiB 容量。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
+        if (!cue) {
+            if (!gui_read_split(ui->readSplitText,&automatic,&bytes)) { gui_read_split_error(ui,L"分卷设置无效。请在“读取选项”中选择 Auto、不分卷，或为 MDS 输入有效的自定义 MiB 容量。"); return; }
+            if (extension && !_wcsicmp(extension,L".iso") && bytes) { gui_read_split_error(ui,L"ISO 目标不支持自定义分卷。请在“读取选项”中选择 Auto 或不分卷，或将目标改为 MDS。"); return; }
+        }
         if (!ui->readRetryText[0] || *end || retries > 20 || ui->readRetryText[0] == L'-') { MessageBoxW(ui->window,L"软件重试次数应为 0 至 20。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return; }
         if (!gui_read_rate(ui->readRate,&rate)) { gui_read_rate_error(ui,UI_READ_SPEED); return; }
         if (!gui_read_rate(ui->readAudioRate,&rate)) { gui_read_rate_error(ui,UI_READ_AUDIO_SPEED); return; }
