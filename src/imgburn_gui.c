@@ -531,15 +531,17 @@ static bool gui_read_edit_error_current(const GuiReadEditErrorContext* context, 
     if (GetWindowTextLengthW(child) != context->length || GetWindowTextW(child,context->scratch,context->length + 1) != context->length || context->scratch[context->length] || GetWindowTextLengthW(child) != context->length || wcscmp(context->text,context->scratch)) return false;
     HWND focus = GetFocus(); return focused ? focus == child || focus == context->edit : focus == context->focus;
 }
-static void gui_read_edit_error(GuiWindow* ui) {
-    HWND window = ui->window; GuiReadEditErrorContext context; bool captured = gui_read_edit_error_capture(ui,&context); MessageBoxW(window,L"请输入 ISO、CUE 或 MDS 目标文件路径（1至259字符）。",L"ImgBurn",MB_OK | MB_ICONINFORMATION);
+static void gui_read_edit_error(GuiWindow* ui, const wchar_t* message) {
+    HWND window = ui->window; GuiReadEditErrorContext context; bool captured = gui_read_edit_error_capture(ui,&context); MessageBoxW(window,message,L"ImgBurn",MB_OK | MB_ICONINFORMATION);
     if (captured && gui_read_edit_error_current(&context,false)) { SetFocus(context.child); if (gui_read_edit_error_current(&context,true)) SendMessageW(context.edit,EM_SETSEL,0,-1); }
     free(context.text);
 }
 
 static void gui_read_edit_confirm(GuiWindow* ui) {
     if (!gui_read_edit_entry(ui) || !ui->readEditing) return; wchar_t path[MAX_PATH] = L"";
-    if (!IsWindow(ui->destination) || GetDlgItem(ui->window,UI_DEST_EDIT) != ui->destination || !gui_read_edit_path(ui->destination,path)) { gui_read_edit_error(ui); return; }
+    if (!IsWindow(ui->destination) || GetDlgItem(ui->window,UI_DEST_EDIT) != ui->destination || !gui_read_edit_path(ui->destination,path)) { gui_read_edit_error(ui,L"请输入 ISO、CUE 或 MDS 目标文件路径（1至259字符）。"); return; }
+    DWORD attributes = GetFileAttributesW(path);
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) { gui_read_edit_error(ui,L"目标路径已是目录。请输入 ISO、CUE 或 MDS 目标文件路径。"); return; }
     bool cached = !wcscmp(path,ui->readImage) && ui->readDestinationReady && !_wcsicmp(path,ui->readDestinationQuery);
     wcscpy(ui->readImage,path);
     if (!cached) { ui->readDestinationReady = ui->readDestinationAttempted = false; ui->readDestinationTotalBytes = ui->readDestinationFreeBytes = 0; ui->readDestinationQuery[0] = 0; }
