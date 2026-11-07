@@ -541,7 +541,13 @@ static void gui_read_edit_confirm(GuiWindow* ui) {
     if (!gui_read_edit_entry(ui) || !ui->readEditing) return; wchar_t path[MAX_PATH] = L"";
     if (!IsWindow(ui->destination) || GetDlgItem(ui->window,UI_DEST_EDIT) != ui->destination || !gui_read_edit_path(ui->destination,path)) { gui_read_edit_error(ui,L"请输入 ISO、CUE 或 MDS 目标文件路径（1至259字符）。"); return; }
     DWORD attributes = GetFileAttributesW(path);
-    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) { gui_read_edit_error(ui,L"目标路径已是目录。请输入 ISO、CUE 或 MDS 目标文件路径。"); return; }
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        DWORD error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
+            if (!error) error = ERROR_GEN_FAILURE; wchar_t message[160]; swprintf(message,ARRAYSIZE(message),L"无法查询目标路径属性（错误 %lu）。请确认目标路径可访问后重试。",error);
+            gui_read_edit_error(ui,message); return;
+        }
+    } else if (attributes & FILE_ATTRIBUTE_DIRECTORY) { gui_read_edit_error(ui,L"目标路径已是目录。请输入 ISO、CUE 或 MDS 目标文件路径。"); return; }
     bool cached = !wcscmp(path,ui->readImage) && ui->readDestinationReady && !_wcsicmp(path,ui->readDestinationQuery);
     wcscpy(ui->readImage,path);
     if (!cached) { ui->readDestinationReady = ui->readDestinationAttempted = false; ui->readDestinationTotalBytes = ui->readDestinationFreeBytes = 0; ui->readDestinationQuery[0] = 0; }
