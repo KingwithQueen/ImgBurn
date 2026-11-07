@@ -1477,6 +1477,18 @@ static void gui_read_split_error(GuiWindow* ui, const wchar_t* message) {
     gui_tool_open(ui,GUI_READ_OPTIONS);
 }
 
+/* 仅诊断已确认目标的当前属性；错误提示返回后不接管新的界面意图。 */
+static bool gui_read_start_target(GuiWindow* ui, bool* exists) {
+    *exists = false; DWORD attributes = GetFileAttributesW(ui->readImage);
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        DWORD error = GetLastError(); if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return true;
+        if (!error) error = ERROR_GEN_FAILURE; wchar_t message[160]; swprintf(message,ARRAYSIZE(message),L"无法查询目标路径属性（错误 %lu）。请确认目标路径可访问后重试。",error);
+        MessageBoxW(ui->window,message,L"ImgBurn",MB_OK | MB_ICONINFORMATION); return false;
+    }
+    if (attributes & FILE_ATTRIBUTE_DIRECTORY) { MessageBoxW(ui->window,L"目标路径已是目录。请选择 ISO、CUE 或 MDS 目标文件后重新读取。",L"ImgBurn",MB_OK | MB_ICONINFORMATION); return false; }
+    *exists = true; return true;
+}
+
 static void gui_start(GuiWindow* ui, GuiOperation operation) {
     if (ui->job || ui->readEditing) return; gui_read_controls(ui);
     bool erase = operation == GUI_ERASE_QUICK || operation == GUI_ERASE_FULL, discovery = operation == GUI_DISCOVERY_DISC;
@@ -1563,11 +1575,14 @@ static void gui_start(GuiWindow* ui, GuiOperation operation) {
             wchar_t path[MAX_PATH]; if (!gui_destination_file(ui,GUI_READ,path,readFilter)) return;
             wcscpy(ui->readImage,path); if (ui->destination) SetWindowTextW(ui->destination,path); replace = GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES;
         }
-        else if (GetFileAttributesW(ui->readImage) != INVALID_FILE_ATTRIBUTES) {
-            GuiReadReplaceContext context; gui_read_replace_context(ui,&context);
-            if (MessageBoxW(context.window,L"目标文件已存在，是否替换？",L"ImgBurn",MB_YESNO | MB_ICONQUESTION) != IDYES) return;
-            if (!gui_read_replace_current(ui,&context)) return;
-            replace = true;
+        else {
+            bool exists; if (!gui_read_start_target(ui,&exists)) return;
+            if (exists) {
+                GuiReadReplaceContext context; gui_read_replace_context(ui,&context);
+                if (MessageBoxW(context.window,L"目标文件已存在，是否替换？",L"ImgBurn",MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+                if (!gui_read_replace_current(ui,&context)) return;
+                if (!gui_read_start_target(ui,&replace)) return;
+            }
         }
     }
     if (operation == GUI_READ_DISC) {
